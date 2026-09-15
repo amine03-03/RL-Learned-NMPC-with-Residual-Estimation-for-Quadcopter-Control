@@ -1123,7 +1123,16 @@ def make_pid_ctrl(gains=None):
 # --------------------------------------------------------------------------- #
 # §5.9  cost map
 # --------------------------------------------------------------------------- #
-Q_LO, Q_HI = 1.0, 1.0e5          # the learned weights span ~5 orders of magnitude
+#: Range of a learned stage weight.  Five orders of magnitude, mapped
+#: **logarithmically**: S_ii = Q_LO * (Q_HI/Q_LO)^sigmoid(z), so sigmoid(z)=0.5
+#: lands on the geometric mean sqrt(Q_LO*Q_HI) = 3.16 rather than the arithmetic
+#: one.  See C-7: a linear map over five decades puts a zero-initialised head at
+#: ~5e4, which is 660x the terminal matrix, and at N=1 the only free variable is
+#: du -- so the solver returns |du| = 1.9e-5, the controller degenerates to pure
+#: feed-forward, and the cost map has no effect on anything.  A linear map also
+#: wastes almost all of the policy's resolution: 90 % of its output range would
+#: sit inside the top decade.
+Q_LO, Q_HI = 1.0e-2, 1.0e3
 REPS = ("diag", "chol", "full")
 REP_DIM = {"diag": NTAU, "chol": NTAU * (NTAU + 1) // 2, "full": NTAU * NTAU}
 _TRIL = np.tril_indices(NTAU)
@@ -1153,34 +1162,48 @@ def costmap_head(theta, obs, rep, N):
     return z.reshape(obs.shape[0], N, REP_DIM[rep])
 
 
-def costmap_apply(theta, obs, rep, N):
-    """-> S (B,N,13,13) PSD, c (B,N,13).
+def costmap_from_z(z, rep):
+    """Raw head output (B,N,REP_DIM) -> (S (B,N,13,13) PSD, c (B,N,13)).
 
-    Initialisation asymmetry, recorded because it matters (§5.9): with a
-    0.1-scaled zero-bias head, ``chol``/``full`` start at A ~ 0 so S ~ Q_LO*I --
-    the quadratic term is effectively *absent* at init -- whereas ``diag``
-    starts at the sigmoid mid-range ~ (Q_LO+Q_HI)/2 = 5e4.  The three do not
-    start from comparable places, which predicts the richer forms need
-    **longer**, not that they are incapable.
+    The **single** implementation, shared by training and by inference.  Keeping
+    two copies of this map in step is exactly the kind of silent divergence §11
+    exists to catch: the policy would be optimising one cost and the deployed
+    controller solving another, with no error anywhere.
     """
-    B = obs.shape[0]
-    z = costmap_head(theta, obs, rep, N)
+    B, N = z.shape[0], z.shape[1]
     if rep == "diag":
-        dg = Q_LO + (Q_HI - Q_LO) * jax.nn.sigmoid(z)
-        S = jnp.einsum("bnij,bnj->bnij", jnp.broadcast_to(jnp.eye(NTAU), (B, N, NTAU, NTAU)), dg)
+        dg = Q_LO * (Q_HI / Q_LO) ** jax.nn.sigmoid(z)          # log-spaced
+        S = jnp.einsum("bnij,bnj->bnij",
+                       jnp.broadcast_to(jnp.eye(NTAU), (B, N, NTAU, NTAU)), dg)
     elif rep == "chol":
         A = jnp.zeros((B, N, NTAU, NTAU)).at[..., _TRIL[0], _TRIL[1]].set(z)
-        dgi = jnp.arange(NTAU)
-        A = A.at[..., dgi, dgi].set(jax.nn.softplus(A[..., dgi, dgi]) + 1e-6)
+        di = jnp.arange(NTAU)
+        A = A.at[..., di, di].set(jax.nn.softplus(A[..., di, di]) + 1e-6)
         S = jnp.einsum("bnij,bnkj->bnik", A, A) + Q_LO * jnp.eye(NTAU)
     elif rep == "full":
         A = z.reshape(B, N, NTAU, NTAU)
         S = jnp.einsum("bnij,bnkj->bnik", A, A) + Q_LO * jnp.eye(NTAU)
     else:
         raise ValueError(rep)
-    c = theta.get("c_head", None)
-    c = (jnp.zeros((B, N, NTAU)) if c is None
-         else mlp_apply(c, mlp_apply(theta["trunk"], obs)).reshape(B, N, NTAU))
+    return S, jnp.zeros((B, N, NTAU))
+
+
+def costmap_apply(theta, obs, rep, N):
+    """-> S (B,N,13,13) PSD, c (B,N,13).
+
+    Initialisation asymmetry, recorded because it matters (§5.9): with a
+    0.1-scaled zero-bias head, ``chol``/``full`` start at A ~ 0 so S ~ Q_LO*I --
+    the quadratic term is effectively *absent* at init -- whereas ``diag``
+    starts at the sigmoid mid-point, which under the log map of C-7 is the
+    geometric mean sqrt(Q_LO*Q_HI) = 3.16.  The three do not start from
+    comparable places, which predicts the richer forms need **longer**, not that
+    they are incapable.
+    """
+    z = costmap_head(theta, obs, rep, N)
+    S, c = costmap_from_z(z, rep)
+    if theta.get("c_head") is not None:
+        c = mlp_apply(theta["c_head"],
+                      mlp_apply(theta["trunk"], obs)).reshape(obs.shape[0], N, NTAU)
     return S, c
 
 
@@ -1828,17 +1851,24 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
     opt_state = opt.init(params)
     mcfg = {"N": c["N"], "rep": c["rep"], "n_iter": c["n_iter"], "n_diff": c["n_diff"]}
 
+    @jax.jit
     def act_mu(actor_p, o):
         return costmap_head(actor_p, o, c["rep"], c["N"]).reshape(o.shape[0], -1)
 
-    def u_from_z(actor_p, o, e, xr_seq, uref_seq, z, d):
-        """Apply a *perturbed* cost map: z is the sampled head output."""
-        th = dict(actor_p)
+    @jax.jit
+    def u_from_z(o, e, xr_seq, uref_seq, z, d):
+        """Apply a *perturbed* cost map: z is the sampled head output.
+
+        Jitted: the rollout calls this once per control step, and re-tracing an
+        iLQR solve that many times is both slow and, at N > 1, enough to exhaust
+        the compiler.
+        """
         B = o.shape[0]
-        S, cc = _costmap_from_z(z.reshape(B, c["N"], REP_DIM[c["rep"]]), c["rep"])
+        S, cc = costmap_from_z(z.reshape(B, c["N"], REP_DIM[c["rep"]]), c["rep"])
         Pt = jnp.broadcast_to(PTt, (B, NE, NE))
-        du = ilqr_solve(e, xr_seq, S, cc, Pt, d, None, c["n_iter"], c["n_diff"], uref_seq)
-        return jnp.clip(uref_seq[:, 0] + du[:, 0], jnp.asarray(U_LO), jnp.asarray(U_HI)), du
+        du = ilqr_solve(e, xr_seq, S, cc, Pt, d, None, c["n_iter"],
+                        0, uref_seq)        # no gradient needed on the rollout
+        return jnp.clip(uref_seq[:, 0] + du[:, 0], jnp.asarray(U_LO), jnp.asarray(U_HI))
 
     rows = []
     for it in range(iters):
@@ -1852,7 +1882,7 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
             lp = _logp(z, mu, log_sigma)
             xr_seq, uref_seq = env.ref_traj(c["N"]), env.ref_useq(c["N"])
             d = env.dmod() if c.get("use_d", False) else None
-            u, _ = u_from_z(params["actor"], o, e, xr_seq, uref_seq, z, d)
+            u = u_from_z(o, e, xr_seq, uref_seq, z, d)
             v = mlp_apply(params["critic"], o)[:, 0]
             r, done, info = env.step(u)
             O.append(o); Z.append(z); LP.append(lp); RW.append(r); VL.append(v)
@@ -1887,6 +1917,35 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
         mb = max(n // c["minib"], 1)
         aux_last = None
         gnorm = 0.0
+        if c["algo"] == "trpo":
+            # TRPO: one KL-constrained natural-gradient step on the policy,
+            # then the usual regression for the critic.  Everything else --
+            # rollout, GAE, reward -- is identical to the PPO arm, so the sweep
+            # isolates the update rule (§8.3 sweep 4).
+            params["actor"], kl_a, impr = trpo_step(
+                params["actor"], log_sigma, act_mu, Of, Zf, LPf, ADVf,
+                max_kl=c["kl_target"])
+            for _ in range(c["epochs"]):
+                (loss, aux_last), g = grad_fn(params, Of, Zf, LPf, ADVf, RETf)
+                gv = {"actor": jax.tree_util.tree_map(jnp.zeros_like, g["actor"]),
+                      "critic": g["critic"]}
+                upd, opt_state = opt.update(gv, opt_state, params)
+                params = optax.apply_updates(params, upd)
+                gnorm = float(optax.global_norm(g["critic"]))
+            aux_last = (aux_last[0], aux_last[1], aux_last[2],
+                        jnp.asarray(kl_a), aux_last[4])
+            rows.append(dict(iter=it, reward=float(RW.mean()), ep_len=float(T_rollout),
+                             value_loss=float(aux_last[1]), policy_loss=float(-impr),
+                             entropy=float(aux_last[2]), kl=float(kl_a),
+                             clipfrac=float(aux_last[4]), grad_norm=gnorm,
+                             sat=float(np.mean(sat_acc)),
+                             crash_rate=float(np.mean(crash_acc)), wall_s=time.time()))
+            if verbose and (it % max(iters // 10, 1) == 0 or it == iters - 1):
+                r_ = rows[-1]
+                print(f"  it {it:4d}  R {r_['reward']:+8.3f}  vloss "
+                      f"{r_['value_loss']:8.3f} kl {r_['kl']:.4f}  "
+                      f"sat {r_['sat']:.3f}  crash {r_['crash_rate']:.3f}")
+            continue
         for _ in range(c["epochs"]):
             key, k = jax.random.split(key)
             perm = jax.random.permutation(k, n)
@@ -1932,19 +1991,193 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
     return params["actor"], params["critic"], df
 
 
-def _costmap_from_z(z, rep):
-    """Shared by training and inference: raw head output -> (S, c)."""
-    B, N = z.shape[0], z.shape[1]
-    if rep == "diag":
-        dg = Q_LO + (Q_HI - Q_LO) * jax.nn.sigmoid(z)
-        S = jnp.einsum("bnij,bnj->bnij",
-                       jnp.broadcast_to(jnp.eye(NTAU), (B, N, NTAU, NTAU)), dg)
-    elif rep == "chol":
-        A = jnp.zeros((B, N, NTAU, NTAU)).at[..., _TRIL[0], _TRIL[1]].set(z)
-        di = jnp.arange(NTAU)
-        A = A.at[..., di, di].set(jax.nn.softplus(A[..., di, di]) + 1e-6)
-        S = jnp.einsum("bnij,bnkj->bnik", A, A) + Q_LO * jnp.eye(NTAU)
-    else:
-        A = z.reshape(B, N, NTAU, NTAU)
-        S = jnp.einsum("bnij,bnkj->bnik", A, A) + Q_LO * jnp.eye(NTAU)
-    return S, jnp.zeros((B, N, NTAU))
+# --------------------------------------------------------------------------- #
+# §5.13  TRPO and the model-free control arm
+# --------------------------------------------------------------------------- #
+def _flat(tree):
+    leaves = jax.tree_util.tree_leaves(tree)
+    return jnp.concatenate([jnp.ravel(l) for l in leaves])
+
+
+def _unflat(tree, vec):
+    leaves, treedef = jax.tree_util.tree_flatten(tree)
+    out, i = [], 0
+    for l in leaves:
+        n = l.size
+        out.append(vec[i:i + n].reshape(l.shape))
+        i += n
+    return jax.tree_util.tree_unflatten(treedef, out)
+
+
+def _cg(Avp, b, iters=10, tol=1e-10):
+    """Conjugate gradient for the natural-gradient step (Schulman et al. 2015)."""
+    x = jnp.zeros_like(b)
+    r = b
+    p = b
+    rr = r @ r
+
+    def body(carry, _):
+        x, r, p, rr = carry
+        Ap = Avp(p)
+        alpha = rr / jnp.maximum(p @ Ap, 1e-20)
+        x = x + alpha * p
+        r = r - alpha * Ap
+        rr_new = r @ r
+        p = r + (rr_new / jnp.maximum(rr, 1e-20)) * p
+        return (x, r, p, rr_new), None
+
+    (x, _, _, _), _ = jax.lax.scan(body, (x, r, p, rr), None, length=iters)
+    return x
+
+
+def trpo_step(actor, log_sigma, act_mu, ob, zz, lp_old, adv, max_kl=0.01,
+              damping=0.1, backtracks=10):
+    """One TRPO update: natural-gradient direction, then a backtracking line
+    search that enforces the hard KL constraint and surrogate improvement.
+
+    The Gaussian policy has a fixed diagonal sigma here, so the KL between old
+    and new reduces to ||mu - mu_old||^2 / (2 sigma^2) and its Hessian is
+    diag(1/sigma^2) -- the Fisher-vector product is then exact rather than
+    estimated, which removes the usual source of TRPO flakiness.
+    """
+    inv_var = jnp.exp(-2.0 * log_sigma)
+
+    def surrogate(p):
+        mu = act_mu(p, ob)
+        lp = _logp(zz, mu, log_sigma)
+        return jnp.mean(jnp.exp(lp - lp_old) * adv)
+
+    def kl(p):
+        mu = act_mu(p, ob)
+        mu_old = jax.lax.stop_gradient(act_mu(actor, ob))
+        return 0.5 * jnp.mean(jnp.sum((mu - mu_old) ** 2 * inv_var, -1))
+
+    g = _flat(jax.grad(surrogate)(actor))
+    if float(jnp.linalg.norm(g)) < 1e-10:
+        return actor, 0.0, 0.0
+
+    def Avp(v):
+        hv = jax.jvp(lambda p: _flat(jax.grad(kl)(p)), (actor,),
+                     (_unflat(actor, v),))[1]
+        return hv + damping * v
+
+    step_dir = _cg(Avp, g)
+    shs = 0.5 * step_dir @ Avp(step_dir)
+    step = step_dir * jnp.sqrt(max_kl / jnp.maximum(shs, 1e-20))
+    old_s = float(surrogate(actor))
+    for i in range(backtracks):
+        frac = 0.5 ** i
+        cand = _unflat(actor, _flat(actor) + frac * step)
+        new_s, new_kl = float(surrogate(cand)), float(kl(cand))
+        if new_kl <= 1.5 * max_kl and new_s > old_s:
+            return cand, new_kl, new_s - old_s
+    return actor, 0.0, 0.0
+
+
+def mlp_policy_init(key, obs_dim, hid, n_layer=2):
+    return mlp_init(key, [obs_dim] + [hid] * n_layer + [NU], scale_last=0.01)
+
+
+def make_mlp_ctrl(actor, name="MLP"):
+    """The **model-free control arm** of §8.3 sweep 2.
+
+    Identical reward, identical observation, identical optimiser -- only the
+    differentiable optimiser is removed.  It exists to test the *mechanism*:
+    additive noise on a box-constrained collective does not merely perturb the
+    action, it drives the input onto the box and corrupts the linearisation
+    A_k, B_k inside the solve.  A policy with no solve inside it cannot suffer
+    that, so the two must be compared on the same noise.
+    """
+    @jax.jit
+    def _act(o, uref):
+        return jnp.clip(uref + jnp.tanh(mlp_apply(actor, o)) * 0.5,
+                        jnp.asarray(U_LO), jnp.asarray(U_HI))
+
+    def f(o, e, xr, uref=None, d=None):
+        if uref is None:
+            uref = jnp.zeros((o.shape[0], NU)).at[:, 0].set(U_HOVER)
+        return _act(o, uref), {}
+    f.name = name
+    return f
+
+
+def train_mlp(env, cfg, seed=0, iters=100, T_rollout=64, verbose=True,
+              log_path=None):
+    """PPO on a direct-action MLP: the model-free arm, same reward as (5.4)."""
+    import optax
+    import pandas as pd
+    c = dict(PPO_DEFAULTS); c.update(cfg)
+    key = jax.random.PRNGKey(seed)
+    key, ka, kc = jax.random.split(key, 3)
+    actor = mlp_policy_init(ka, env.obs_dim, c["hid"])
+    critic = critic_init(kc, env.obs_dim, c["hid"])
+    log_sigma = jnp.full((NU,), np.log(c["sigma"]))
+    params = {"actor": actor, "critic": critic}
+    opt = optax.chain(optax.clip_by_global_norm(c["max_grad_norm"]),
+                      optax.adam(c["lr"]))
+    opt_state = opt.init(params)
+
+    @jax.jit
+    def act(p, o):
+        return jnp.tanh(mlp_apply(p, o)) * 0.5
+
+    rows = []
+    o, e, xr = env.obs()
+    for it in range(iters):
+        O, A, LP, RW, VL, DN, sat_acc, cr_acc = [], [], [], [], [], [], [], []
+        for t in range(T_rollout):
+            key, k = jax.random.split(key)
+            mu = act(params["actor"], o)
+            a = mu + jnp.exp(log_sigma) * jax.random.normal(k, mu.shape)
+            _, uref, _ = env.ref_now()
+            u = jnp.clip(uref + a, jnp.asarray(U_LO), jnp.asarray(U_HI))
+            v = mlp_apply(params["critic"], o)[:, 0]
+            r, done, info = env.step(u)
+            O.append(o); A.append(a); LP.append(_logp(a, mu, log_sigma))
+            RW.append(r); VL.append(v); DN.append(done.astype(jnp.float64))
+            sat_acc.append(float(info["sat"])); cr_acc.append(float(jnp.mean(info["crash"])))
+            o, e, xr = env.obs()
+        v_last = mlp_apply(params["critic"], o)[:, 0]
+        O, A, LP = jnp.stack(O), jnp.stack(A), jnp.stack(LP)
+        RW, VL, DN = jnp.stack(RW), jnp.stack(VL), jnp.stack(DN)
+        ADV = gae(RW, VL, v_last, DN, c["gamma"], c["lam"])
+        RET = ADV + VL
+        flat = lambda z: z.reshape((-1,) + z.shape[2:])
+        Of, Af, LPf, ADVf, RETf = map(flat, (O, A, LP, ADV, RET))
+        ADVf = (ADVf - ADVf.mean()) / (ADVf.std() + 1e-8)
+
+        def loss_fn(p, ob, aa, lp_old, adv, ret):
+            mu = act(p["actor"], ob)
+            lp = _logp(aa, mu, log_sigma)
+            ratio = jnp.exp(lp - lp_old)
+            l_pi = -jnp.mean(jnp.minimum(
+                ratio * adv, jnp.clip(ratio, 1 - c["clip"], 1 + c["clip"]) * adv))
+            l_v = jnp.mean((mlp_apply(p["critic"], ob)[:, 0] - ret) ** 2)
+            return l_pi + c["vf_coef"] * l_v, (l_pi, l_v, jnp.mean(lp_old - lp))
+
+        gfn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
+        n = Of.shape[0]
+        mb = max(n // c["minib"], 1)
+        aux = None
+        for _ in range(c["epochs"]):
+            key, k = jax.random.split(key)
+            perm = jax.random.permutation(k, n)
+            for i in range(c["minib"]):
+                idx = perm[i * mb:(i + 1) * mb]
+                if idx.size == 0:
+                    continue
+                (_, aux), g = gfn(params, Of[idx], Af[idx], LPf[idx],
+                                  ADVf[idx], RETf[idx])
+                upd, opt_state = opt.update(g, opt_state, params)
+                params = optax.apply_updates(params, upd)
+        rows.append(dict(iter=it, reward=float(RW.mean()),
+                         value_loss=float(aux[1]), policy_loss=float(aux[0]),
+                         kl=float(aux[2]), sat=float(np.mean(sat_acc)),
+                         crash_rate=float(np.mean(cr_acc))))
+        if verbose and (it % max(iters // 5, 1) == 0 or it == iters - 1):
+            print(f"  MLP it {it:4d}  R {rows[-1]['reward']:+8.3f}  "
+                  f"sat {rows[-1]['sat']:.3f}")
+    df = pd.DataFrame(rows)
+    if log_path:
+        df.to_csv(apath(*log_path), index=False)
+    return params["actor"], params["critic"], df

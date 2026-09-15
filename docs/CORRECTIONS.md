@@ -164,6 +164,60 @@ standing moment; the actuator commands can.* (The spec's "≈5e-4 rad/s after 5 
 is reached at ~15 s here, the integral time constant being ~4 s; the asymptote
 and the conclusion are as stated.)
 
+
+## C-7 — §5.9's cost-map range makes the learned controller inert
+
+**Spec:** §5.9 gives `diag` as `S = diag(Q_LO + (Q_HI − Q_LO)·σ(z))` and notes
+that this "starts at the sigmoid mid-range ≈ 5×10⁴", against learned matrices
+that "span ~5 orders of magnitude".
+
+**Why it fails.** Take that literally — a *linear* map whose mid-point is 5×10⁴ —
+and compare it with the terminal matrix the same scheme uses. Measured at init:
+
+```
+S diagonal, e-block   [3.8e4 .. 6.6e4]      S diagonal, u-block  [5.2e4 .. 6.7e4]
+P_term (Riccati) diag [1.8 .. 82.3]         u-block / P_term,pos  =  660x
+```
+
+At `N = 1` the current error `e₀` is *fixed*, so the only free variable in (5.2)
+is `δu`. A control weight 660× the terminal cost therefore pins `δu` at zero:
+measured `|δu| = 1.9e-5`. The AC-MPC controller silently degenerates to pure
+feed-forward `u_ref`, the policy output stops affecting the command, the gradient
+vanishes, and **every row of every sweep in Notebook 3 comes out identical** —
+representation, exploration σ, GAE λ, PPO vs TRPO, and all three seeds agreed to
+four decimals, with a "seed spread" of 0.0001 m. Nothing raises an exception.
+
+A linear map over five decades is also a poor use of the policy's resolution:
+90 % of its output range lies inside the top decade.
+
+**Implemented:** the same five decades, mapped **logarithmically**,
+
+```
+S_ii = Q_LO · (Q_HI/Q_LO)^σ(z),   Q_LO = 1e-2,  Q_HI = 1e3
+```
+
+so `σ(z) = 0.5` lands on the geometric mean `√(Q_LO·Q_HI) = 3.16`, commensurate
+with the hand weights (`Q_HAND` 0.5–2, `R_HAND` 0.5–1) and with the terminal
+matrix (1.8–82). After the change, at init:
+
+| rep | S diagonal | \|δu\| | sensitivity to the cost map |
+|---|---|---|---|
+| diag | 3.6e-1 … 3.5e1 | 0.293 | 1.161 |
+| chol | 1.2e-1 … 4.8e0 | 0.549 | 0.536 |
+| full | 8.5e-1 … 4.9e0 | 0.377 | 0.642 |
+
+The §5.9 initialisation **asymmetry is preserved** and is still worth recording:
+`chol`/`full` start at `A ≈ 0`, so `S ≈ Q_LO·I` and the quadratic term is
+effectively absent, while `diag` starts at the geometric mean. They still do not
+start from comparable places, and that still predicts the richer forms need
+longer rather than being incapable.
+
+**Related:** the map existed twice — once in `costmap_apply` for inference and
+once in `_costmap_from_z` for training. Two copies that must agree, with nothing
+checking that they do, means the policy can optimise one cost while the deployed
+controller solves another. They are now one function, `costmap_from_z`, called
+by both.
+
 ---
 
 ## Implementation notes that are not corrections

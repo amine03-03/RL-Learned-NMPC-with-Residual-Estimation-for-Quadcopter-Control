@@ -1,0 +1,18 @@
+{
+  "scale": "smoke",
+  "dr_budget": "reduced",
+  "budget": {
+    "iters": 6,
+    "seq_iters": 3,
+    "seeds": 2,
+    "bins": 3,
+    "eval_ep": 8,
+    "eval_T": 100
+  },
+  "seeds": [
+    5,
+    200
+  ],
+  "conservatism_premium_pct": -0.6913558542323344,
+  "total_wall_s": 304.6581995759916
+}

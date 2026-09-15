@@ -38,16 +38,15 @@ def flatten_params(p):
         for lyr in ("l1", "l2"):
             for k in ("Wi", "bi", "Wh", "bh"):
                 W[f"{lyr}.{k}"] = np.asarray(p[lyr][k], dtype=np.float64)
-        meta["nh"] = [int(p["l1"]["nh"]), int(p["l2"]["nh"])]
+        meta["nh"] = [int(p["l1"]["Wh"].shape[0]), int(p["l2"]["Wh"].shape[0])]
     elif kind == "TCN":
         for i, blk in enumerate(p["enc"]["blocks"]):
             W[f"b{i}.c1.W"] = np.asarray(blk["c1"]["W"], dtype=np.float64)
             W[f"b{i}.c1.b"] = np.asarray(blk["c1"]["b"], dtype=np.float64)
             W[f"b{i}.c2.W"] = np.asarray(blk["c2"]["W"], dtype=np.float64)
             W[f"b{i}.c2.b"] = np.asarray(blk["c2"]["b"], dtype=np.float64)
-            if blk["res"] is not None:
-                W[f"b{i}.res.W"] = np.asarray(blk["res"]["W"], dtype=np.float64)
-                W[f"b{i}.res.b"] = np.asarray(blk["res"]["b"], dtype=np.float64)
+            W[f"b{i}.res.W"] = np.asarray(blk["res"]["W"], dtype=np.float64)
+            W[f"b{i}.res.b"] = np.asarray(blk["res"]["b"], dtype=np.float64)
         meta["n_block"] = len(p["enc"]["blocks"])
     elif kind == "CNN":
         for i, lyr in enumerate(p["enc"]["layers"]):

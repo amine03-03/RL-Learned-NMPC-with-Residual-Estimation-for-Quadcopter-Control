@@ -214,16 +214,19 @@ def _dense(p, x):
 
 # -- GRU (Cho et al. 2014) --------------------------------------------------- #
 def gru_cell_init(key, nin, nh):
+    """Weights only.  The hidden width is recovered from ``Wh.shape[0]``: an int
+    stored inside the parameter pytree makes ``jax.grad`` refuse the whole tree
+    ("grad requires real- or complex-valued inputs ... got int64")."""
     ks = jax.random.split(key, 2)
     return {"Wi": _glorot(ks[0], (nin, 3 * nh)), "Wh": _glorot(ks[1], (nh, 3 * nh)),
-            "bi": jnp.zeros((3 * nh,)), "bh": jnp.zeros((3 * nh,)), "nh": nh}
+            "bi": jnp.zeros((3 * nh,)), "bh": jnp.zeros((3 * nh,))}
 
 
 def gru_scan(p, xs):
     """xs (T,B,nin) -> hs (T,B,nh).  Gate equations written out explicitly, so
     the weights transplant into the pure-NumPy ``rdp_infer`` and T-17 can check
     parity rather than trust a library layer."""
-    nh = p["nh"]
+    nh = p["Wh"].shape[0]
 
     def step(h, x):
         gi = x @ p["Wi"] + p["bi"]
@@ -246,11 +249,11 @@ def lstm_cell_init(key, nin, nh):
     ks = jax.random.split(key, 2)
     b = jnp.zeros((4 * nh,)).at[nh:2 * nh].set(1.0)      # forget-gate bias = 1
     return {"Wi": _glorot(ks[0], (nin, 4 * nh)), "Wh": _glorot(ks[1], (nh, 4 * nh)),
-            "bi": b, "bh": jnp.zeros((4 * nh,)), "nh": nh}
+            "bi": b, "bh": jnp.zeros((4 * nh,))}
 
 
 def lstm_scan(p, xs):
-    nh = p["nh"]
+    nh = p["Wh"].shape[0]
 
     def step(carry, x):
         h, c = carry
@@ -306,20 +309,21 @@ def tcn_init(key, nin, nh, n_block=3, k=3):
         blocks.append({
             "c1": {"W": _glorot(ks[2 * i], (k, c, nh)), "b": jnp.zeros((nh,))},
             "c2": {"W": _glorot(ks[2 * i + 1], (k, nh, nh)), "b": jnp.zeros((nh,))},
-            "res": None if c == nh else {"W": _glorot(ks[2 * i], (1, c, nh)),
-                                         "b": jnp.zeros((nh,))},
-            "dil": 2 ** i})
+            # the 1x1 residual projection is always present, even when the widths
+            # already match: a None inside the tree is another non-float leaf,
+            # and the dilation is recovered from the block index below.
+            "res": {"W": _glorot(ks[2 * i], (1, c, nh)), "b": jnp.zeros((nh,))}})
         c = nh
-    return {"blocks": blocks, "nh": nh}
+    return {"blocks": blocks}
 
 
 def tcn_apply(p, x):
     """Dilated causal residual stack (Bai, Kolter & Koltun 2018)."""
-    for blk in p["blocks"]:
-        h = jax.nn.relu(_causal_conv(blk["c1"], x, blk["dil"]))
-        h = jax.nn.relu(_causal_conv(blk["c2"], h, blk["dil"]))
-        res = x if blk["res"] is None else _causal_conv(blk["res"], x, 1)
-        x = h + res
+    for i, blk in enumerate(p["blocks"]):
+        dil = 2 ** i
+        h = jax.nn.relu(_causal_conv(blk["c1"], x, dil))
+        h = jax.nn.relu(_causal_conv(blk["c2"], h, dil))
+        x = h + _causal_conv(blk["res"], x, 1)
     return x
 
 
@@ -342,7 +346,7 @@ def cnn_init(key, nin, nh, n_layer=3, k=5):
     for i in range(n_layer):
         layers.append({"W": _glorot(ks[i], (k, c, nh)), "b": jnp.zeros((nh,))})
         c = nh
-    return {"layers": layers, "nh": nh}
+    return {"layers": layers}
 
 
 def cnn_apply(p, x):

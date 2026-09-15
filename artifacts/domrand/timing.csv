@@ -1,0 +1,52 @@
+label,seconds,seed,n,axis,policy
+train:nominal,15.255854498998815,5.0,,,
+train:DR-all,6.536621774001105,5.0,,,
+train:DR-all+noise,8.614219418002904,5.0,,,
+evaluate,7.716390214001876,,8.0,,
+evaluate,5.565500806998898,,8.0,,
+evaluate,5.272087764999014,,8.0,,
+evaluate,5.391040698999859,,8.0,,
+evaluate,5.686220627001603,,8.0,,
+evaluate,5.636170509998919,,8.0,,
+evaluate,4.077417601998604,,8.0,,
+evaluate,3.866449752000335,,8.0,,
+axis_rollout,8.588310551000177,,24.0,m,nominal
+axis_rollout,5.131232656000066,,24.0,m,DR-all
+axis_rollout,5.013371339002333,,24.0,m,DR-all+noise
+axis_rollout,3.625034019998566,,24.0,m,NMPC N=1
+axis_rollout,5.342633511998429,,24.0,tau,nominal
+axis_rollout,5.204226583999116,,24.0,tau,DR-all
+axis_rollout,5.3302614809981606,,24.0,tau,DR-all+noise
+axis_rollout,3.8411769129997992,,24.0,tau,NMPC N=1
+axis_rollout,5.136662980999972,,24.0,J,nominal
+axis_rollout,5.32706376400165,,24.0,J,DR-all
+axis_rollout,5.334627734999231,,24.0,J,DR-all+noise
+axis_rollout,4.128653181000118,,24.0,J,NMPC N=1
+axis_rollout,6.638706238998566,,24.0,T,nominal
+axis_rollout,6.834681258998899,,24.0,T,DR-all
+axis_rollout,7.020969098000933,,24.0,T,DR-all+noise
+axis_rollout,4.916398487999686,,24.0,T,NMPC N=1
+evaluate,5.302861945001496,,8.0,,
+evaluate,5.8240752310011885,,8.0,,
+train:nominal,7.699579879998055,200.0,,,
+evaluate,6.030875347998517,,8.0,,
+evaluate,6.277587710999796,,8.0,,
+evaluate,5.776061902997753,,8.0,,
+evaluate,6.3334305719981785,,8.0,,
+train:DR-all,7.3392366059997585,200.0,,,
+evaluate,6.087661936999211,,8.0,,
+evaluate,6.020958855999197,,8.0,,
+curriculum:nominal,5.509363335000671,,,,
+evaluate,5.606914184001653,,8.0,,
+curriculum:mass,5.238336390000768,,,,
+evaluate,5.547938379997504,,8.0,,
+evaluate,5.646952685001452,,8.0,,
+curriculum:lag,6.12434234399916,,,,
+evaluate,6.122195686002669,,8.0,,
+evaluate,5.8258113830015645,,8.0,,
+evaluate,6.017474427997513,,8.0,,
+curriculum:all,5.832952863998798,,,,
+evaluate,5.968919781000295,,8.0,,
+evaluate,5.813350421998621,,8.0,,
+evaluate,5.830171679997875,,8.0,,
+evaluate,5.849162557002273,,8.0,,

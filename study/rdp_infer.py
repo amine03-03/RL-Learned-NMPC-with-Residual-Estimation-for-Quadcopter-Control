@@ -119,9 +119,10 @@ class RDP:
                 d = 2 ** i
                 hh = _relu(_causal_conv(self.W[f"b{i}.c1.W"], self.W[f"b{i}.c1.b"], x, d))
                 hh = _relu(_causal_conv(self.W[f"b{i}.c2.W"], self.W[f"b{i}.c2.b"], hh, d))
-                res = (x if f"b{i}.res.W" not in self.W
-                       else _causal_conv(self.W[f"b{i}.res.W"], self.W[f"b{i}.res.b"], x, 1))
-                x = hh + res
+                # the 1x1 residual projection is always exported, so there is
+                # no branch here to fall out of step with the JAX side
+                x = hh + _causal_conv(self.W[f"b{i}.res.W"],
+                                      self.W[f"b{i}.res.b"], x, 1)
             feat = x[:, -1]
         elif self.kind == "CNN":
             nl = int(self.meta["n_layer"])

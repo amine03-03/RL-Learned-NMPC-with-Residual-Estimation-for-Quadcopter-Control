@@ -1,0 +1,4 @@
+label,seconds,seed
+train:nominal,15.255854498998815,5
+train:DR-all,6.536621774001105,5
+train:DR-all+noise,8.614219418002904,5

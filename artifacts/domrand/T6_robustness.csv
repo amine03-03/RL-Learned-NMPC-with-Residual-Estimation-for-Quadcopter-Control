@@ -1,0 +1,8 @@
+metric,value
+"RMSE on the nominal plant, nominal-only policy",0.12777623431628535
+"RMSE on the nominal plant, DR-all policy",0.12689284584002208
+conservatism premium [%] (signed),-0.6913558542323344
+"RMSE on S2, nominal-only policy",0.21748299970593785
+"RMSE on S2, DR-all policy",0.2981098429056658
+robustness gain on S2 [%],-37.072710652669286
+seeds,2.0
