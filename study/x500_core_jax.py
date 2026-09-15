@@ -307,6 +307,7 @@ def fc(x, u, d=None, par=None):
     return jnp.concatenate([v, acc, qdot], -1)
 
 
+@functools.partial(jax.jit, static_argnames=("dt",))
 def step_c(x, u, d=None, par=None, dt=None):
     """One classical RK4 step of the control model at dt_c, renormalising q."""
     dt = P.dt_c if dt is None else dt
@@ -331,6 +332,7 @@ def rate_cmd(u_ctbr):
     return _clamp(jnp.asarray(OM_MAX) * u_ctbr[..., 1:4], -P.rate_max, P.rate_max)
 
 
+@jax.jit
 def inner_loop(s, u_ctbr, par):
     """(3.4)-(3.5).  Returns (Omega_cmd (B,4), pwm (B,4), tau_cmd (B,3)).
 
@@ -351,6 +353,7 @@ def inner_loop(s, u_ctbr, par):
     return Om_cmd, Om_cmd / P.Om_max, tau_cmd
 
 
+@jax.jit
 def fp(s, u_ctbr, par, v_wind=None):
     """(3.4)-(3.8) plant derivative.  (B,23) -> (B,23).
 
@@ -389,6 +392,7 @@ def _plant_project(s):
         jnp.clip(s[..., SI], -P.I_lim, P.I_lim), s[..., SF]], -1)
 
 
+@functools.partial(jax.jit, static_argnames=("n_sub",))
 def step_p(s, u_ctbr, par, v_wind=None, n_sub=None):
     """``n_sub`` RK4 sub-steps of dt_c/n_sub (2 ms by default)."""
     n_sub = P.n_sub if n_sub is None else n_sub
@@ -434,6 +438,7 @@ def hover_u(B=1, par=None):
 # --------------------------------------------------------------------------- #
 # §5.5  error coordinates
 # --------------------------------------------------------------------------- #
+@jax.jit
 def err(x, xr):
     """(4.1) reduced error, (B,10),(B,10) -> (B,9).
 
@@ -445,6 +450,7 @@ def err(x, xr):
                             x[..., 3:6] - xr[..., 3:6], 2.0 * sgn * qe[..., 1:4]], -1)
 
 
+@jax.jit
 def e_to_state(e, xr):
     """(4.2) the exact inverse of :func:`err`, (B,9),(B,10) -> (B,10).
 
@@ -593,6 +599,7 @@ def ref_attitude(a_ref):
     return qnorm(qexp_tilt(ax, ang))
 
 
+@jax.jit
 def ref_state(ep, t):
     """(B,10) reference state, (B,4) u_ref (4.8), (B,3) a_ref.
 
@@ -618,6 +625,7 @@ def ref_state(ep, t):
 # --------------------------------------------------------------------------- #
 # §5.7  disturbance accessors -- (a) model residual vs (b) physical wrench
 # --------------------------------------------------------------------------- #
+@jax.jit
 def true_disturbance(s, u, par, v_wind=None, sdot=None):
     """(4.9) model residual d = [a_plant - a_model, om_plant - om_cmd].
 
@@ -631,6 +639,7 @@ def true_disturbance(s, u, par, v_wind=None, sdot=None):
     return jnp.concatenate([sdot[..., SV] - a_model, s[..., SW] - rate_cmd(u)], -1)
 
 
+@jax.jit
 def external_wrench(s, u, par, sdot=None, v_wind=None):
     """(4.10)-(4.11) the physical wrench a force-torque sensor would read.
 
@@ -655,6 +664,7 @@ def external_wrench(s, u, par, sdot=None, v_wind=None):
     return jnp.concatenate([F, tau], -1)
 
 
+@functools.partial(jax.jit, static_argnames=("mode",))
 def wrench_to_dmod(w, mode: str = "first_order"):
     """(4.12)+(4.13) convert a wrench [N, N m] to a model residual [m/s^2, rad/s].
 
@@ -1292,6 +1302,7 @@ def _u(key, lohi, shape):
     return jax.random.uniform(key, shape, minval=float(lo), maxval=float(hi))
 
 
+@jax.jit
 def wind_at(ep, t):
     """(3.9) per-episode wind, deterministic in t."""
     t = jnp.asarray(t, dtype=jnp.float64).reshape(-1, 1)
@@ -1340,32 +1351,46 @@ class Env:
 
     # -- episode sampling --------------------------------------------------- #
     def _sample_ep(self, key, n):
+        """Sample an episode.
+
+        ``fixed`` is applied **twice**: once to the primitives (kind, R, spd,
+        ...) *before* omega is derived from them through (4.6), and once at the
+        end so that omega itself, or any derived field, can still be pinned
+        explicitly.  Applying it only at the end -- the obvious way -- leaves a
+        pinned radius paired with the omega of the radius that was sampled, so
+        a controlled experiment silently varies the thing it pinned.
+        """
         ks = jax.random.split(key, 20)
         pidx = jnp.asarray([PATH_IDX[p] for p in self.cfg.paths])
-        kind = pidx[jax.random.randint(ks[0], (n,), 0, len(pidx))]
-        c = jnp.stack([_u(ks[1], (-1.5, 1.5), (n,)), _u(ks[2], (-1.5, 1.5), (n,)),
-                       _u(ks[3], (1.0, 2.5), (n,))], -1)
-        R = _u(ks[4], (0.5, 2.0), (n,))
-        spd = _u(ks[6], self.dist["speed"], (n,))
-        omega = jnp.take_along_axis(
-            jnp.stack([path_omega(i, R, spd) for i in range(len(PATHS_ALL))], -1),
-            kind[:, None], 1)[:, 0]
         az = _u(ks[7], (0.0, 2 * np.pi), (n,))
-        ep = dict(kind=kind, c=c, R=R, phi0=_u(ks[5], (0.0, 2 * np.pi), (n,)),
-                  omega=omega, spd=spd,
-                  delta=_u(ks[8], (-1.0, 1.0), (n, 3)) * jnp.asarray([1.0, 1.0, 0.5]),
-                  wbar=_u(ks[9], self.dist["wind"], (n,)),
-                  wphi=_u(ks[10], (0.0, 2 * np.pi), (n,)),
-                  wdir=jnp.stack([jnp.cos(az), jnp.sin(az), jnp.zeros(n)], -1),
-                  wperp=jnp.stack([-jnp.sin(az), jnp.cos(az), jnp.zeros(n)], -1),
-                  e0=_u(ks[11], (-0.5, 0.5), (n, 3)))
+        ep = dict(
+            kind=pidx[jax.random.randint(ks[0], (n,), 0, len(pidx))],
+            c=jnp.stack([_u(ks[1], (-1.5, 1.5), (n,)), _u(ks[2], (-1.5, 1.5), (n,)),
+                         _u(ks[3], (1.0, 2.5), (n,))], -1),
+            R=_u(ks[4], (0.5, 2.0), (n,)),
+            phi0=_u(ks[5], (0.0, 2 * np.pi), (n,)),
+            spd=_u(ks[6], self.dist["speed"], (n,)),
+            delta=_u(ks[8], (-1.0, 1.0), (n, 3)) * jnp.asarray([1.0, 1.0, 0.5]),
+            wbar=_u(ks[9], self.dist["wind"], (n,)),
+            wphi=_u(ks[10], (0.0, 2 * np.pi), (n,)),
+            wdir=jnp.stack([jnp.cos(az), jnp.sin(az), jnp.zeros(n)], -1),
+            wperp=jnp.stack([-jnp.sin(az), jnp.cos(az), jnp.zeros(n)], -1),
+            e0=_u(ks[11], (-0.5, 0.5), (n, 3)))
         for i, k in enumerate(("m", "D", "tau", "T", "Kw", "J")):
             ep[f"lam_{k}"] = _u(jax.random.fold_in(ks[12], i), self.dist[k], (n,))
         if self.scen is not None:
             ep.update(self.scen.sample(ks[13], n, self.level))
+        ep = self._apply_fixed(ep)                 # primitives, before (4.6)
+        ep["omega"] = jnp.take_along_axis(
+            jnp.stack([path_omega(i, ep["R"], ep["spd"])
+                       for i in range(len(PATHS_ALL))], -1), ep["kind"][:, None], 1)[:, 0]
+        return self._apply_fixed(ep)               # derived fields, incl. omega
+
+    def _apply_fixed(self, ep):
         for k, v in self.fixed.items():
             if k in ep:
-                ep[k] = jnp.broadcast_to(jnp.asarray(v, dtype=jnp.float64), jnp.shape(ep[k]))
+                ep[k] = jnp.broadcast_to(jnp.asarray(v, dtype=jnp.float64),
+                                         jnp.shape(ep[k]))
         return ep
 
     def _make_par(self, ep, n):

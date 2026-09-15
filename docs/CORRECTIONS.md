@@ -106,6 +106,64 @@ central difference. But the sign-flipped variant actually gives **6.8602**, not
 against the §4.2 table, so no variant of (4.5) can be adopted silently. Test
 `T-4`.
 
+
+## C-6 — §11 T-12 measures the one quantity the mixer does not change
+
+**Spec:** T-12 compares `mixer='nominal'` with `mixer='true'` under a 0.11
+arm-tip payload and accepts when *"steady ‖τ_ext‖ [is] at least 5× larger under
+`'nominal'`"*.
+
+**Derivation.** In steady hover `ω = ω̇ = 0`, so (4.11) reduces to
+`τ_ext = −M_τ^nom K_T Ω²`. Equilibrium about the *true* CG means
+`M_τ^true K_T Ω² = 0`, so
+
+```
+τ_ext = −(M_τ^nom − M_τ^true) f = −T·(δ_y, −δ_x, 0),   δ = cg_true − cg_nom
+      = −m_p g · (0.174, −0.174, 0)
+```
+
+which depends only on the CG shift and the total thrust. **The mixer does not
+appear.** (4.11) references the nominal allocation by construction — that is
+what makes a payload visible at all, and what §9.15's parameter-free check
+relies on — so `τ_ext` is the same whichever mixer flies the aircraft.
+
+**Measurement.** `asym` payload, hover, averaged over the last 4 s of 20 s:
+
+| f | mixer | ‖I_ω‖ | ‖τ_cmd‖ [N·m] | PWM spread | ‖τ_ext‖ [N·m] | tilt |
+|---|---|---|---|---|---|---|
+| 0.07 | nominal | 1.518 | 0.4946 | 0.1417 | **0.3556** | 6.03° |
+| 0.07 | true | 0.000 | 0.0000 | 0.1044 | **0.3487** | 0.00° |
+| 0.11 | nominal | 2.526 | 1.2988 | 0.2455 | **0.5941** | 21.57° |
+| 0.11 | true | 0.000 | 0.0000 | 0.1615 | **0.5480** | 0.00° |
+
+‖τ_ext‖ differs by 2–8 %, never 5×. What differs by an *unbounded* factor is the
+rate-loop effort: under the true mixer the rate loop does literally nothing —
+`I_ω = 0`, `τ_cmd = 0`, tilt `0.00°` — because the off-centre load is allocated
+away before it is felt, exactly as §3.3 warns.
+
+**Implemented:** T-12 asserts on ‖τ_cmd‖ (equivalently `J·K_i·I_ω`), which is the
+quantity the design decision is about, and *reports* ‖τ_ext‖ under both mixers as
+the quantity that does not discriminate. This matters beyond the test: someone
+reconciling the literal T-12 would be pushed to make `external_wrench` use the
+mixer's belief instead of the nominal allocation, which would make every payload
+invisible under `mixer='true'` and is the same substitution §9.4 check 3 warns
+about one level up.
+
+**Confirmed in passing:** §6.2's justification for the PWM block. A constant
+`τ_x = 0.20 N·m` applied to the rate loop alone:
+
+| t [s] | ‖ω‖ [rad/s] | PWM spread | I_ω,x |
+|---|---|---|---|
+| 5 | 1.46e-1 | 0.0437 | −1.588 |
+| 20 | 2.00e-3 | 0.0437 | −2.091 |
+| 80 | **7.15e-11** | **0.0437** | −2.098 |
+
+The rate error goes to zero; the mixer spread holds forever; `I_ω` converges to
+the predicted `τ/(J·K_i) = 2.098`. *State and setpoint alone cannot resolve a
+standing moment; the actuator commands can.* (The spec's "≈5e-4 rad/s after 5 s"
+is reached at ~15 s here, the integral time constant being ~4 s; the asymptote
+and the conclusion are as stated.)
+
 ---
 
 ## Implementation notes that are not corrections
@@ -142,3 +200,39 @@ the same failure mode §9.4 check 3 warns about, one level up.
 and §3.3 caps `‖I_ω‖_∞ ≤ 3`. Clamping inside the RK4 derivative makes the stage
 derivatives inconsistent; the state is clamped after each completed sub-step
 instead, which is what a discrete autopilot does.
+
+**N-6 — `check_moderate` containment is not subset containment.** §7.2 says the
+moderated suite is *"a strict subset"* of the raw one. That holds only for a
+band straddling the nominal 1. Every S3 multiplicative band lies entirely
+*above* 1 (drag 2.20–3.00, lag 3.50–5.00), so contracting toward 1 moves it
+**outside** the raw band. The invariants (7.1) actually guarantees, and which
+`check_moderate` asserts, are: each endpoint stays on its own side of 1 (side
+preservation, which is what "preserves the shape" means); the band is no wider;
+and it lies inside `hull(raw band, {1})`. A naive subset test fails on a
+correct moderation.
+
+**N-7 — the raw `asym` top bracket is not flyable, and this is measurable.**
+§8.5 says the raw brackets "sit against the actuator limit" and instructs
+moderation to 40 %. Quantified: holding the standing moment of an arm-tip
+payload needs rate-loop integrator authority
+
+```
+tau_needed = 0.174 · f · m · g       vs.   tau_available = J_xx · K_i,x · I_lim
+                                                         = 0.023831 · 4 · 3
+                                                         = 0.28597 N·m
+```
+
+so the largest trimmable mass fraction is **f = 0.0812**. The §6.1 `asym`
+levels are 0, 0.04, 0.07, 0.11 — the top one exceeds it. Measured, flying a
+hover reference for 30 s:
+
+| f | τ_y vs (9.7) | F_z vs (9.7) | ‖I_ω‖ | tilt | pos err |
+|---|---|---|---|---|---|
+| 0.04 | 1.2 % | 0.1 % | 1.48 | 0.16° | 0.011 m |
+| 0.044 | 7.2 % | 0.7 % | 1.63 | 0.97° | 0.012 m |
+| 0.11 | 5–86 % (no steady state) | up to 165 % | **3.00, pinned** | **48°** | 1.20 m |
+
+`central` matches (9.7) to 0.00 % at every level, which is what confirms the
+wrench-truth computation itself. T-9 is therefore asserted on `central` at all
+levels and on `asym` below the trim limit; the failure above it is reported as
+a result in Notebook 5 rather than hidden by loosening the tolerance.
