@@ -184,3 +184,45 @@ def test_T12_payload_is_visible_in_the_wrench_at_all():
     assert np.abs(tau - predicted).max() < 1e-9, f"{tau} vs {predicted}"
     assert np.linalg.norm(tau) > 0.5 * np.linalg.norm(want), \
         "the payload is barely visible in the wrench"
+
+
+def test_attached_estimator_reaches_the_observation():
+    """An attached RDP must change the observation channel.
+
+    Without this the oracle channel keeps returning ``d_truth`` and every
+    "RDP" row is silently an oracle row -- ground truth reaching the online
+    controller, which §9.1 forbids.  The failure is invisible in any metric:
+    the numbers just come out better than they should.
+    """
+    import jax
+    import adaptive_core_jax as Ad
+
+    def build():
+        env = Ad.AdaptEnv(4, 3, 100000, X.nominal_spec(speed=(1.0, 1.0)), "asym",
+                          0.04, oracle=True, paths=("circle",), H=8)
+        ctrl = X.make_lqr_ctrl()
+        for _ in range(12):
+            o, e, xr = env.obs()
+            _, uref, _ = env.ref_now()
+            u, _ = ctrl(o, e, xr, uref=uref)
+            env.step(u)
+        return env
+
+    truth_env = build()
+    o_truth = np.asarray(truth_env.obs()[0])
+
+    rdp_env = build()
+    p = Ad.rdp_init(jax.random.PRNGKey(0), "GRU", H=8, hid=(8, 4))
+    scales = {"mu": jnp.zeros(Ad.FRAME_DIM), "sd": jnp.ones(Ad.FRAME_DIM),
+              "out_sd": jnp.ones(6)}
+    rdp_env.attach(p, scales)
+    o_rdp = np.asarray(rdp_env.obs()[0])
+
+    assert o_truth.shape[1] == X.OBS_DIM + 6, "the oracle channel is not present"
+    assert np.abs(o_truth[:, :X.OBS_DIM] - o_rdp[:, :X.OBS_DIM]).max() < 1e-9, \
+        "attaching an estimator changed the base observation, which it must not"
+    assert np.abs(o_truth[:, X.OBS_DIM:] - o_rdp[:, X.OBS_DIM:]).max() > 1e-6, \
+        "the observation still carries ground truth after attaching an RDP"
+    # and d_truth must keep returning the truth for the logger
+    assert np.abs(np.asarray(rdp_env.d_truth())
+                  - np.asarray(truth_env.d_truth())).max() < 1e-9

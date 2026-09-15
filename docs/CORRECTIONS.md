@@ -290,3 +290,14 @@ hover reference for 30 s:
 wrench-truth computation itself. T-9 is therefore asserted on `central` at all
 levels and on `asym` below the trim limit; the failure above it is reported as
 a result in Notebook 5 rather than hidden by loosening the tolerance.
+
+**N-8 — the oracle observation channel must carry the estimate, not the truth.**
+§6.3's variant table routes the disturbance "→ observation" for variants A and C,
+and §6.2 says an attached estimator makes `d_channel()` return the prediction.
+The observation channel was reading `d_truth()` instead, so every variant that
+observes the disturbance was silently an *oracle* — ground truth reaching the
+online controller, which §9.1 forbids. It is invisible in any metric: the numbers
+simply come out better than they should. `Env._oracle` now routes through
+`d_channel()`/`dmod()`, so the channel is the truth when nothing is attached
+(which is what makes the Oracle arm an oracle) and the prediction once an RDP is.
+`test_attached_estimator_reaches_the_observation` pins the behaviour.

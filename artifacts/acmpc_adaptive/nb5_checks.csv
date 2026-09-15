@@ -1,0 +1,10 @@
+check,passed
+central: Oracle <= best RDP,True
+central: best RDP <= Robust,True
+central: best RDP <= Base,False
+asym: Oracle <= best RDP,False
+asym: best RDP <= Robust,True
+asym: best RDP <= Base,False
+slung: Oracle <= best RDP,True
+slung: best RDP <= Robust,True
+slung: best RDP <= Base,True

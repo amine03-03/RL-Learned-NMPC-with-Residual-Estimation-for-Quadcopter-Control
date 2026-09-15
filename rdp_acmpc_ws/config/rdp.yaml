@@ -1,0 +1,11 @@
+# RDP estimator node (§9.5).
+/**:
+  ros__parameters:
+    model_path: models/rdp_gru.npz   # written by study/export_estimator.py
+    rate_hz: 50.0
+    H: 32                  # 0.64 s at 50 Hz; benchmark {16,32,64} in E-D
+    filter_alpha: 0.0      # optional first-order causal filter (§9.11 step 4)
+    budget_ms: 8.0         # watchdog; on failure d_hat = 0 and a fault is counted
+    # Choose the encoder on LATENCY, not R^2.  export_estimator.py measures
+    # rdp_infer p95 on the target machine and records it in the .npz metadata.
+    require_actuator_motors: true    # refuse moment scenarios without it (§9.4)

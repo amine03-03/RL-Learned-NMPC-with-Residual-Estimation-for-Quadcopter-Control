@@ -109,6 +109,11 @@ def test_T15_clip_coverage():
     assert per is not None and T * X.P.dt_c >= per - 1e-9
     d = V.fly(env, X.make_lqr_ctrl(), T)
     assert d["respawns"] == 0
+    # duration coverage is the clip property; the flown angular span is only
+    # expected to follow for a controller that actually held the path, which
+    # the LQR does on a nominal circle
+    assert T * X.P.dt_c >= per - 1e-9
+    assert d["rmse"] < 0.5, "this check assumes the pilot held the path"
     assert d["theta_span"] >= 2 * np.pi - 1e-3
     assert np.linalg.norm(d["RFULL"][0] - d["RFULL"][-1]) < 1e-6
     lo, hi = d["RFULL"].min(0), d["RFULL"].max(0)

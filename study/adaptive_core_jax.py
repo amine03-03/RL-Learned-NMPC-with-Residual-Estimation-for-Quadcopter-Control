@@ -117,8 +117,14 @@ class SlungScenario:
         v = 0.05 * jax.random.normal(key, (n, 3)) * jnp.asarray([1.0, 1.0, 0.0])
         return jnp.concatenate([nh, v - nh * jnp.sum(v * nh, -1, keepdims=True)], -1)
 
+    @functools.partial(jax.jit, static_argnums=(0,))
     def wrench_body(self, pend, s, t):
-        """Body-frame [F(3), tau(3)] applied to the airframe."""
+        """Body-frame [F(3), tau(3)] applied to the airframe.
+
+        Jitted (the scenario is a frozen dataclass, so it is hashable and may be
+        a static argument): these run once per control step from Python, and
+        re-tracing them each time exhausts the compiler.
+        """
         n_hat, n_dot = pend[:, 0:3], pend[:, 3:6]
         ml = self.m_load
         F_ten = ml * (-X.P.g * n_hat[:, 2:3] + self.L * jnp.sum(n_dot ** 2, -1, keepdims=True))
@@ -128,6 +134,7 @@ class SlungScenario:
         tau_b = jnp.cross(jnp.broadcast_to(jnp.asarray(self.r_att), F_b.shape), F_b)
         return jnp.concatenate([F_b, tau_b], -1)
 
+    @functools.partial(jax.jit, static_argnums=(0, 2, 3))
     def advance(self, pend, n_sub=None, dt=None):
         """Semi-implicit (velocity-first) integration on the unit sphere.
 
@@ -150,6 +157,7 @@ class SlungScenario:
 
         return jax.lax.fori_loop(0, n_sub, body, pend)
 
+    @functools.partial(jax.jit, static_argnums=(0,))
     def energy(self, pend):
         """Tether energy per unit load mass: 1/2 L^2 ||n_dot||^2 + g L (n.e3)."""
         nh, nd = pend[:, 0:3], pend[:, 3:6]
@@ -159,6 +167,10 @@ class SlungScenario:
         """Figure-8 excitation at the scenario period: shorter = harsher."""
         if self.level <= 0:
             return pend
+        return self._excite(pend, t)
+
+    @functools.partial(jax.jit, static_argnums=(0,))
+    def _excite(self, pend, t):
         w = 2 * np.pi / self.level
         amp = 0.35
         drive = amp * w * jnp.stack(

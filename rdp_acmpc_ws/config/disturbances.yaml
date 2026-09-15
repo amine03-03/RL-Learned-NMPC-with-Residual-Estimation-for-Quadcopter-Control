@@ -1,0 +1,15 @@
+# S0..S6 (§9.7).  Deterministic and reproducible; seeds are recorded per run.
+/**:
+  ros__parameters:
+    episode:
+      t_on: 5.0            # 0-5 s nominal
+      t_off: 12.0          # 5-12 s disturbance active
+      t_end: 15.0          # 12-15 s removed / recovery
+    seeds: [0, 1, 2]
+    S1: {mass_scale: [1.10, 1.20], inertia_scale: [0.85, 1.15], cg_offset_m: [0.02, 0.05]}
+    S2: {step_force_frac_weight: 0.12, step_moment_frac: 0.04}
+    S3: {gust_peak_frac_weight: 0.15}
+    S4: {frequencies_hz: [0.1, 0.25, 0.5, 1.0, 2.0, 4.0], chirp: [0.1, 4.0],
+         amplitude_frac_weight: 0.10}
+    S5: {motor_effectiveness: 0.90}
+    S6: {combined: true}

@@ -1,0 +1,19 @@
+# §9.13.  Every run writes the tree of §9.14 with a config.yaml that records the
+# git commit, PX4 and Gazebo versions, rates, horizon, H, seed, plant parameters
+# and the calibrated T_max.  Without those the result is not reproducible.
+/**:
+  ros__parameters:
+    output_root: runs
+    E_A: {scenarios: [S0,S1,S2,S3,S4,S5,S6], controllers: [C0,C1,C2,C3],
+          incumbents: [PID, NMPC1], incumbent_scenarios: [S0,S1], seeds: [0,1,2]}
+    E_B: {scenario: S4, frequencies_hz: [0.1,0.25,0.5,1.0,2.0,4.0], chirp: true}
+    E_C: {horizons: [10,20,30,40], controllers: [C0,C1,C2]}
+    E_D: {history: [16,32,64]}
+    metrics:
+      deadline_ms: 20.0
+      adapt_norm_threshold: 0.2    # fixed BEFORE the final evaluation
+      adapt_hold_s: 0.5
+    preflight:
+      require_pass: true
+      s0_zero_check: {abs_Fz_N: 0.3, norm_tau_Nm: 0.05}
+      analytic_agreement_pct: 10.0

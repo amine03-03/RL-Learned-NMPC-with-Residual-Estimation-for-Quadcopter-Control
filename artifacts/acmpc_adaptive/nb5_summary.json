@@ -1,0 +1,49 @@
+{
+  "scale": "smoke",
+  "selected_encoder": "LSTM",
+  "gate_passed": false,
+  "H": 32,
+  "variants": [
+    "A",
+    "B",
+    "C"
+  ],
+  "checks": [
+    {
+      "check": "central: Oracle <= best RDP",
+      "passed": true
+    },
+    {
+      "check": "central: best RDP <= Robust",
+      "passed": true
+    },
+    {
+      "check": "central: best RDP <= Base",
+      "passed": false
+    },
+    {
+      "check": "asym: Oracle <= best RDP",
+      "passed": false
+    },
+    {
+      "check": "asym: best RDP <= Robust",
+      "passed": true
+    },
+    {
+      "check": "asym: best RDP <= Base",
+      "passed": false
+    },
+    {
+      "check": "slung: Oracle <= best RDP",
+      "passed": true
+    },
+    {
+      "check": "slung: best RDP <= Robust",
+      "passed": true
+    },
+    {
+      "check": "slung: best RDP <= Base",
+      "passed": true
+    }
+  ]
+}

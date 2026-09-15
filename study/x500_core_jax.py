@@ -1488,9 +1488,20 @@ class Env:
         return _resid_jit(self.state, self.prev["u"], self.par, self.wind())
 
     def _oracle(self):
+        """The extra 6 observation channels, when they are switched on.
+
+        Routed through :meth:`d_channel` / :meth:`dmod`, **not** through
+        :meth:`d_truth`: with no estimator attached these are the truth, which is
+        what makes the arm an oracle, but once an RDP is attached they become the
+        *prediction*, which is what makes variants A and C use the estimator they
+        claim to.  Reading ``d_truth`` here would hand ground truth to the online
+        controller -- §9.1 exposes it to the logger and the evaluator only -- and
+        the RDP rows would silently be oracle rows.
+        """
         if not self.cfg.oracle:
             return None
-        return self.d_truth() if self.cfg.oracle_target == "wrench" else self.residual_truth()
+        return (self.d_channel() if self.cfg.oracle_target == "wrench"
+                else self.dmod())
 
     def obs(self):
         self.key, k = jax.random.split(self.key)

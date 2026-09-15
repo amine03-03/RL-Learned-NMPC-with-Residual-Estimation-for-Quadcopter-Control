@@ -117,19 +117,32 @@ S.section(2, "render", "one clip per controller, identical initial state",
 
 rows, DATAS, LABELS = [], [], []
 start_states = {}
+def build_env(name, extra):
+    """The environment a clip is flown in.
+
+    The adaptive arms need an ``AdaptEnv`` whose oracle channel is switched on
+    exactly as the variant was trained (``to_obs``), otherwise the observation
+    width does not match the actor -- 40 against 46 -- and the trunk matmul
+    fails.  The estimator is attached in both adaptive cases, so that channel
+    carries the **prediction** and not the truth.
+    """
+    if not name.startswith("ADAPT"):
+        return X.Env(1, 4242, 10, SPEC, (PATH,), fixed=dict(R=R_FIXED))
+    scen = extra["scen"] if extra else "central"
+    lvl = extra["level"] if extra else 0.0
+    return A.AdaptEnv(1, 4242, 10, SPEC, scen, lvl, paths=(PATH,),
+                      oracle=bool(ckv.get("to_obs", True)), H=Hsel,
+                      fixed=dict(R=R_FIXED))
+
+
 for name, title, mkctrl, extra in CLIPS:
-    if extra is None:
-        env = X.Env(1, 4242, 10, SPEC, (PATH,), fixed=dict(R=R_FIXED))
-    else:
-        env = A.AdaptEnv(1, 4242, 10, SPEC, extra["scen"], extra["level"],
-                         paths=(PATH,), oracle=bool(ckv.get("to_obs", True)),
-                         H=Hsel, fixed=dict(R=R_FIXED))
+    env = build_env(name, extra)
     T, per = V.clip_length(env, LAPS)
     # the episode must OUTLAST the clip, or a reset re-injects the offset
     env.cfg = type(env.cfg)(**{**env.cfg.__dict__, "ep_len": T + SETTLE + 200})
     env.reset()
-    if extra is not None and extra.get("attach"):
-        env.attach(p_sel, sc_sel)
+    if name.startswith("ADAPT"):
+        env.attach(p_sel, sc_sel)      # the channel carries the PREDICTION
     e_inject, e_start = M.settle_on_path(env, PILOT(), steps=SETTLE, tol=0.05,
                                          strict=STRICT_START, verbose=True,
                                          label=title)
@@ -153,15 +166,27 @@ S.table(MAN[["name", "title", "T", "period", "laps", "theta_span", "rmse",
 base = start_states[CLIPS[0][0]]
 worst = 0.0
 for name, title, _, extra in CLIPS:
-    if extra is not None:
-        continue                       # the offset-CG clip is a different plant
+    if extra is not None or name.startswith("ADAPT"):
+        continue        # adaptive clips fly a different env (oracle channel /
+                        # offset CG), so they are not in the identical-state set
     worst = max(worst, float(np.abs(start_states[name] - base).max()))
 print(f"\n  comparison clips open in an identical state to {worst:.2e} "
       f"(requirement 1e-6): {'OK' if worst < 1e-6 else 'FAILED'}")
 assert worst < 1e-6, "comparison clips do not start from the same state"
 assert (MAN.respawns == 0).all(), "a clip respawned: it is not one continuous flight"
-assert (MAN.theta_span >= 2 * np.pi - 1e-2).all() or PATH in ("hover", "step"), \
-    "a clip does not span a full path period"
+# §7.3 property 1 is about the CLIP, not about how well it was flown: the clip
+# must last at least one path period.  Asserting on the *flown* angular span
+# instead would fail exactly the diverging controllers §8.7 says must still be
+# filmed -- the assertion would enforce the result it is meant to observe.
+assert (MAN.laps >= 1.0 - 1e-6).all() or PATH in ("hover", "step"), \
+    "a clip is shorter than one path period"
+short = MAN[MAN.theta_span < 2 * np.pi - 1e-2]
+if len(short):
+    print(f"  NOTE: {len(short)} clip(s) covered the full period in time but not "
+          f"in flown angle -- that is a divergence diagnostic, not a clip defect:")
+    for _, r in short.iterrows():
+        print(f"    {r.title}: flew {r.theta_span:.3f} rad of "
+              f"{2*np.pi:.3f} (RMSE {r.rmse:.3f} m)")
 V.assert_manifest(MAN)
 print("  manifest is authoritative and the video directory matches it exactly.")
 
