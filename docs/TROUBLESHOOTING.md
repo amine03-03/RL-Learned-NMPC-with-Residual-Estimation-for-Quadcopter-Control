@@ -1,8 +1,8 @@
 # Troubleshooting
 
-## `FAILED_PRECONDITION: ... tile size ... 3 % 4 != 0` during a notebook
+## `FAILED_PRECONDITION: ... tile size ... 3 % 4 != 0` (CUDA backend)
 
-Full symptom, seen on jax/jaxlib 0.10.2 in Notebook 1 section [4]:
+Symptom — any notebook, as soon as an MPC solve is compiled:
 
 ```
 jax.errors.JaxRuntimeError: FAILED_PRECONDITION: Expected the tile size of the
@@ -11,53 +11,78 @@ slice={[0:8], [3:6]}, metadata={op_name="jit(_solve)/.../jit(step_c)/slice"}
 to divide the dimension size exactly, but got 3 % 4 != 0
 ```
 
-**This is not a bug in this repository.** The op is `x[..., 3:6]` in `step_c`
-(`x500_core_jax.py:364`) — the 3-wide velocity block — feeding a `concatenate`
-when the state derivative is reassembled. XLA's CPU backend picks a 4-wide f64
-vector tile (256-bit) and its emitter asserts the concatenated dimension
-divides evenly by that tile. `3 % 4 != 0`, so the compiler aborts. It is a
-missing edge case for non-power-of-two widths, and a 3-vector is exactly that.
+**Status: fixed in this repository.** If you are on a current checkout you
+should not see it. The rest of this section explains what it was, because the
+shape of the bug makes it easy to re-introduce.
 
-It is a *compiler* precondition failure, not a shape error: nothing is wrong
-with the traced program, and the identical code compiles and runs on the same
-jax version on other machines. The trigger is environmental — `XLA_*`/`JAX_*`
-variables already set in your shell, or CPU-dependent tiling choices.
+### What it was
 
-### Quickest thing to try
+XLA aborts while compiling a `concatenate` whose operands are 3 wide. The
+emitter picks a 4-element f64 tile and asserts that the concatenated dimension
+divides evenly by that tile; a 3-vector never will. It is a missing edge case
+for non-power-of-two widths, not a problem with the traced program.
+
+The trigger was `fc()` in `x500_core_jax.py`, which assembled the state
+derivative as `jnp.concatenate([v, acc, qdot], -1)` with widths 3, 3, 4 —
+`v = x[..., 3:6]` being the `f64[8,3]` in the message — plus the same pattern
+in the quaternion term and in `step_c`.
+
+`fc` and `step_c` now assemble their outputs with `_assemble`, which writes
+blocks into a preallocated array with `.at[].set()`. That lowers to
+dynamic-update-slice and never reaches the concatenate emitter. It is exactly
+equivalent: verified bit-identical (`0.0`) across flat, batched and single
+shapes, with and without the disturbance argument, and pinned by `test_D8_*`
+in `study/tests/test_audit_corrections.py`.
+
+### It is backend-specific, and that is the trap
+
+**This only happens on the CUDA backend.** The same code compiles fine on a
+CPU-only jaxlib, on the same jax/jaxlib version. A machine with a GPU installs
+a CUDA jaxlib, JAX puts the computation on the GPU by default, and the crash
+appears; a CPU-only box never sees it.
+
+Two consequences, both of which cost real time when this was first diagnosed:
+
+- **No `--xla_cpu_*` flag can fix it.** They are silently no-ops, because the
+  computation is not on the CPU backend. A flag sweep will return *byte
+  identical* errors for every flag, which looks like evidence about compiler
+  passes and is actually evidence that none of the flags applied.
+- **Check which backend you are on before anything else.**
+  `python -c "import jax; jax.print_environment_info()"` prints a `device info:`
+  line. If it names a GPU, you are not on the CPU backend.
+
+### If it comes back somewhere else
+
+There are ~44 `jnp.concatenate` calls in the study and several have
+non-power-of-two operand widths, so another one could trip the same emitter on
+a code path that is not yet exercised. The fix is mechanical: replace the
+concatenate with `_assemble(...)`, and add the numbers to the `test_D8_*`
+checks. `study/notebooks/xla_probe3.py` bisects which call is responsible.
+
+### Escape hatch
+
+If you hit a variant and need to keep working immediately, force the CPU
+backend:
 
 ```bash
-XLA_FLAGS="--xla_cpu_experimental_enable_tiling_propagation=false" \
-  python nb1_control_problem.py
+JAX_PLATFORMS=cpu python nb1_control_problem.py
 ```
 
-That flag disables the tiling pass whose assertion is failing, and is the
-least invasive of the known workarounds.
+This is a workaround, not a fix — it gives up the GPU, which is a large
+slowdown for the training notebooks.
 
-### If that does not work
+## Diagnostics
 
-```bash
-cd study/notebooks && python xla_probe.py
-```
+- `study/notebooks/xla_probe.py` — dumps environment and CPU, then tries each
+  accepted `XLA_FLAGS` candidate. Useful only for genuine CPU-backend issues.
+- `study/notebooks/xla_probe2.py` — minimal reproducers plus a core-count sweep.
+- `study/notebooks/xla_probe3.py` — bisection ladder from `fc` up to a full
+  rollout, reporting the smallest failing unit, and a decisive test of whether
+  removing concatenates fixes a given failure. Start here.
 
-`xla_probe.py` dumps the environment and CPU (the two things that can differ
-between machines on an identical jax build), then reproduces the failing solve
-under each candidate flag in a subprocess — `XLA_FLAGS` is read once at backend
-initialisation and cannot be changed in-process — and prints the exact
-`XLA_FLAGS` line to use for the whole study.
+## Versions
 
-Only flags **verified to be accepted by jaxlib 0.10.2** are tried. An
-unrecognised flag aborts the process, which would otherwise look identical to
-the workaround failing; the probe reports those as `N/A` rather than `FAIL`.
-
-### Applying a workaround to the whole study
-
-```bash
-export XLA_FLAGS="<the line the probe prints>"
-for n in nb?_*.py; do python "$n" || break; done
-```
-
-### Note on versions
-
-There is no pinned dependency file in this repository, so a fresh virtualenv
-can resolve to a JAX build that has not been exercised here. The verified
-combination is **jax 0.10.2 / jaxlib 0.10.2 on CPU with float64 enabled**.
+There is no pinned dependency file, so a fresh virtualenv can resolve to a JAX
+build that has not been exercised here. Verified: **jax 0.10.2 / jaxlib 0.10.2**,
+float64 enabled, on both a CPU-only build and a CUDA build (RTX 4080 SUPER,
+driver 580.178.04, CUDA 13.0).

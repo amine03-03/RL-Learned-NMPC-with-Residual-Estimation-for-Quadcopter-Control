@@ -353,6 +353,35 @@ def _ctrl_consts(par):
     return par["m_ctrl"], par["T_max_ctrl"]
 
 
+def _assemble(lead, width, blocks, dtype):
+    """Build a (``*lead``, ``width``) array from ``(start, stop, value)`` blocks.
+
+    Exactly equivalent to ``jnp.concatenate`` along the last axis, but lowered
+    as scatters (dynamic-update-slice) instead.
+
+    **Why this exists.**  On a CUDA backend, XLA aborts while compiling a
+    concatenate whose operands are 3 wide::
+
+        FAILED_PRECONDITION: Expected the tile size of the concatenation
+        dimension of operand ... f64[8,3] ... to divide the dimension size
+        exactly, but got 3 % 4 != 0
+
+    The emitter picks a 4-wide f64 tile and asserts the concatenated dimension
+    divides evenly by it; a 3-vector never will.  Nothing is wrong with the
+    traced program -- it is a missing edge case for non-power-of-two widths --
+    but it is fatal, and it is not reachable by any ``--xla_cpu_*`` flag because
+    the computation is on the GPU.  Assembling by scatter sidesteps the emitter
+    entirely and costs nothing measurable.
+
+    Verified equivalent to the concatenate it replaces: ``fc`` to 0.0 exactly,
+    ``step_c`` to ~1e-16 (pinned by test_D8_* in tests/test_audit_corrections.py).
+    """
+    out = jnp.zeros(tuple(lead) + (width,), dtype)
+    for lo, hi, val in blocks:
+        out = out.at[..., lo:hi].set(val)
+    return out
+
+
 def fc(x, u, d=None, par=None):
     """(3.3) control-model derivative.  x (B,10), u (B,4), d (B,6) -> (B,10).
 
@@ -370,9 +399,15 @@ def fc(x, u, d=None, par=None):
     a_res = jnp.zeros_like(v) if d is None else d[..., 0:3]
     om_res = jnp.zeros_like(om) if d is None else d[..., 3:6]
     acc = thrust_of(u[..., 0:1], T_max) / m * qzaxis(q) - P.g * jnp.asarray(E3) + a_res
-    qdot = 0.5 * qmul(q, jnp.concatenate(
-        [jnp.zeros_like(om[..., :1]), om + om_res], -1))
-    return jnp.concatenate([v, acc, qdot], -1)
+    # Assembled by scatter, NOT jnp.concatenate -- see _assemble.  Do not
+    # "simplify" these back: on a CUDA backend the concatenate of 3-wide
+    # operands crashes the compiler outright (see docs/TROUBLESHOOTING.md).
+    omq = _assemble(om.shape[:-1], 4, [(1, 4, om + om_res)], om.dtype)
+    qdot = 0.5 * qmul(q, omq)
+    return _assemble(jnp.broadcast_shapes(v.shape[:-1], acc.shape[:-1],
+                                          qdot.shape[:-1]), 10,
+                     [(0, 3, v), (3, 6, acc), (6, 10, qdot)],
+                     jnp.result_type(v, acc, qdot))
 
 
 @functools.partial(jax.jit, static_argnames=("dt",))
@@ -384,7 +419,9 @@ def step_c(x, u, d=None, par=None, dt=None):
     k3 = fc(x + 0.5 * dt * k2, u, d, par)
     k4 = fc(x + dt * k3, u, d, par)
     xn = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-    return jnp.concatenate([xn[..., :6], qnorm(xn[..., 6:10])], -1)
+    # was jnp.concatenate([xn[..., :6], qnorm(xn[..., 6:10])], -1); the scatter
+    # is identical and does not emit a concatenate (see _assemble)
+    return xn.at[..., 6:10].set(qnorm(xn[..., 6:10]))
 
 
 # --------------------------------------------------------------------------- #

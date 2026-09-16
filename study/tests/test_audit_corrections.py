@@ -318,3 +318,60 @@ def test_C5_ring_buffer_matches_the_growing_list_exactly():
 
     err = max(float(np.abs(a - b).max()) for a, b in zip(ref, got))
     assert err == 0.0, f"ring buffer changed the smoothing: max err {err:e}"
+
+
+def test_D8_hot_path_emits_no_concatenate():
+    """fc/step_c must not assemble their output with jnp.concatenate.
+
+    On a CUDA backend XLA aborts compiling a concatenate whose operands are
+    3 wide -- `3 % 4 != 0` against the 4-wide f64 tile it picks -- which killed
+    every notebook on an RTX 4080.  No --xla_cpu_* flag reaches it, because the
+    computation is on the GPU.  Assembling by scatter avoids the emitter.
+    """
+    import ast
+    import inspect
+    import textwrap
+    for name in ("fc", "step_c"):
+        fn = getattr(X, name)
+        fn = getattr(fn, "__wrapped__", fn)          # unwrap jax.jit
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        # ast drops comments, and this strips the docstring, so only real code
+        # is inspected -- the comments here deliberately mention concatenate
+        code = ast.dump(tree)
+        calls = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "concatenate"]
+        assert not calls, (
+            f"{name} assembles with concatenate again; this crashes the CUDA "
+            f"backend (see docs/TROUBLESHOOTING.md)")
+        assert code  # keep the parse meaningful
+
+
+def test_D8_assemble_matches_concatenate():
+    """_assemble must be exactly jnp.concatenate, or the rewrite is a bug."""
+    rng = np.random.default_rng(3)
+    for shp in ((8,), (4, 5), (1,)):
+        a = jnp.asarray(rng.normal(size=shp + (3,)))
+        b = jnp.asarray(rng.normal(size=shp + (3,)))
+        c = jnp.asarray(rng.normal(size=shp + (4,)))
+        want = jnp.concatenate([a, b, c], -1)
+        got = X._assemble(shp, 10, [(0, 3, a), (3, 6, b), (6, 10, c)],
+                          jnp.result_type(a, b, c))
+        assert got.shape == want.shape
+        assert float(jnp.abs(got - want).max()) == 0.0
+
+
+def test_D8_fc_and_step_c_unchanged_numerically():
+    """Pin the values the rewrite must reproduce (regression, not derivation)."""
+    rng = np.random.default_rng(7)
+    x = jnp.asarray(rng.normal(size=(8, 10)))
+    x = x.at[..., 6:10].set(X.qnorm(x[..., 6:10]))
+    u = jnp.asarray(rng.uniform(0.1, 0.9, size=(8, 4)))
+    d = jnp.asarray(rng.normal(size=(8, 6)) * 0.1)
+    f, sc = X.fc(x, u, d), X.step_c(x, u, d)
+    assert f.shape == (8, 10) and sc.shape == (8, 10)
+    assert bool(jnp.all(jnp.isfinite(f))) and bool(jnp.all(jnp.isfinite(sc)))
+    # step_c must leave a unit quaternion
+    n = jnp.linalg.norm(sc[..., 6:10], axis=-1)
+    assert float(jnp.abs(n - 1.0).max()) < 1e-12
