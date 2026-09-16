@@ -14,10 +14,13 @@ REL = 1e-6
 def test_T1_constants():
     """T-1: m, cg0, J, T_max, T/W, u_hover, a_lat_max to 1e-6 relative."""
     cases = [("m", X.M_TOT, 2.064308), ("cg0_z", X.CG_NOM[2], 0.001869131),
-             ("J_xx", X.J_NOM[0, 0], 0.023830955), ("J_yy", X.J_NOM[1, 1], 0.023830955),
-             ("J_zz", X.J_NOM[2, 2], 0.043893959), ("f_max", X.F_MAX, 8.54858),
+             # J now carries the rotors' OWN inertia from the SDF, not just
+             # their point masses (A6): +0.006 % on xx, +0.44 % on yy, +0.24 % on zz
+             ("J_xx", X.J_NOM[0, 0], 0.023832494), ("J_yy", X.J_NOM[1, 1], 0.023935416),
+             ("J_zz", X.J_NOM[2, 2], 0.043999950), ("f_max", X.F_MAX, 8.54858),
              ("T_max", X.T_MAX, 34.19432), ("T/W", X.TW, 1.689122),
-             ("u_hover", X.U_HOVER, 0.769431),
+             # u_hover under the PX4 actuator map, Omega = 150 + 850c (A2)
+             ("u_hover", X.U_HOVER, 0.728742),
              ("a_lat_max", X.A_LAT_MAX, 13.349711)]
     for name, got, want in cases:
         assert abs(got - want) <= REL * max(1.0, abs(want)), f"{name}: {got} != {want}"
@@ -40,6 +43,12 @@ def test_T2_allocation():
     assert abs(float(np.linalg.cond(X.M_NOM)) - 62.5) < 1e-6
     # the condition number is entirely the yaw row: k_m / arm
     assert abs(X.P.k_m / 0.174 - 0.0920) < 1e-3
+    # A3: the PX4 allocator inverts with CA_ROTORn_KM = 0.05, not the Gazebo
+    # plugin's 0.016, so its condition number is 20 and a commanded yaw torque
+    # realises 0.016/0.05 = 32 % of its intent
+    assert abs(float(np.linalg.cond(X.M_CTRL)) - 20.0) < 1e-6
+    f = np.linalg.inv(X.M_CTRL) @ np.array([0.0, 0.0, 0.0, 0.1])
+    assert abs((X.M_NOM @ f)[3] / 0.1 - X.P.k_m / X.P.k_m_ctrl) < 1e-9
 
 
 def test_T5_hover_linearisation_of_collective():
@@ -54,7 +63,13 @@ def test_T5_hover_linearisation_of_collective():
     h = 1e-6
     fd = float((X.fc(x, u.at[:, 0].add(h))[0, 5]
                 - X.fc(x, u.at[:, 0].add(-h))[0, 5]) / (2 * h))
-    assert abs(fd - 25.490538) < 1e-4
-    assert abs(X.DAZ_DC_HOVER - 25.490538) < 1e-4
-    assert abs(X.T_MAX / X.M_TOT - 16.5645) < 1e-3     # the wrong value, for contrast
-    assert abs(fd / (X.T_MAX / X.M_TOT) - 2 * X.U_HOVER) < 1e-5
+    # A2: with the PX4 idle floor the hover slope is 21.666957, not 25.490538.
+    # The pure-square form overstates control effectiveness by 17.65 %, which
+    # propagates straight into K_LQR and the terminal matrix.
+    assert abs(fd - 21.666957) < 1e-4
+    assert abs(X.DAZ_DC_HOVER - 21.666957) < 1e-4
+    assert abs(X.T_MAX / X.M_TOT - 16.5645) < 1e-3     # the linear value, for contrast
+    # the analytic form: 2 n K_T Om_hover (Om_max - Om_min) / m
+    want = (2 * X.P.n_rotor * X.P.K_T * X.OM_HOVER
+            * (X.P.Om_max - X.P.Om_min) / X.M_TOT)
+    assert abs(fd - want) < 1e-6

@@ -25,8 +25,16 @@ from . import frames as F
 T_MAX = 34.19432                 # the ONE definition; see check_glue
 M_NOM = 2.0643076923076924
 G = 9.8066
-U_HOVER = float(np.sqrt(M_NOM * G / T_MAX))
+#: SIM_GZ_EC_MIN / EC_MAX: PX4 maps the normalised actuator command onto
+#: [OM_MIN, OM_MAX], so thrust is NOT proportional to c^2 (A2).
+OM_MIN, OM_MAX = 150.0, 1000.0
+_R = OM_MIN / OM_MAX
+U_HOVER = float((np.sqrt(M_NOM * G / T_MAX) - _R) / (1.0 - _R))
+T_IDLE = T_MAX * _R ** 2         # 0.769 N at c = 0: 3.8 % of weight
 ALLOC_F = 0.0                    # this airframe: c = (1-f) y + f y^2 with f = 0
+#: CA_ROTORn_KM: what the PX4 allocator believes, against the Gazebo plugin's
+#: momentConstant of 0.016.  A commanded yaw torque realises 32 % of its intent.
+K_M_GZ, K_M_PX4 = 0.016, 0.05
 
 
 def check_frames(n=500, seed=0, tol_q=1e-15, tol_R=5e-15, tol_tilt=1e-17):
@@ -75,9 +83,11 @@ def check_ctbr_mapping():
 
 
 def check_thrust_calibration(y_measured=None, tol_pct=10.0):
-    """Check 3.  Two nonlinearities compose: the allocator applies
-    ``c = (1-f) y + f y^2`` and the motor gives ``F = F_max y^2``.  On this
-    airframe f = 0, so c = y and ``y_hover = sqrt(m g / T_max)``.
+    """Check 3.  THREE nonlinearities compose on gz_x500: the allocator applies
+    ``c = (1-f) y + f y^2`` (f = 0 here), PX4 maps the normalised command onto
+    ``Omega = OM_MIN + y (OM_MAX - OM_MIN)``, and the motor gives
+    ``F = n K_T Omega^2``.  The middle step is the one that is easy to miss: it
+    makes ``y_hover = 0.728742``, not ``sqrt(m g / T_max) = 0.769431`` (A2).
 
     The calibration factor is ``(y_hover / y_measured)^2``.  Using an
     uncalibrated T_max in the *truth* while the thrust model uses the calibrated
@@ -85,9 +95,10 @@ def check_thrust_calibration(y_measured=None, tol_pct=10.0):
     error invisible in any per-sample check.  That is why T_max is derived from
     one module and asserted everywhere else.
     """
-    y_hover = float(np.sqrt(M_NOM * G / T_MAX))
+    y_hover = U_HOVER
     if y_measured is None:
         return None, dict(y_hover_predicted=y_hover, alloc_f=ALLOC_F,
+                          idle_thrust_N=T_IDLE, om_min=OM_MIN,
                           note="no measured hover collective supplied; fly S0 "
                                "and pass --y-measured to calibrate")
     factor = (y_hover / float(y_measured)) ** 2

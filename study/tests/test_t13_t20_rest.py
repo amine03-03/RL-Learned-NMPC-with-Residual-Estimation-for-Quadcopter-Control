@@ -42,7 +42,12 @@ def test_T13_gae_respects_termination():
 
 
 def test_T13_mpve_three_step():
-    """T-13: MPVE (5.9) against a hand-computed 3-step case."""
+    """T-13: MPVE (8)-(9) against a hand-computed 3-step case.
+
+    Also the regression test for B3: ``mpve`` used to be a config flag that
+    nothing read, so Notebook 3's whole MPVE sweep produced bit-identical rows
+    and a gain column of exact zeros.
+    """
     g = 0.9
     B, N = 1, 3
     e_seq = jnp.zeros((B, N + 1, X.NE)).at[:, :, 0].set(
@@ -50,14 +55,31 @@ def test_T13_mpve_three_step():
     du = jnp.zeros((B, N, X.NU))
     om = jnp.zeros((B, 3))
     d_u = jnp.zeros((B, X.NU))
-    critic = [(jnp.zeros((X.NE, 1)), jnp.asarray([2.0]))]        # constant V = 2
-    got = float(X.mpve_targets(e_seq, du, critic, g, om, d_u)[0])
+    obs_n = jnp.zeros((B, X.OBS_DIM))
+    critic = [(jnp.zeros((X.OBS_DIM, 1)), jnp.asarray([2.0]))]      # constant V = 2
+    got = float(X.mpve_value_loss(critic, obs_n, e_seq, du, om, d_u, g))
+    r = [float(X.reward_quad(e_seq[:, k + 1], du[:, k], om, d_u,
+                             jnp.zeros(B))[0]) for k in range(N)]
     want = 0.0
-    for k in range(N):
-        want += g ** k * float(X.reward_quad(
-            e_seq[:, k + 1], du[:, k], om, d_u, jnp.zeros(B))[0])
-    want += g ** N * 2.0
-    assert abs(got - want) < 1e-12
+    for t in range(N):                                             # eq (9)
+        tgt = sum(g ** (k - t) * r[k] for k in range(t, N)) + g ** (N - t) * 2.0
+        want += (2.0 - tgt) ** 2
+    want /= N
+    assert abs(got - want) < 1e-10
+
+
+def test_T13_mpve_flag_is_live():
+    """B3: cfg['mpve'] must change the value loss, or the sweep measures nothing."""
+    import x500_core_jax as XX
+    base = dict(N=1, rep="diag", n_iter=4, n_diff=1, hid=16, minib=1, epochs=1,
+                sigma=0.05, lr=1e-4)
+    out = {}
+    for flag in (False, True):
+        env = XX.Env(4, 0, 10000, XX.nominal_spec(speed=(1.0, 1.0)), ("circle",))
+        _, _, df = XX.train_ppo(None, dict(base, mpve=flag), seed=0, iters=1,
+                                T_rollout=4, env=env, verbose=False)
+        out[flag] = float(df.value_loss.iloc[0])
+    assert out[True] != out[False], "the mpve flag is not read anywhere"
 
 
 def test_T14_moderate_roundtrip():
@@ -214,7 +236,7 @@ def test_T19_tether_energy_drift():
     s = A.SlungScenario(level=10.0)
     p = jnp.asarray([[np.sin(0.25), 0.0, -np.cos(0.25), 0.0, 0.0, 0.0]])
     E0 = float(s.energy(p)[0])
-    for _ in range(1500):                                # 30 s, ~21 periods
+    for _ in range(1500):                                # 30 s, ~36 periods
         p = s.advance(p)
     assert abs(float(s.energy(p)[0]) - E0) / abs(E0) < 0.02
 

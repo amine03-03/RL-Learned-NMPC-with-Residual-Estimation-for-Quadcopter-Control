@@ -3,8 +3,10 @@
   ros__parameters:
     model_path: models/rdp_gru.npz   # written by study/export_estimator.py
     rate_hz: 50.0
-    H: 32                  # 0.64 s at 50 Hz; benchmark {16,32,64} in E-D
+    H: 64                  # 1.28 s at 50 Hz, per arXiv:2605.16015 (C5)
     filter_alpha: 0.0      # optional first-order causal filter (§9.11 step 4)
+    smooth_n: 32           # rolling MEAN over 32 frames, the paper's smoothing
+    train_reference: hold  # the RDP is trained on POSITION HOLD (E-0)
     budget_ms: 8.0         # watchdog; on failure d_hat = 0 and a fault is counted
     # Choose the encoder on LATENCY, not R^2.  export_estimator.py measures
     # rdp_infer p95 on the target machine and records it in the .npz metadata.

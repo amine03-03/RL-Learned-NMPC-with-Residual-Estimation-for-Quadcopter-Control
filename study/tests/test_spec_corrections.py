@@ -43,7 +43,8 @@ def test_C2_Bc_attitude_block_is_not_halved():
     _, Bc = X.lqr_matrices(check=False)
     assert np.abs(np.diag(Bc[6:9, 1:4]) - np.asarray(X.OM_MAX)).max() < 1e-9
     assert np.abs(np.diag(Bc[6:9, 1:4]) - 0.5 * np.asarray(X.OM_MAX)).max() > 1.0
-    assert abs(Bc[5, 0] - 25.490538) < 1e-4          # and (2.11) is untouched
+    # (2.11) under the corrected PX4 actuator map (A2): 21.666957, not 25.490538
+    assert abs(Bc[5, 0] - 21.666957) < 1e-4
 
 
 def test_C3_slung_tension_sign():

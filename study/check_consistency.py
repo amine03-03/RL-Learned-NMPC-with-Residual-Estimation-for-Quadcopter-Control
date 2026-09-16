@@ -29,6 +29,7 @@ WS = os.path.join(ROOT, "rdp_acmpc_ws")
 #: systematic error invisible in any per-sample check (§9.4 check 3).
 STUDY_CONSTANTS = dict(
     m=float(X.M_TOT), T_max=float(X.T_MAX), K_T=float(X.P.K_T), k_m=float(X.P.k_m),
+    k_m_ctrl=float(X.P.k_m_ctrl), om_min=float(X.P.Om_min),
     arm=0.174, J_xx=float(X.J_NOM[0, 0]), J_yy=float(X.J_NOM[1, 1]),
     J_zz=float(X.J_NOM[2, 2]), g=float(X.P.g), u_hover=float(X.U_HOVER),
     dt_c=float(X.P.dt_c), om_max=[float(v) for v in X.OM_MAX],
@@ -67,6 +68,9 @@ def check_config():
     for k in ("m", "T_max", "K_T", "k_m", "arm", "g"):
         if k in veh:
             _chk(f"config acmpc.yaml vehicle.{k}", veh[k], STUDY_CONSTANTS[k], 1e-6)
+    if "u_hover" in veh:
+        _chk("config acmpc.yaml vehicle.u_hover", veh["u_hover"],
+             STUDY_CONSTANTS["u_hover"], 1e-6)
     if "J" in veh:
         for i, ax in enumerate(("xx", "yy", "zz")):
             _chk(f"config acmpc.yaml vehicle.J[{ax}]", veh["J"][i],
@@ -106,10 +110,21 @@ def check_internal():
     """The study's own derived constants, against §2 and against each other."""
     _chk("m = m_b + 4 m_r", X.M_TOT, 2.064308, 1e-6)
     _chk("T_max = 4 K_T Om_max^2", X.T_MAX, 4 * X.P.K_T * X.P.Om_max ** 2)
-    _chk("u_hover = sqrt(mg/T_max)", X.U_HOVER, np.sqrt(X.M_TOT * X.P.g / X.T_MAX))
+    # A2: the PX4 actuator map, Omega = Om_min + c (Om_max - Om_min)
+    _r = X.P.Om_min / X.P.Om_max
+    _chk("u_hover (PX4 actuator map)", X.U_HOVER,
+         (np.sqrt(X.M_TOT * X.P.g / X.T_MAX) - _r) / (1.0 - _r))
+    _chk("u_hover is NOT sqrt(mg/T_max)",
+         abs(X.U_HOVER - np.sqrt(X.M_TOT * X.P.g / X.T_MAX)) > 0.04, True)
+    _chk("idle thrust = 3.8 % of weight", X.T_IDLE / (X.M_TOT * X.P.g), 0.038, 1e-2)
     _chk("a_lat_max", X.A_LAT_MAX,
          np.sqrt((X.T_MAX / X.M_TOT) ** 2 - X.P.g ** 2))
-    _chk("d a_z/d c = 2g/u_hover", X.DAZ_DC_HOVER, 2 * X.P.g / X.U_HOVER)
+    _chk("d a_z/d c = 2 n K_T Om_h (Om_max-Om_min)/m", X.DAZ_DC_HOVER,
+         2 * X.P.n_rotor * X.P.K_T * X.OM_HOVER
+         * (X.P.Om_max - X.P.Om_min) / X.M_TOT)
+    _chk("cond(M_ctrl) = 20 (PX4 CA_ROTORn_KM)",
+         float(np.linalg.cond(X.M_CTRL)), 20.0, 1e-9)
+    _chk("yaw authority realised", X.P.k_m / X.P.k_m_ctrl, 0.32, 1e-9)
     _chk("cond(M) = 62.5", float(np.linalg.cond(X.M_NOM)), 62.5, 1e-9)
     _chk("J off-diagonals", float(np.abs(X.J_NOM - np.diag(np.diag(X.J_NOM))).max()),
          0.0, 1e-15)

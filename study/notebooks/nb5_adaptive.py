@@ -36,11 +36,22 @@ S.header("Notebook 5 - adaptive AC-MPC with the RDP")
 X.style()
 FIG = V.figures_dir()
 
-PATHS = ("circle", "fig8")
+#: **Training is POSITION HOLD.**  arXiv:2605.16015 trains the adaptive policy
+#: and the RDP on a position-hold objective and argues that is what "promotes
+#: stable, aggressive recovery from severe disturbances while naturally
+#: generalizing to dynamic trajectory tracking".  Training on a moving reference
+#: instead -- as this notebook previously did -- mixes the tracking error with
+#: the disturbance response, which is precisely the signal the RDP has to
+#: isolate.  Evaluation stays on the tracking suites, so the generalisation
+#: claim is tested rather than assumed.
+TRAIN_TASK = "stabilize"
+EVAL_TASK = "track"
+PATHS = ("circle", "fig8")          # the hold setpoint is sampled from these
 CFG = dict(N=1, rep="diag", n_iter=S.CFG["ilqr"], n_diff=2, hid=S.CFG["hid"],
-           minib=S.CFG["minib"], epochs=S.CFG["epochs"], sigma=0.15)
+           minib=S.CFG["minib"], epochs=S.CFG["epochs"], sigma=0.05)
 ITERS = S.CFG["iters_sweep"]
 S2 = M.moderate(S.disturbed_spec(), wind=(0.0, 2.0))
+H = A.H_DEFAULT                      # 64, aligned with the paper (C5)
 
 # %% [markdown]
 # ## Precondition gate — checked before any closed-loop number is read
@@ -54,6 +65,7 @@ S2 = M.moderate(S.disturbed_spec(), wind=(0.0, 2.0))
 # 32 % of weight and saturates training.
 
 # %%
+print(f"  training objective: {TRAIN_TASK} (position hold); evaluation: {EVAL_TASK}")
 S.section(1, "precondition gate", "is the oracle trainable at all?",
           produces="acmpc_adaptive/{Base,Robust,Oracle}.pkl, T9, F20")
 
@@ -72,7 +84,8 @@ ARMS = {
 POL, LOGS = {}, {}
 for name, a in ARMS.items():
     env = A.AdaptEnv(S.CFG["n_env"], 5, 200, a["spec"], "central", 0.0,
-                     oracle=a["oracle"], wrench_dr=a["wrench_dr"], paths=PATHS)
+                     oracle=a["oracle"], wrench_dr=a["wrench_dr"], paths=PATHS,
+                     task=TRAIN_TASK)
     actor, critic, log = X.train_ppo(
         None, dict(CFG, dist_label=f"{name} @ wrench_dr={a['wrench_dr']}"),
         seed=5, iters=ITERS, T_rollout=S.CFG["T_rollout"], env=env, verbose=False)
@@ -134,7 +147,6 @@ pd.concat([LOGS[n].assign(policy=n) for n in ARMS]).to_csv(
 S.section(2, "predictor study", "four encoders, identical window and target",
           produces="acmpc_adaptive/estimators/all.pkl, T7, F16, F17")
 
-H = A.H_DEFAULT
 N_EP_DATA = 12 if S.SCALE == "smoke" else 48
 T_DATA = 200 if S.SCALE == "smoke" else 600
 pilot = X.make_nmpc_ctrl(N=1, n_iter=S.CFG["ilqr"])
@@ -147,7 +159,7 @@ def collect(scen, level, seed, n, T):
     can reach the predictor's input.
     """
     env = A.AdaptEnv(n, seed, T + 10, S2, scen, level, paths=PATHS,
-                     wrench_dr=A.WRENCH_DR_START)
+                     wrench_dr=A.WRENCH_DR_START, task=TRAIN_TASK, H=H)
     pilot.bind_env(env)
     F, Y, EP = [], [], []
     o, e, xr = env.obs()
@@ -305,7 +317,7 @@ p_sel, sc_sel, _ = PARAMS[SELECTED]
 for v, spec_v in VARIANTS.items():
     env = A.AdaptEnv(S.CFG["n_env"], 5, 200, S2, "central", 0.0,
                      oracle=spec_v["to_obs"], wrench_dr=A.WRENCH_DR_START,
-                     paths=PATHS)
+                     paths=PATHS, task=TRAIN_TASK)
     actor, critic, log = X.train_ppo(None, dict(CFG, dist_label=f"variant {v}"),
                                      seed=5, iters=ITERS,
                                      T_rollout=S.CFG["T_rollout"], env=env,
@@ -313,6 +325,15 @@ for v, spec_v in VARIANTS.items():
     X.save_ckpt(dict(actor=actor, critic=critic, cfg=CFG, variant=v, **spec_v),
                 "acmpc_adaptive", "variants", f"{v}.pkl")
     VARIANTS[v]["actor"] = actor
+
+
+#: Which (4.13) mode the MODEL path uses.  D3 measures the closed-loop gain of
+#: the rate loop to a step moment: ~0.9 out to 0.3 s but 0.10 by 8 s, because
+#: (4.13) neglects K_i and the integrator absorbs a standing moment.  The
+#: payload scenarios are quasi-static, so 'first_order' overstates the rate
+#: residual by ~9x there; 'closed_loop' scales it by the derived gain.  Both are
+#: reported below.
+DMOD_MODE = "closed_loop"
 
 
 def adapt_ctrl(actor, name, to_model, attach_rdp):
@@ -333,7 +354,8 @@ for scen in A.SCENARIOS:
             env = A.AdaptEnv(max(S.CFG["n_eval"] // 4, 8), 911, 100000, S2, scen,
                              lvl, oracle=(name == "Oracle"
                                           or name in ("RDP-A", "RDP-C")),
-                             paths=PATHS, H=H)
+                             paths=PATHS, H=H, task=EVAL_TASK,
+                             dmod_mode=DMOD_MODE)
             if attach:
                 env.attach(p_sel, sc_sel)
             ctrl = adapt_ctrl(actor, name, to_model, attach)

@@ -10,7 +10,7 @@ import sys
 
 import numpy as np
 
-from .lissajous import LEVELS, check_feasible, episode_timeline, lissajous
+from .lissajous import HOLD, LEVELS, check_feasible, episode_timeline, reference
 
 
 def main(args=None):                                       # pragma: no cover
@@ -35,8 +35,11 @@ def main(args=None):                                       # pragma: no cover
                          ("z0", 1.5), ("rate_hz", 50.0)):
                 self.declare_parameter(k, v)
             g = lambda k: self.get_parameter(k).value
-            w = LEVELS.get(g("level"), 1.0)
-            ok, pv, pa, budget = check_feasible(g("A"), g("B"), w)
+            # level == 'hold' selects the position-hold reference used for RDP
+            # data generation (arXiv:2605.16015 trains on position hold)
+            self.mode = g("level")
+            w = LEVELS.get(self.mode, 1.0)
+            ok, pv, pa, budget = check_feasible(g("A"), g("B"), w, mode=self.mode)
             if not ok:
                 raise SystemExit(
                     f"level {g('level')!r} (w={w}) is INFEASIBLE: peak demand "
@@ -44,7 +47,7 @@ def main(args=None):                                       # pragma: no cover
                     f"Refusing to publish it.")
             self.w = w
             self.get_logger().info(
-                f"level {g('level')} w={w}: peak_v {pv:.3f} m/s, peak_a "
+                f"reference {self.mode}: peak_v {pv:.3f} m/s, peak_a "
                 f"{pa:.3f} m/s^2 <= {budget:.4f} -- feasible")
             self.pub = self.create_publisher(PoseStamped, "/reference/trajectory", 10)
             self.t0 = None
@@ -55,7 +58,7 @@ def main(args=None):                                       # pragma: no cover
             self.t0 = self.t0 if self.t0 is not None else now
             t = now - self.t0
             g = lambda k: self.get_parameter(k).value
-            p, _, _ = lissajous(t, g("A"), g("B"), self.w, g("z0"))
+            p, _, _ = reference(t, self.mode, g("A"), g("B"), g("z0"))
             m = PoseStamped()
             m.header.stamp = self.get_clock().now().to_msg()
             m.header.frame_id = episode_timeline(t)

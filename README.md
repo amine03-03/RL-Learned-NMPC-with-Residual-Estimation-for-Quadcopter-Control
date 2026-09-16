@@ -12,7 +12,25 @@ computable, so it is learned. That is the whole project.
 
 ---
 
-## Read this first: eight specification errors
+## Read this first: two rounds of corrections
+
+Two independent passes, both recorded with the measurements that drove them:
+
+- [`docs/CORRECTIONS.md`](docs/CORRECTIONS.md) — **eight errors in the build
+  specification**, found while implementing it.
+- [`docs/AUDIT.md`](docs/AUDIT.md) — a later audit against the **real PX4 x500**
+  (SDF at `bb0b9cf` + the `gz_x500` airframe file) and the **two source papers**
+  (arXiv:2306.09852 for AC-MPC, arXiv:2605.16015 for the adaptive mechanism).
+  Fourteen further corrections, including three that changed results.
+
+The audit's headline findings: PX4's `SIM_GZ_EC_MIN = 150` idle floor was
+ignored, making hover control effectiveness **17.65 % optimistic**; exploration
+noise was on the cost-map parameters rather than the action, so §8.3's
+exploration mechanism **could not occur**; and MPVE was a config flag nothing
+read, so that whole sweep returned **bit-identical rows**. The RDP now trains on
+**position hold**, as its paper specifies.
+
+## The eight specification errors
 
 The specification says *"never let a claim outrun a measurement"*. Applying that
 to the specification itself, **eight of its statements do not survive checking**.
@@ -64,7 +82,8 @@ rdp_acmpc_ws/              §9     ROS 2 / PX4 / Gazebo
   src/visualization/         live panel R-F1 and offline R-F2..R-F12
   config/                    acmpc, rdp, disturbances, experiments
 artifacts/                 every CSV, figure and checkpoint the notebooks write
-docs/CORRECTIONS.md        the eight corrections, with their measurements
+docs/CORRECTIONS.md        the eight specification corrections
+docs/AUDIT.md              the audit against PX4 and the two source papers
 docs/ROS2_WORKSPACE.md     what is in the workspace, why, and what is not flown
 ```
 
@@ -121,7 +140,9 @@ Three gates fire at `smoke`, correctly, and each reports rather than hides:
 
 Hand-built controllers are scale-independent, so these are meaningful:
 
-- **§2 constants** reproduce to 1e-6, all derived from the SDF values, none pasted.
+- **§2 constants** reproduce to 1e-6 against the real PX4 SDF, all derived, none
+  pasted — including `u_hover = 0.728742` and `∂a_z/∂c = 21.6670` under PX4's
+  actual actuator map.
 - **T-8**, the most valuable test: residual and wrench are **identically zero**
   (< 1.2e-16) on the undisturbed plant.
 - **Reference feasibility**: the superellipse at R = 0.5 demands 40.85 m/s²
@@ -130,8 +151,10 @@ Hand-built controllers are scale-independent, so these are meaningful:
 - **The preview is not optional**: with the reference frozen, error grows with the
   horizon on every smooth path (circle 0.078 → 0.411 m over N = 1 → 20) while the
   preview column falls and saturates.
-- **Weight tuning moves the answer** by 9× over the admissible (Q, R) grid — the
-  measurement that motivates the whole study.
+- **Weight tuning moves the answer** by 20.8× over the admissible (Q, R) grid —
+  the measurement that motivates the whole study. The operating point
+  (`Q_pos = 10`, `R = 5`) is the argmin of that grid, re-derived after the
+  physics corrections.
 - **Does the online solve earn its compute?** On smooth paths, barely: LQR is
   6–8 % *better* than NMPC N=1. On the superellipse it is 78 % worse. That split
   is the honest answer to §8.6's first question.

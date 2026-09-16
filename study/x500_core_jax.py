@@ -52,9 +52,14 @@ class P:
     m_body: float = 2.0
     m_rotor: float = 0.016076923076923075
     n_rotor: int = 4
-    K_T: float = 8.54858e-06
-    k_m: float = 0.016
-    Om_max: float = 1000.0
+    K_T: float = 8.54858e-06               # SDF motorConstant
+    k_m: float = 0.016                     # SDF momentConstant -- the TRUTH
+    Om_max: float = 1000.0                 # SDF maxRotVelocity / SIM_GZ_EC_MAX
+    #: SIM_GZ_EC_MIN from the gz_x500 airframe file.  PX4 maps a normalised
+    #: actuator command onto [Om_min, Om_max], **not** onto [0, Om_max] (A2).
+    #: Ignoring it puts u_hover 5.6 % and d a_z/d c 17.7 % out against the real
+    #: platform, and removes the 0.77 N idle floor entirely.
+    Om_min: float = 150.0
     tau_up: float = 0.0125
     tau_dn: float = 0.0250
     g: float = 9.8066
@@ -66,8 +71,23 @@ class P:
     K_i: tuple = (4.0, 4.0, 2.0)
     K_d: tuple = (0.28, 0.28, 0.10)
     I_lim: float = 3.0
+    #: CA_ROTORn_KM from the gz_x500 airframe file -- what the PX4 **allocator**
+    #: believes.  It disagrees with the Gazebo plugin's momentConstant (0.016) by
+    #: 3.125x, so a commanded yaw torque realises only 32 % of its intent on the
+    #: real stack (A3).  Carried separately so that error is represented.
+    k_m_ctrl: float = 0.05
+    # --- from the SDF, previously unmodelled (A5) ---------------------------
+    #: rotorDragCoefficient: a rotor-speed-proportional drag on the airspeed
+    #: component perpendicular to the rotor axis, per rotor.
+    c_rotor_drag: float = 8.06428e-05
+    #: rollingMomentCoefficient: moment opposing in-plane airspeed.
+    c_roll_mom: float = 1.0e-06
+    #: rotor own inertia (SDF, diagonal, body axes).  Previously the rotors were
+    #: treated as point masses, which understated J by up to 0.44 % (A6).
+    J_rotor: tuple = (3.8464910483993325e-07, 2.6115851691700804e-05,
+                      2.649858234714004e-05)
     # --- declared modelling additions, NOT from the SDF (§2.1) ---------------
-    D: tuple = (0.30, 0.30, 0.35)          # translational drag [N s/m]
+    D: tuple = (0.30, 0.30, 0.35)          # bulk translational drag [N s/m]
     om_max: tuple = (10.0, 10.0, 4.0)      # CTBR rate scaling (3.2) [rad/s]
     J_body: tuple = (0.02166666666666667, 0.02166666666666667, 0.04)
     alpha_feas: float = 0.60               # reference demand cap (§2.2)
@@ -95,29 +115,59 @@ def _alloc(arms: np.ndarray, k_m: float, sigma: np.ndarray) -> np.ndarray:
     return np.vstack([np.ones(4), arms[:, 1], -arms[:, 0], -sigma * k_m])
 
 
+def omega_of_cmd(c):
+    """Normalised actuator command -> rotor speed, the PX4 gz_x500 mapping (A2).
+
+        Omega = Om_min + c (Om_max - Om_min),     c in [0, 1]
+
+    **Not** ``c * Om_max``.  SIM_GZ_EC_MIN = 150 rad/s is an idle floor: at
+    c = 0 the rotors still make 0.77 N, 3.8 % of weight.
+    """
+    return P.Om_min + c * (P.Om_max - P.Om_min)
+
+
+def cmd_of_omega(om):
+    """Inverse of :func:`omega_of_cmd`; also the ``actuator_motors`` scaling."""
+    return (om - P.Om_min) / (P.Om_max - P.Om_min)
+
+
 def _derive() -> dict:
     """Everything in §2.2-§2.4, computed.  Nothing here may be pasted."""
     m = P.m_body + P.n_rotor * P.m_rotor                                  # (2.1)
     cg_nom = P.m_rotor * R_ROTOR.sum(0) / m                               # (2.2)
-    J_nom = np.diag(P.J_body) + sum(                                      # (2.3)
-        _inertia_shift(P.m_rotor, r - cg_nom) for r in R_ROTOR)
+    # (2.3) with the rotors' OWN inertia, not as point masses (A6)
+    J_nom = np.diag(P.J_body) + sum(
+        np.diag(P.J_rotor) + _inertia_shift(P.m_rotor, r - cg_nom) for r in R_ROTOR)
     f_max = P.K_T * P.Om_max ** 2                                         # (2.4)
     T_max = P.n_rotor * f_max
-    u_hover = float(np.sqrt(m * P.g / T_max))                             # (2.5)
+    f_idle = P.K_T * P.Om_min ** 2
+    T_idle = P.n_rotor * f_idle
+    # (2.5) hover command under the TRUE actuator map
+    om_hover = float(np.sqrt(m * P.g / (P.n_rotor * P.K_T)))
+    u_hover = float(cmd_of_omega(om_hover))
     a_lat_max = float(np.sqrt((T_max / m) ** 2 - P.g ** 2))               # (2.6)
+    # (2.11) hover control effectiveness, d a_z/d c = 2 n K_T Om_h (Om_max-Om_min)/m
+    daz_dc = float(2 * P.n_rotor * P.K_T * om_hover * (P.Om_max - P.Om_min) / m)
     arms = R_ROTOR - cg_nom
-    M_nom = _alloc(arms, P.k_m, SIGMA)                                    # (2.7)
+    M_nom = _alloc(arms, P.k_m, SIGMA)                                    # (2.7) truth
+    M_ctrl = _alloc(arms, P.k_m_ctrl, SIGMA)          # what the PX4 allocator believes
     return dict(m=m, cg_nom=cg_nom, J_nom=J_nom, Jinv_nom=np.linalg.inv(J_nom),
-                f_max=f_max, T_max=T_max, TW=T_max / (m * P.g), u_hover=u_hover,
-                a_lat_max=a_lat_max, M_nom=M_nom, Minv_nom=np.linalg.inv(M_nom),
+                f_max=f_max, T_max=T_max, f_idle=f_idle, T_idle=T_idle,
+                TW=T_max / (m * P.g), u_hover=u_hover, om_hover=om_hover,
+                daz_dc=daz_dc, a_lat_max=a_lat_max,
+                M_nom=M_nom, Minv_nom=np.linalg.inv(M_nom),
+                M_ctrl=M_ctrl, Minv_ctrl=np.linalg.inv(M_ctrl),
                 Mtau_nom=M_nom[1:], arms_nom=arms)
 
 
 _D = _derive()
 M_TOT, CG_NOM, J_NOM, JINV_NOM = _D["m"], _D["cg_nom"], _D["J_nom"], _D["Jinv_nom"]
 F_MAX, T_MAX, TW, U_HOVER = _D["f_max"], _D["T_max"], _D["TW"], _D["u_hover"]
+T_IDLE, OM_HOVER = _D["T_idle"], _D["om_hover"]
 A_LAT_MAX = _D["a_lat_max"]
 M_NOM, MINV_NOM, MTAU_NOM, ARMS_NOM = _D["M_nom"], _D["Minv_nom"], _D["Mtau_nom"], _D["arms_nom"]
+#: the allocator's belief (k_m = 0.05), distinct from the plant's truth (A3)
+M_CTRL, MINV_CTRL = _D["M_ctrl"], _D["Minv_ctrl"]
 
 # The J off-diagonals must vanish by symmetry (§2.2); assert it at import so a
 # bad rotor table cannot pass silently.
@@ -125,7 +175,10 @@ assert np.abs(J_NOM - np.diag(np.diag(J_NOM))).max() < 1e-15, "J off-diagonals n
 assert abs(float(np.linalg.cond(M_NOM)) - 62.5) < 1e-6, "cond(M) != 62.5"
 
 OM_MAX = np.asarray(P.om_max)
-DAZ_DC_HOVER = 2.0 * T_MAX * U_HOVER / M_TOT       # (2.11) == 2 g / u_hover
+#: (2.11) hover control effectiveness under the TRUE actuator map (A2).
+#: = 2 n K_T Om_hover (Om_max - Om_min) / m = 21.6670 s^-2.
+#: The pure-square form 2 T_max u_hover / m = 25.4905 overstates it by 17.65 %.
+DAZ_DC_HOVER = _D["daz_dc"]
 
 
 def lateral_accel_budget() -> float:
@@ -185,7 +238,9 @@ def make_par(B: int = 1, m_scale=1.0, D_scale=1.0, tau_scale=1.0, Tmax_scale=1.0
     return dict(
         m=m_t[:, None], J=J, Jinv=jnp.linalg.inv(J), J_ctrl=J_ctrl,
         Mtau_w2=Mtau * KT[:, None, None],
-        Minv_ctrl=jnp.broadcast_to(jnp.asarray(MINV_NOM), (B, 4, 4)),
+        # the PX4 allocator inverts with k_m_ctrl = 0.05 while the rotors
+        # produce k_m = 0.016: a real 3.125x yaw-authority error (A3)
+        Minv_ctrl=jnp.broadcast_to(jnp.asarray(MINV_CTRL), (B, 4, 4)),
         KT=KT[:, None], T_max=(4.0 * KT * P.Om_max ** 2)[:, None],
         T_max_ctrl=jnp.full((B, 1), T_MAX), m_ctrl=jnp.full((B, 1), M_TOT),
         tau_up=(P.tau_up * tau_s)[:, None], tau_dn=(P.tau_dn * tau_s)[:, None],
@@ -276,8 +331,17 @@ def _clamp_jvp(primals, tangents):
 
 
 def thrust_of(c, T_max):
-    """(2.10) velocity-type motor model: thrust is quadratic in the command."""
-    return T_max * _clamp(c, 0.0, 1.0) ** 2
+    """(2.10) velocity-type motor model, with the PX4 idle floor (A2).
+
+        T(c) = n K_T (Om_min + c (Om_max - Om_min))^2
+
+    ``T_max`` is the thrust at c = 1 and is carried per-vehicle so that the
+    lambda_T plant perturbation scales it; the idle floor scales with it.
+    Thrust is still quadratic in rotor speed -- the motor is velocity-type --
+    but it is **not** proportional to c^2, because c = 0 is 150 rad/s and not 0.
+    """
+    r = P.Om_min / P.Om_max
+    return T_max * (r + _clamp(c, 0.0, 1.0) * (1.0 - r)) ** 2
 
 
 # --------------------------------------------------------------------------- #
@@ -298,7 +362,11 @@ def fc(x, u, d=None, par=None):
     """
     m, T_max = _ctrl_consts(par)
     v, q = x[..., 3:6], x[..., 6:10]
-    om = jnp.asarray(OM_MAX) * u[..., 1:4]                                # (3.2)
+    # (3.2) with the SAME 220 deg/s clip the autopilot applies (D7).  om_max is
+    # (10,10,4) rad/s but rate_cmd saturates at 3.84, so without this clip the
+    # optimiser plans in a region 62 % of whose roll/pitch box the plant cannot
+    # reach, and model and plant disagree above 3.84 rad/s.
+    om = _clamp(jnp.asarray(OM_MAX) * u[..., 1:4], -P.rate_max, P.rate_max)
     a_res = jnp.zeros_like(v) if d is None else d[..., 0:3]
     om_res = jnp.zeros_like(om) if d is None else d[..., 3:6]
     acc = thrust_of(u[..., 0:1], T_max) / m * qzaxis(q) - P.g * jnp.asarray(E3) + a_res
@@ -349,8 +417,14 @@ def inner_loop(s, u_ctbr, par):
     f_cmd = _clamp(jnp.einsum("bij,bj->bi", par["Minv_ctrl"],
                               jnp.concatenate([T_c, tau_cmd], -1)), 0.0, F_MAX)
     Om_cmd = jnp.sqrt(f_cmd / P.K_T)          # allocator uses the NOMINAL K_T
-    Om_cmd = _clamp(Om_cmd, 0.0, P.Om_max)
-    return Om_cmd, Om_cmd / P.Om_max, tau_cmd
+    # the idle floor is a floor on the ACTUATOR, so the allocator cannot ask for
+    # less than it (A2)
+    Om_cmd = _clamp(Om_cmd, P.Om_min, P.Om_max)
+    # PWM normalised on [Om_min, Om_max] -- the scaling /fmu/out/actuator_motors
+    # actually publishes.  Om_cmd/Om_max would differ in both slope and offset
+    # and would put the RDP's 4 PWM channels on a different scale in deployment
+    # from the one they were trained on (A4).
+    return Om_cmd, cmd_of_omega(Om_cmd), tau_cmd
 
 
 @jax.jit
@@ -370,10 +444,21 @@ def fp(s, u_ctbr, par, v_wind=None):
     w2 = Om ** 2
     thrust = jnp.sum(par["KT"] * w2, -1, keepdims=True)
     F_b, tau_b = par["wrench_body"][..., 0:3], par["wrench_body"][..., 3:6]
-    acc = (thrust / par["m"] * qzaxis(q) - P.g * jnp.asarray(E3)            # (3.6)
-           - par["D"] * (v - v_w) / par["m"]
+    # SDF rotorDragCoefficient / rollingMomentCoefficient (A5).  Both act on the
+    # airspeed component PERPENDICULAR to the rotor axis and scale with rotor
+    # speed; they were previously absent, the bulk D standing in for all of it.
+    zb = qzaxis(q)
+    v_air = v - v_w
+    v_perp = v_air - zb * jnp.sum(v_air * zb, -1, keepdims=True)
+    sum_om = jnp.sum(Om, -1, keepdims=True)
+    F_rd = -P.c_rotor_drag * sum_om * v_perp
+    v_perp_b = jnp.einsum("bji,bj->bi", R, v_perp)
+    tau_rm = -P.c_roll_mom * sum_om * v_perp_b
+    acc = (thrust / par["m"] * zb - P.g * jnp.asarray(E3)                   # (3.6)
+           - par["D"] * v_air / par["m"]
+           + F_rd / par["m"]
            + jnp.einsum("bij,bj->bi", R, F_b) / par["m"])
-    tau = (jnp.einsum("bij,bj->bi", par["Mtau_w2"], w2) + tau_b             # (3.7)
+    tau = (jnp.einsum("bij,bj->bi", par["Mtau_w2"], w2) + tau_b + tau_rm    # (3.7)
            - jnp.cross(om, jnp.einsum("bij,bj->bi", par["J"], om)))
     omdot = jnp.einsum("bij,bj->bi", par["Jinv"], tau)
     qdot = 0.5 * qmul(q, jnp.concatenate([jnp.zeros((B, 1)), om], -1))
@@ -422,7 +507,7 @@ def hover_state(B=1, p=(0.0, 0.0, 1.5), par=None):
     par = make_par(B) if par is None else par
     p = jnp.broadcast_to(jnp.asarray(p, dtype=jnp.float64), (B, 3))
     q = jnp.broadcast_to(jnp.asarray([1.0, 0.0, 0.0, 0.0]), (B, 4))
-    f_h = par["m"] * P.g / 4.0
+    f_h = par["m"] * P.g / P.n_rotor
     Om = jnp.broadcast_to(jnp.sqrt(f_h / par["KT"]), (B, 4))
     z = jnp.zeros((B, 3))
     return jnp.concatenate([p, q, z, z, Om, z, z], -1)
@@ -431,7 +516,9 @@ def hover_state(B=1, p=(0.0, 0.0, 1.5), par=None):
 def hover_u(B=1, par=None):
     """The CTBR command that trims :func:`hover_state`."""
     par = make_par(B) if par is None else par
-    c = jnp.sqrt(par["m"] * P.g / par["T_max_ctrl"])
+    # invert (2.10) with the idle floor: c = (sqrt(T/T_max) - r)/(1 - r) (A2)
+    r = P.Om_min / P.Om_max
+    c = (jnp.sqrt(par["m"] * P.g / par["T_max_ctrl"]) - r) / (1.0 - r)
     return jnp.concatenate([c, jnp.zeros((B, 3))], -1)
 
 
@@ -562,8 +649,10 @@ def path_demand(kind, R, omega):
     """Peak (|v_ref|, |a_ref|) for a path, for reporting (§8.1 step 2)."""
     i = PATH_IDX[kind] if isinstance(kind, str) else kind
     if i == 4:
-        spd = R * omega
-        return float(np.hypot(spd, HELIX_CLIMB * spd)), float(R * omega ** 2 * KAPPA_A[i])
+        # exact, and now consistent with _ref_pva for every omega including a
+        # capped one (D5): |v| = hypot(R w, HELIX_CLIMB * R w) = R w * kappa_v
+        v_h = R * omega
+        return float(np.hypot(v_h, HELIX_CLIMB * v_h)), float(R * omega ** 2 * KAPPA_A[i])
     return float(R * omega * KAPPA_V[i]), float(R * omega ** 2 * KAPPA_A[i])
 
 
@@ -581,10 +670,16 @@ def _ref_pva(ep, t):
         elif i == 1:
             p = ep["delta"]
             v = a = jnp.zeros_like(p)
-        elif i == 4:                                          # helix climb term
-            climb = HELIX_CLIMB * ep["spd"][:, None] * t[:, None]
+        elif i == 4:
+            # Helix climb (D5).  The rate follows the REALISED horizontal speed
+            # R*omega, not the sampled spd: when (4.6)'s feasibility cap binds,
+            # R*omega != spd and using spd makes the climb inconsistent with the
+            # circle it is wrapped around -- and breaks the dagger condition
+            # that KAPPA_V[helix] is stated under.
+            v_h = R * w
+            climb = HELIX_CLIMB * v_h * t[:, None]
             p = p + climb * jnp.asarray(E3)
-            v = v + HELIX_CLIMB * ep["spd"][:, None] * jnp.asarray(E3)
+            v = v + HELIX_CLIMB * v_h * jnp.asarray(E3)
         ps.append(p); vs.append(v); as_.append(a)
     sel = lambda L: jnp.take_along_axis(jnp.stack(L, 1), ep["kind"][:, None, None], 1)[:, 0]
     return ep["c"] + sel(ps), sel(vs), sel(as_)
@@ -599,8 +694,8 @@ def ref_attitude(a_ref):
     return qnorm(qexp_tilt(ax, ang))
 
 
-@jax.jit
-def ref_state(ep, t):
+@functools.partial(jax.jit, static_argnames=("hold",))
+def ref_state(ep, t, hold=False):
     """(B,10) reference state, (B,4) u_ref (4.8), (B,3) a_ref.
 
     omega_ref comes from a centred difference of q_ref at +/- dt_c/2 (§5.6).
@@ -609,15 +704,28 @@ def ref_state(ep, t):
     """
     t = jnp.asarray(t, dtype=jnp.float64).reshape(-1)
     p, v, a = _ref_pva(ep, t)
+    if hold:
+        # position hold: keep the point, drop the motion.  v = a = 0 makes
+        # q_ref the identity and u_ref the hover command, which is what a
+        # regulation task actually asks for.
+        v = jnp.zeros_like(v)
+        a = jnp.zeros_like(a)
     q = ref_attitude(a)
     h = 0.5 * P.dt_c
-    qp = ref_attitude(_ref_pva(ep, t + h)[2])
-    qm = ref_attitude(_ref_pva(ep, t - h)[2])
-    qdot = (qp - qm) / (2 * h)
+    if hold:
+        qdot = jnp.zeros_like(q)
+    else:
+        qp = ref_attitude(_ref_pva(ep, t + h)[2])
+        qm = ref_attitude(_ref_pva(ep, t - h)[2])
+        qdot = (qp - qm) / (2 * h)
     om_ref = 2.0 * qmul(qconj(q), qdot)[..., 1:4]              # body rates
-    c = jnp.sqrt(jnp.clip(
+    # (4.8): exact inversion of (2.10) INCLUDING the idle floor (A2).  The bare
+    # square root would be 5.6 % high at hover on the real platform.
+    r = P.Om_min / P.Om_max
+    root = jnp.sqrt(jnp.clip(
         M_TOT * jnp.linalg.norm(a + P.g * jnp.asarray(E3), axis=-1, keepdims=True)
         / T_MAX, 0.0, 1.0))
+    c = jnp.clip((root - r) / (1.0 - r), 0.0, 1.0)
     u_ref = jnp.concatenate([c, om_ref / jnp.asarray(OM_MAX)], -1)
     return jnp.concatenate([p, v, q], -1), u_ref, a
 
@@ -664,34 +772,81 @@ def external_wrench(s, u, par, sdot=None, v_wind=None):
     return jnp.concatenate([F, tau], -1)
 
 
+def moment_gain(t):
+    """Exact closed-loop gain of the rate loop to a STEP external moment.
+
+    Neglecting K_d and the gyro filter, the loop of (3.4) gives
+
+        eps_ddot + K_r eps_dot + K_i eps = 0 ,   eps(0) = 0 , eps_dot(0) = tau/J
+
+    so  eps(t) = (tau/J)(e^{r+ t} - e^{r- t})/(r+ - r-).  This returns
+    ``eps(t) / (tau/(J K_r))``, i.e. the factor by which the true rate residual
+    differs from (4.13), which is the K_i = 0 steady state and therefore the
+    t -> small limit (gain 1).
+
+    Measured against the full plant: 0.87 at t = 0.1 s, 0.93 at 0.3 s, 0.43 at
+    3 s, **0.103 at 8 s**.  (4.13) is a SHORT-TRANSIENT model.  Applied to a
+    standing moment that has been acting for seconds -- which is exactly the
+    `asym` payload scenario -- it overstates the rate residual by ~9x (D3/D4).
+    """
+    Kr, Ki = np.asarray(P.K_rate), np.asarray(P.K_i)
+    disc = np.sqrt(np.maximum(Kr ** 2 - 4 * Ki, 1e-300))
+    rp, rm = (-Kr + disc) / 2, (-Kr - disc) / 2
+    return Kr * (np.exp(rp * t) - np.exp(rm * t)) / (rp - rm)
+
+
+#: Modes for :func:`wrench_to_dmod`.  ``first_order`` is (4.13) verbatim;
+#: ``none`` zeroes the moment block, which is the CORRECT limit for a moment the
+#: rate integrator has already absorbed; ``closed_loop`` scales (4.13) by
+#: :func:`moment_gain` at ``DMOD_SETTLE_S``.
+DMOD_MODES = ("first_order", "none", "closed_loop")
+#: Time a disturbance is assumed to have been acting when ``closed_loop`` is
+#: used.  0.5 s is ~2 MPC horizons at N = 10 and well inside the integral time
+#: constant, so it brackets the transient the MPC can actually act on.
+DMOD_SETTLE_S = 0.5
+
+
 @functools.partial(jax.jit, static_argnames=("mode",))
 def wrench_to_dmod(w, mode: str = "first_order"):
     """(4.12)+(4.13) convert a wrench [N, N m] to a model residual [m/s^2, rad/s].
 
     Force converts exactly, a_res = F/m.  The moment block has **no exact
     image** -- the 10-state model has no torque input -- so (4.13) uses the
-    steady state of the rate loop, om_res ~ diag(K_r)^-1 J^-1 tau.  That is a
-    *model*, valid while the horizon is short against the integral time
-    constant (1/K_r = 71 ms vs 1/K_i = 250 ms, horizons 20-400 ms).  T-11
-    validates it numerically; ``mode='none'`` zeroes the block so both can be
-    reported.
+    steady state of the rate loop with K_i neglected.
+
+    **Validity (D3).**  That neglect is the whole content of the approximation.
+    :func:`moment_gain` gives the exact factor: ~0.9 out to 0.3 s, 0.10 by 8 s.
+    For a genuine transient ``first_order`` is right; for a standing moment the
+    integrator has absorbed it and the true rate residual is near zero, which is
+    what ``none`` encodes.  ``closed_loop`` interpolates.  Report both, as §5.7
+    requires.
     """
     a_res = w[..., 0:3] / M_TOT
     if mode == "none":
         om_res = jnp.zeros_like(a_res)
-    elif mode == "first_order":
-        om_res = jnp.einsum("ij,bj->bi", jnp.linalg.inv(
-            np.diag(P.K_rate) @ J_NOM), w[..., 3:6])
     else:
-        raise ValueError(f"unknown mode {mode!r}")
+        G = jnp.asarray(np.linalg.inv(np.diag(P.K_rate) @ J_NOM))
+        om_res = jnp.einsum("ij,bj->bi", G, w[..., 3:6])              # (4.13)
+        if mode == "closed_loop":
+            om_res = om_res * jnp.asarray(moment_gain(DMOD_SETTLE_S))
     return jnp.concatenate([a_res, om_res], -1)
 
 
 # --------------------------------------------------------------------------- #
 # §5.8  the differentiable MPC layer
 # --------------------------------------------------------------------------- #
-U_LO = np.array([0.0, -1.0, -1.0, -1.0])
-U_HI = np.array([1.0, 1.0, 1.0, 1.0])
+#: CTBR input box.  The rate entries are the **reachable** set, not the nominal
+#: [-1,1] (D7): om_max is (10,10,4) rad/s but the autopilot clips the rate
+#: command at rate_max = 3.84 rad/s, so |ubar| beyond rate_max/om_max = 0.384 on
+#: roll and pitch commands a rate the plant cannot produce.  Constraining the
+#: box to the reachable set makes the control model and the plant agree
+#: everywhere *inside* it, which a clip inside fc() cannot do: a clip leaves the
+#: derivative zero beyond the knee, so Q_uu goes singular in the rate directions
+#: exactly when the solver tries to come back, and the collective absorbs the
+#: difference.  Measured, that raised untrained saturation to 47 %.
+_U_RATE = np.minimum(1.0, P.rate_max / np.asarray(P.om_max))
+U_LO = np.concatenate([[0.0], -_U_RATE])
+U_HI = np.concatenate([[1.0], _U_RATE])
 ALPHAS = np.array([1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125])
 MU_MIN, MU_MAX = 1e-8, 1e10
 
@@ -707,8 +862,10 @@ def uref_from_traj(xr_seq):
     v = xr_seq[..., 3:6]
     a = (v[:, 1:] - v[:, :-1]) / P.dt_c
     zb = a + P.g * jnp.asarray(E3)
-    c = jnp.sqrt(jnp.clip(M_TOT * jnp.linalg.norm(zb, axis=-1, keepdims=True) / T_MAX,
-                          0.0, 1.0))
+    r = P.Om_min / P.Om_max
+    root = jnp.sqrt(jnp.clip(M_TOT * jnp.linalg.norm(zb, axis=-1, keepdims=True) / T_MAX,
+                             0.0, 1.0))
+    c = jnp.clip((root - r) / (1.0 - r), 0.0, 1.0)
     return jnp.concatenate([c, jnp.zeros(c.shape[:-1] + (3,))], -1)
 
 
@@ -933,8 +1090,11 @@ XI = np.array([[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
 #: best-to-worst ratio of 25 -- that ratio is the fraction of "controller
 #: performance" that is really weight tuning, and is what §8.3 removes.
 #: Somebody has to choose these; here that somebody is a documented search.
-Q_HAND = np.diag([2.0, 2.0, 2.0, 0.8, 0.8, 0.8, 1.0, 1.0, 0.5])
-R_HAND = np.diag([0.5, 1.0, 1.0, 1.0])
+#: Re-derived after the physics corrections (A2: control effectiveness 21.67
+#: rather than 25.49; D7: the rate box is the reachable set).  Over the grid
+#: RMSE now runs 0.0506 m to 1.0552 m, a best-to-worst ratio of 20.8.
+Q_HAND = np.diag([10.0, 10.0, 10.0, 4.0, 4.0, 4.0, 1.0, 1.0, 0.5])
+R_HAND = np.diag([0.5, 5.0, 5.0, 5.0])
 
 #: **Reward** weights of (5.4).  A *different object* from the stage cost above:
 #: the stage cost shapes an optimisation the controller solves, the reward
@@ -1133,8 +1293,21 @@ def make_pid_ctrl(gains=None):
 #: wastes almost all of the policy's resolution: 90 % of its output range would
 #: sit inside the top decade.
 Q_LO, Q_HI = 1.0e-2, 1.0e3
+#: Bound on the learned **linear** cost term p of (5.2).  arXiv:2306.09852 §III-G
+#: learns p as well as Q -- its cost-map output dimension is 2T(n_state+n_input)
+#: -- and bounds both with the same sigmoid.  A strictly positive p is not
+#: meaningful in *error* coordinates, where the target is e = 0: it would bias
+#: every channel one way.  p is therefore bounded symmetrically, p = P_HI*tanh(z),
+#: with P_HI kept BELOW the geometric-mean quadratic weight sqrt(Q_LO*Q_HI) =
+#: 3.16 so the linear term can shift the optimum without dominating it: the
+#: unconstrained minimiser of 1/2 S t^2 + p t sits at t = -p/S, so P_HI/Q_geo is
+#: directly the largest offset the linear term alone can command (B2).
+P_HI = 2.0
 REPS = ("diag", "chol", "full")
-REP_DIM = {"diag": NTAU, "chol": NTAU * (NTAU + 1) // 2, "full": NTAU * NTAU}
+#: Q block + p block, matching the paper's 2T(n+m) for the diagonal case.
+REP_DIM = {"diag": 2 * NTAU, "chol": NTAU * (NTAU + 1) // 2 + NTAU,
+           "full": NTAU * NTAU + NTAU}
+REP_Q_DIM = {"diag": NTAU, "chol": NTAU * (NTAU + 1) // 2, "full": NTAU * NTAU}
 _TRIL = np.tril_indices(NTAU)
 
 
@@ -1155,11 +1328,45 @@ def mlp_apply(params, x, act=jnp.tanh):
     return x @ W + b
 
 
+def normalise_obs(theta, obs):
+    """Apply the actor's stored running observation statistics (B4).
+
+    arXiv:2306.09852 §IV-A normalises the observation with the running mean and
+    standard deviation, recomputed each training iteration.  Without it the
+    trunk sees a vector whose blocks differ by orders of magnitude -- the oracle
+    channel alone is a wrench in N and N.m, ~2.3x the rms of everything else --
+    and the first layer has to undo that before it can learn anything.
+    The statistics travel WITH the checkpoint, so inference normalises exactly
+    as training did.
+    """
+    nrm = theta.get("obs_norm")
+    if nrm is None:
+        return obs
+    return (obs - nrm["mu"]) / jnp.sqrt(nrm["var"] + 1e-8)
+
+
 def costmap_head(theta, obs, rep, N):
     """Trunk + head -> the raw per-stage parameter block, (B,N,REP_DIM[rep])."""
-    h = mlp_apply(theta["trunk"], obs)
+    h = mlp_apply(theta["trunk"], normalise_obs(theta, obs))
     z = mlp_apply(theta["head"], h)
     return z.reshape(obs.shape[0], N, REP_DIM[rep])
+
+
+def obs_norm_init(obs_dim):
+    return {"mu": jnp.zeros((obs_dim,)), "var": jnp.ones((obs_dim,)),
+            "count": jnp.asarray(1e-4)}
+
+
+def obs_norm_update(nrm, batch):
+    """Welford-style running update over a flat (n, obs_dim) batch."""
+    bm, bv, bn = batch.mean(0), batch.var(0), float(batch.shape[0])
+    d = bm - nrm["mu"]
+    tot = nrm["count"] + bn
+    mu = nrm["mu"] + d * bn / tot
+    m_a = nrm["var"] * nrm["count"]
+    m_b = bv * bn
+    var = (m_a + m_b + d ** 2 * nrm["count"] * bn / tot) / tot
+    return {"mu": mu, "var": var, "count": tot}
 
 
 def costmap_from_z(z, rep):
@@ -1169,23 +1376,28 @@ def costmap_from_z(z, rep):
     two copies of this map in step is exactly the kind of silent divergence §11
     exists to catch: the policy would be optimising one cost and the deployed
     controller solving another, with no error anywhere.
+
+    The trailing NTAU entries are the linear term p (B2); everything before them
+    parameterises S.
     """
     B, N = z.shape[0], z.shape[1]
+    nq = REP_Q_DIM[rep]
+    zq, zp = z[..., :nq], z[..., nq:]
     if rep == "diag":
-        dg = Q_LO * (Q_HI / Q_LO) ** jax.nn.sigmoid(z)          # log-spaced
+        dg = Q_LO * (Q_HI / Q_LO) ** jax.nn.sigmoid(zq)         # log-spaced
         S = jnp.einsum("bnij,bnj->bnij",
                        jnp.broadcast_to(jnp.eye(NTAU), (B, N, NTAU, NTAU)), dg)
     elif rep == "chol":
-        A = jnp.zeros((B, N, NTAU, NTAU)).at[..., _TRIL[0], _TRIL[1]].set(z)
+        A = jnp.zeros((B, N, NTAU, NTAU)).at[..., _TRIL[0], _TRIL[1]].set(zq)
         di = jnp.arange(NTAU)
         A = A.at[..., di, di].set(jax.nn.softplus(A[..., di, di]) + 1e-6)
         S = jnp.einsum("bnij,bnkj->bnik", A, A) + Q_LO * jnp.eye(NTAU)
     elif rep == "full":
-        A = z.reshape(B, N, NTAU, NTAU)
+        A = zq.reshape(B, N, NTAU, NTAU)
         S = jnp.einsum("bnij,bnkj->bnik", A, A) + Q_LO * jnp.eye(NTAU)
     else:
         raise ValueError(rep)
-    return S, jnp.zeros((B, N, NTAU))
+    return S, P_HI * jnp.tanh(zp)
 
 
 def costmap_apply(theta, obs, rep, N):
@@ -1199,20 +1411,17 @@ def costmap_apply(theta, obs, rep, N):
     comparable places, which predicts the richer forms need **longer**, not that
     they are incapable.
     """
-    z = costmap_head(theta, obs, rep, N)
-    S, c = costmap_from_z(z, rep)
-    if theta.get("c_head") is not None:
-        c = mlp_apply(theta["c_head"],
-                      mlp_apply(theta["trunk"], obs)).reshape(obs.shape[0], N, NTAU)
-    return S, c
+    return costmap_from_z(costmap_head(theta, obs, rep, N), rep)
 
 
-def costmap_init(key, obs_dim, hid, rep, N, n_layer=2, with_c=False):
-    k1, k2, k3 = jax.random.split(key, 3)
-    th = {"trunk": mlp_init(k1, [obs_dim] + [hid] * n_layer, scale_last=np.sqrt(2.0 / hid)),
+def costmap_init(key, obs_dim, hid, rep, N, n_layer=2, normalise=True):
+    """Cost map: trunk -> head producing the Q and p blocks for all N stages."""
+    k1, k2 = jax.random.split(key, 2)
+    th = {"trunk": mlp_init(k1, [obs_dim] + [hid] * n_layer,
+                            scale_last=np.sqrt(2.0 / hid)),
           "head": mlp_init(k2, [hid, N * REP_DIM[rep]], scale_last=0.1)}
-    if with_c:
-        th["c_head"] = mlp_init(k3, [hid, N * NTAU], scale_last=0.1)
+    if normalise:
+        th["obs_norm"] = obs_norm_init(obs_dim)
     return th
 
 
@@ -1244,7 +1453,7 @@ NOISE_LEVELS = {
 CRASH_Z, MAX_POS_ERR, MAX_RATE = 0.02, 3.0, 25.0
 
 
-def build_obs(e, xr, prev, ep, t, s, oracle=None):
+def build_obs(e, xr, prev, ep, t, s, oracle=None, hold=False):
     """(5.3), OBS_DIM = 40, plus 6 when the oracle channel is on.
 
     Preview stride is **5 control steps**, i.e. lookaheads 0.1/0.2/0.3 s; it is
@@ -1253,7 +1462,10 @@ def build_obs(e, xr, prev, ep, t, s, oracle=None):
     p = s[..., SP]
     prev_blocks = []
     for h in PREVIEW_H:
-        pr, vr, _ = _ref_pva(ep, t + h * PREVIEW_STRIDE * P.dt_c)
+        # under position hold the preview is the same fixed setpoint at every
+        # lookahead, which is exactly the information a hold task has
+        t_h = t if hold else t + h * PREVIEW_STRIDE * P.dt_c
+        pr, vr, _ = _ref_pva(ep, t_h)
         prev_blocks += [pr - p, vr]
     o = jnp.concatenate([e, jnp.concatenate(prev_blocks, -1),
                          jnp.clip(prev["int_ep"], -5.0, 5.0),
@@ -1290,6 +1502,11 @@ class EnvCfg:
     ep_len: int = 250
     paths: tuple = ("circle",)
     ep_kind: str = "sample"
+    #: 'track' follows the sampled path; 'stabilize' is POSITION-HOLD -- the
+    #: reference is frozen at its t=0 point, so the vehicle regulates to a fixed
+    #: setpoint.  arXiv:2605.16015 trains the adaptive policy this way and argues
+    #: it is what produces aggressive recovery that still generalises to
+    #: tracking.  Previously this field existed and was read nowhere (E3).
     task: str = "track"            # 'track' | 'stabilize'
     noise: str = "off"             # 'off' | 'low' | 'high'
     oracle: bool = False
@@ -1429,7 +1646,7 @@ class Env:
         return par
 
     def _init(self, ep, n):
-        xr, _, _ = ref_state(ep, jnp.zeros(n))
+        xr, _, _ = ref_state(ep, jnp.zeros(n), hold=self.cfg.task == "stabilize")
         par = self._make_par(ep, n)
         Om = jnp.broadcast_to(jnp.sqrt(par["m"] * P.g / 4.0 / par["KT"]), (n, 4))
         z = jnp.zeros((n, 3))
@@ -1448,15 +1665,27 @@ class Env:
         return self.obs()
 
     # -- accessors ---------------------------------------------------------- #
+    def _t_ref(self, t=None):
+        """Reference clock.  Under ``task='stabilize'`` it is pinned at 0, which
+        freezes the reference at its initial point: position hold (E3)."""
+        t = self.t if t is None else t
+        return jnp.zeros_like(t) if self.cfg.task == "stabilize" else t
+
     def ref_now(self):
-        return ref_state(self.ep, self.t)
+        return ref_state(self.ep, self._t_ref(), hold=self.cfg.task == "stabilize")
 
     def ref_traj(self, N):
         """(B,N+1,10): the preview that (5.1) scores against."""
+        if self.cfg.task == "stabilize":
+            xr = ref_state(self.ep, self._t_ref(), hold=True)[0]
+            return jnp.broadcast_to(xr[:, None], (self.n, N + 1, NX))
         return _ref_traj(self.ep, self.t, N)
 
     def ref_useq(self, N):
         """(B,N,4): the **exact analytic** u_ref over the horizon (N-3)."""
+        if self.cfg.task == "stabilize":
+            ur = ref_state(self.ep, self._t_ref(), hold=True)[1]
+            return jnp.broadcast_to(ur[:, None], (self.n, N, NU))
         return _ref_useq(self.ep, self.t, N)
 
     def wind(self):
@@ -1547,7 +1776,9 @@ _resid_jit = jax.jit(lambda s, u, par, vw: true_disturbance(s, u, par, vw))
 
 @functools.partial(jax.jit, static_argnums=(0,))
 def _obs_jit(cfg, state, ep, prev, t, key):
-    xr, _, _ = ref_state(ep, t)
+    hold = cfg.task == "stabilize"
+    t_ref = jnp.zeros_like(t) if hold else t
+    xr, _, _ = ref_state(ep, t_ref, hold=hold)
     e = err(plant_to_ctrl(state), xr)
     lv = NOISE_LEVELS[cfg.noise]
     if any(v > 0 for v in lv.values()):
@@ -1556,19 +1787,21 @@ def _obs_jit(cfg, state, ep, prev, t, key):
         e = e + jnp.concatenate([lv["p"] * jax.random.normal(ks[0], (n, 3)),
                                  lv["v"] * jax.random.normal(ks[1], (n, 3)),
                                  lv["q"] * jax.random.normal(ks[2], (n, 3))], -1)
-    return build_obs(e, xr, prev, ep, t, state), e, xr
+    return build_obs(e, xr, prev, ep, t_ref, state, hold=hold), e, xr
 
 
 @functools.partial(jax.jit, static_argnums=(0, 1))
 def _step_jit(cfg, no_respawn, state, par, ep, prev, t, n_step, u,
               s_new, par_new, ep_new, prev_new):
     u = jnp.clip(u, jnp.asarray(U_LO), jnp.asarray(U_HI))
-    xr, uref, _ = ref_state(ep, t)
+    hold = cfg.task == "stabilize"
+    t_ref = jnp.zeros_like(t) if hold else t
+    xr, uref, _ = ref_state(ep, t_ref, hold=hold)
     e = err(plant_to_ctrl(state), xr)
     d_u, du = u - prev["u"], u - uref
     s_next = step_p(state, u, par, wind_at(ep, t))
     t_next = t + P.dt_c
-    xr_n, _, _ = ref_state(ep, t_next)
+    xr_n, _, _ = ref_state(ep, jnp.zeros_like(t_next) if hold else t_next, hold=hold)
     e_n = err(plant_to_ctrl(s_next), xr_n)
 
     bad = (~jnp.isfinite(s_next).all(-1)) | (s_next[:, 2] <= CRASH_Z)
@@ -1784,8 +2017,9 @@ def solve_latency_ms(ctrl, env1, T=40):
 # §5.13  policy optimisation -- PPO / TRPO with GAE and MPVE
 # --------------------------------------------------------------------------- #
 PPO_DEFAULTS = dict(gamma=0.99, lam=0.95, clip=0.2, ent_coef=0.0, vf_coef=0.5,
-                    max_grad_norm=0.5, lr=3e-4, epochs=10, minib=32, sigma=0.15,
-                    algo="ppo", mpve=False, kl_target=0.01, rep="diag", N=1,
+                    max_grad_norm=0.5, lr=3e-4, epochs=10, minib=32, sigma=0.05,
+                    algo="ppo", mpve=False, mpve_coef=0.5, kl_target=0.01,
+                    lr_decay=0.5, lr_grow=1.2, lr_min=1e-7, rep="diag", N=1,
                     n_iter=5, n_diff=2, hid=256, sat_gate=0.05)
 
 
@@ -1807,18 +2041,38 @@ def gae(rew, val, val_last, done, gamma, lam):
     return out[::-1]
 
 
-def mpve_targets(e_seq, du_seq, critic, gamma, om, d_u):
-    """(5.9) model-predictive value expansion.
+def mpve_value_loss(critic, obs_n, e_seq, du_seq, om, d_u, gamma):
+    """(8)-(9) Model-Predictive Value Expansion.
 
-    The MPC already produced a predicted trajectory, so price it: the rollout is
-    a by-product of the control computation and costs nothing extra.
+    The differentiable MPC already produced a predicted trajectory; MPVE prices
+    it instead of discarding it.  (8) gives the H-step target
+
+        V_H(s) = sum_t gamma^t r_hat_t + gamma^H V(s_H)
+
+    and (9) extends the value loss with the TD-k consistency term over every
+    intermediate prediction, which is what aligns the training distribution with
+    the prediction distribution.
+
+    **Documented approximation.**  The critic is V(o) over the 40-D observation,
+    while the MPC predicts the 9-D error only.  A predicted observation is
+    therefore built by substituting the predicted error into the first 9 entries
+    and holding the preview/integral/history blocks at their current values.
+    Over a 20-200 ms horizon those move very little, but this is an
+    approximation, not an identity.
     """
-    N = du_seq.shape[1]
-    tot = jnp.zeros(e_seq.shape[0])
-    for k in range(N):
-        r = reward_quad(e_seq[:, k + 1], du_seq[:, k], om, d_u, jnp.zeros(e_seq.shape[0]))
-        tot = tot + (gamma ** k) * r
-    return tot + (gamma ** N) * mlp_apply(critic, e_seq[:, -1])[:, 0]
+    B, N = obs_n.shape[0], du_seq.shape[1]
+    sub = lambda e: jnp.concatenate([e, obs_n[:, NE:]], -1)
+    zc = jnp.zeros(B)
+    r_hat = jnp.stack([reward_quad(e_seq[:, k + 1], du_seq[:, k], om, d_u, zc)
+                       for k in range(N)], 1)
+    V_pred = jnp.stack([mlp_apply(critic, sub(e_seq[:, k]))[:, 0]
+                        for k in range(N + 1)], 1)
+    loss = 0.0
+    for t in range(N):                                               # eq (9)
+        tgt = sum((gamma ** (k - t)) * r_hat[:, k] for k in range(t, N))
+        tgt = tgt + (gamma ** (N - t)) * V_pred[:, N]
+        loss = loss + jnp.mean((V_pred[:, t] - jax.lax.stop_gradient(tgt)) ** 2)
+    return loss / max(N, 1)
 
 
 def critic_init(key, obs_dim, hid, n_layer=2):
@@ -1832,17 +2086,30 @@ def _logp(a, mu, log_sigma):
 
 def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
               iters=100, T_rollout=64, verbose=True, env=None):
-    """PPO (Schulman 2017) over the differentiable MPC layer.
+    """PPO (Schulman 2017) over the differentiable MPC layer, per arXiv:2306.09852.
 
-    The action is the **cost map**: the policy perturbs the stage weights, the
-    iLQR turns them into a command, and the gradient reaches theta through the
-    last ``n_diff`` solver iterations.
+    **The policy is a Gaussian over the ACTION**, exactly as the paper states:
+
+        u ~ N{ diffMPC(x_k, Q(s_k), p(s_k)), Sigma }                     (7)
+
+    The cost map is a deterministic function of the observation; the stochastic
+    part is the command.  An earlier version perturbed the cost-map *parameters*
+    instead, which changes the policy's support entirely: measured, saturation
+    then does not rise with sigma at all (6.2 -> 6.2 -> 4.7 % for sigma 0.05 ->
+    0.30), whereas perturbing the action drives it monotonically (10.9 -> 15.6
+    -> 29.7 %).  §8.3's exploration study is *about* that mechanism, so it
+    cannot be run on parameter noise (B1).
+
+    Consequence, and it is the paper's too: the MPC is **re-solved on every
+    minibatch of every epoch**, because the policy mean depends on theta through
+    the solve -- "for every backward and forward pass of the actor network, we
+    need to solve an optimization problem."
 
     ``sat`` is a **gate, not a diagnostic** (§5.13): if collective saturation
     exceeds ``cfg['sat_gate']`` over the last 20 % of iterations a loud warning
     is printed naming the disturbance magnitude.  A policy pinned against its
-    input box never learns a disturbance-response manifold, and every
-    downstream comparison built on it is void.
+    input box never learns a disturbance-response manifold, and every downstream
+    comparison built on it is void.
     """
     import optax
     import pandas as pd
@@ -1855,134 +2122,174 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
         actor = costmap_init(ka, obs_dim, c["hid"], c["rep"], c["N"])
     if critic is None:
         critic = critic_init(kc, obs_dim, c["hid"])
-    log_sigma = jnp.full((REP_DIM[c["rep"]] * c["N"],), np.log(c["sigma"]))
-    params = {"actor": actor, "critic": critic}
-    opt = optax.chain(optax.clip_by_global_norm(c["max_grad_norm"]),
-                      optax.adam(c["lr"]))
+    N, rep, use_d = c["N"], c["rep"], bool(c.get("use_d", False))
+    # B5: the exploration std is a LEARNED parameter, as in PPO proper.  Held
+    # fixed it can never anneal, and with ent_coef = 0 nothing else moves it.
+    params = {"actor": actor, "critic": critic,
+              "log_sigma": jnp.full((NU,), np.log(c["sigma"]))}
+    # Adaptive step size, keyed to the measured KL (B1 consequence).  The MPC
+    # mean is orders of magnitude more sensitive to its cost map than an MLP's
+    # output is to its weights, and that sensitivity is problem- and
+    # scale-dependent, so a fixed lr either crawls or leaves the trust region on
+    # its first step.  lr is shrunk when the region is breached and grown when
+    # there is slack, which is the PPO analogue of what TRPO does exactly.
+    opt = optax.inject_hyperparams(
+        lambda lr: optax.chain(optax.clip_by_global_norm(c["max_grad_norm"]),
+                               optax.adam(lr)))(lr=c["lr"])
     opt_state = opt.init(params)
-    mcfg = {"N": c["N"], "rep": c["rep"], "n_iter": c["n_iter"], "n_diff": c["n_diff"]}
+    lr_cur = float(c["lr"])
 
     @jax.jit
-    def act_mu(actor_p, o):
-        return costmap_head(actor_p, o, c["rep"], c["N"]).reshape(o.shape[0], -1)
-
-    @jax.jit
-    def u_from_z(o, e, xr_seq, uref_seq, z, d):
-        """Apply a *perturbed* cost map: z is the sampled head output.
-
-        Jitted: the rollout calls this once per control step, and re-tracing an
-        iLQR solve that many times is both slow and, at N > 1, enough to exhaust
-        the compiler.
-        """
-        B = o.shape[0]
-        S, cc = costmap_from_z(z.reshape(B, c["N"], REP_DIM[c["rep"]]), c["rep"])
-        Pt = jnp.broadcast_to(PTt, (B, NE, NE))
+    def mpc_mean(actor_p, o, e, xr_seq, uref_seq, d):
+        """The policy mean: the differentiable MPC's first command."""
+        S, cc = costmap_apply(actor_p, o, rep, N)
+        Pt = jnp.broadcast_to(PTt, (o.shape[0], NE, NE))
         du = ilqr_solve(e, xr_seq, S, cc, Pt, d, None, c["n_iter"],
-                        0, uref_seq)        # no gradient needed on the rollout
-        return jnp.clip(uref_seq[:, 0] + du[:, 0], jnp.asarray(U_LO), jnp.asarray(U_HI))
+                        c["n_diff"], uref_seq)
+        return uref_seq[:, 0] + du[:, 0], du
+
+    @jax.jit
+    def rollout_mean(actor_p, o, e, xr_seq, uref_seq, d):
+        return mpc_mean(actor_p, o, e, xr_seq, uref_seq, d)[0]
 
     rows = []
     for it in range(iters):
-        O, Z, LP, RW, VL, DN = [], [], [], [], [], []
-        sat_acc, crash_acc, ep_len_acc = [], [], []
+        keys = ("o", "e", "xr", "ur", "d", "a", "lp", "rw", "vl", "dn")
+        BUF = {k: [] for k in keys}
+        sat_acc, crash_acc = [], []
         o, e, xr = env.obs()
         for t in range(T_rollout):
             key, k = jax.random.split(key)
-            mu = act_mu(params["actor"], o)
-            z = mu + jnp.exp(log_sigma) * jax.random.normal(k, mu.shape)
-            lp = _logp(z, mu, log_sigma)
-            xr_seq, uref_seq = env.ref_traj(c["N"]), env.ref_useq(c["N"])
-            d = env.dmod() if c.get("use_d", False) else None
-            u = u_from_z(o, e, xr_seq, uref_seq, z, d)
-            v = mlp_apply(params["critic"], o)[:, 0]
-            r, done, info = env.step(u)
-            O.append(o); Z.append(z); LP.append(lp); RW.append(r); VL.append(v)
-            DN.append(done.astype(jnp.float64))
-            sat_acc.append(float(info["sat"])); crash_acc.append(float(jnp.mean(info["crash"])))
+            xr_seq, uref_seq = env.ref_traj(N), env.ref_useq(N)
+            d = env.dmod() if use_d else jnp.zeros((o.shape[0], 6))
+            mu = rollout_mean(params["actor"], o, e, xr_seq, uref_seq,
+                              d if use_d else None)
+            a = mu + jnp.exp(params["log_sigma"]) * jax.random.normal(k, mu.shape)
+            lp = _logp(a, mu, params["log_sigma"])                       # (7)
+            v = mlp_apply(params["critic"], normalise_obs(params["actor"], o))[:, 0]
+            r, done, info = env.step(a)          # the env clips into the box
+            for kk, vv in zip(keys, (o, e, xr_seq, uref_seq, d, a, lp, r, v,
+                                     done.astype(jnp.float64))):
+                BUF[kk].append(vv)
+            sat_acc.append(float(info["sat"]))
+            crash_acc.append(float(jnp.mean(info["crash"])))
             o, e, xr = env.obs()
-        v_last = mlp_apply(params["critic"], o)[:, 0]
-        O, Z, LP = jnp.stack(O), jnp.stack(Z), jnp.stack(LP)
-        RW, VL, DN = jnp.stack(RW), jnp.stack(VL), jnp.stack(DN)
-        ADV = gae(RW, VL, v_last, DN, c["gamma"], c["lam"])
-        RET = ADV + VL
+        v_last = mlp_apply(params["critic"], normalise_obs(params["actor"], o))[:, 0]
+        ST = {k: jnp.stack(v) for k, v in BUF.items()}
+        ADV = gae(ST["rw"], ST["vl"], v_last, ST["dn"], c["gamma"], c["lam"])
+        RET = ADV + ST["vl"]
         flat = lambda z: z.reshape((-1,) + z.shape[2:])
-        Of, Zf, LPf, ADVf, RETf = map(flat, (O, Z, LP, ADV, RET))
+        F = {k: flat(v) for k, v in ST.items()}
+        ADVf, RETf = flat(ADV), flat(RET)
         ADVf = (ADVf - ADVf.mean()) / (ADVf.std() + 1e-8)
 
-        def loss_fn(p, ob, zz, lp_old, adv, ret):
-            mu = act_mu(p["actor"], ob)
-            lp = _logp(zz, mu, log_sigma)
-            ratio = jnp.exp(lp - lp_old)
+        def loss_fn(p, ob, ee, xrs, urs, dd, aa, lp_old, adv, ret):
+            mu, du = mpc_mean(p["actor"], ob, ee, xrs, urs, dd if use_d else None)
+            lp = _logp(aa, mu, p["log_sigma"])
+            # guard the ratio: a diverged actor can otherwise produce inf here
+            # and take the whole update to NaN before the KL trip can fire
+            ratio = jnp.exp(jnp.clip(lp - lp_old, -20.0, 20.0))
             l_pi = -jnp.mean(jnp.minimum(
                 ratio * adv, jnp.clip(ratio, 1 - c["clip"], 1 + c["clip"]) * adv))
-            v = mlp_apply(p["critic"], ob)[:, 0]
-            l_v = jnp.mean((v - ret) ** 2)
-            ent = jnp.mean(jnp.sum(log_sigma + 0.5 * np.log(2 * np.pi * np.e)))
+            von = normalise_obs(p["actor"], ob)
+            l_v = jnp.mean((mlp_apply(p["critic"], von)[:, 0] - ret) ** 2)
+            if c["mpve"]:                                    # B3: actually used
+                e_seq = rollout_err(ee, du, xrs, urs, dd if use_d else None)
+                zb3 = jnp.zeros((ob.shape[0], 3))
+                l_v = l_v + c["mpve_coef"] * mpve_value_loss(
+                    p["critic"], von, e_seq, du, zb3,
+                    jnp.zeros((ob.shape[0], NU)), c["gamma"])
+            ent = jnp.sum(p["log_sigma"] + 0.5 * np.log(2 * np.pi * np.e))
             loss = l_pi + c["vf_coef"] * l_v - c["ent_coef"] * ent
             kl = jnp.mean(lp_old - lp)
             cf = jnp.mean((jnp.abs(ratio - 1.0) > c["clip"]).astype(jnp.float64))
             return loss, (l_pi, l_v, ent, kl, cf)
 
         grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
-        n = Of.shape[0]
+        n = F["o"].shape[0]
         mb = max(n // c["minib"], 1)
-        aux_last = None
-        gnorm = 0.0
+        aux_last, gnorm, kl_seen = None, 0.0, 0.0
+        args_all = (F["o"], F["e"], F["xr"], F["ur"], F["d"], F["a"], F["lp"],
+                    ADVf, RETf)
         if c["algo"] == "trpo":
-            # TRPO: one KL-constrained natural-gradient step on the policy,
-            # then the usual regression for the critic.  Everything else --
-            # rollout, GAE, reward -- is identical to the PPO arm, so the sweep
-            # isolates the update rule (§8.3 sweep 4).
             params["actor"], kl_a, impr = trpo_step(
-                params["actor"], log_sigma, act_mu, Of, Zf, LPf, ADVf,
-                max_kl=c["kl_target"])
+                params["actor"], params["log_sigma"],
+                lambda ap, ob: mpc_mean(ap, ob, F["e"], F["xr"], F["ur"],
+                                        F["d"] if use_d else None)[0],
+                F["o"], F["a"], F["lp"], ADVf, max_kl=c["kl_target"])
             for _ in range(c["epochs"]):
-                (loss, aux_last), g = grad_fn(params, Of, Zf, LPf, ADVf, RETf)
-                gv = {"actor": jax.tree_util.tree_map(jnp.zeros_like, g["actor"]),
-                      "critic": g["critic"]}
+                (loss, aux_last), g = grad_fn(params, *args_all)
+                gv = jax.tree_util.tree_map(jnp.zeros_like, g)
+                gv["critic"] = g["critic"]
                 upd, opt_state = opt.update(gv, opt_state, params)
                 params = optax.apply_updates(params, upd)
                 gnorm = float(optax.global_norm(g["critic"]))
             aux_last = (aux_last[0], aux_last[1], aux_last[2],
                         jnp.asarray(kl_a), aux_last[4])
-            rows.append(dict(iter=it, reward=float(RW.mean()), ep_len=float(T_rollout),
-                             value_loss=float(aux_last[1]), policy_loss=float(-impr),
-                             entropy=float(aux_last[2]), kl=float(kl_a),
-                             clipfrac=float(aux_last[4]), grad_norm=gnorm,
-                             sat=float(np.mean(sat_acc)),
-                             crash_rate=float(np.mean(crash_acc)), wall_s=time.time()))
-            if verbose and (it % max(iters // 10, 1) == 0 or it == iters - 1):
-                r_ = rows[-1]
-                print(f"  it {it:4d}  R {r_['reward']:+8.3f}  vloss "
-                      f"{r_['value_loss']:8.3f} kl {r_['kl']:.4f}  "
-                      f"sat {r_['sat']:.3f}  crash {r_['crash_rate']:.3f}")
-            continue
-        for _ in range(c["epochs"]):
-            key, k = jax.random.split(key)
-            perm = jax.random.permutation(k, n)
-            for i in range(c["minib"]):
-                idx = perm[i * mb:(i + 1) * mb]
-                if idx.size == 0:
-                    continue
-                (loss, aux), g = grad_fn(params, Of[idx], Zf[idx], LPf[idx],
-                                         ADVf[idx], RETf[idx])
-                upd, opt_state = opt.update(g, opt_state, params)
-                params = optax.apply_updates(params, upd)
-                aux_last = aux
-                gnorm = float(optax.global_norm(g))
-            if aux_last is not None and float(aux_last[3]) > 4 * c["kl_target"]:
-                break                                   # early stop on KL
-
-        rows.append(dict(iter=it, reward=float(RW.mean()), ep_len=float(T_rollout),
+        else:
+            stop = False
+            for _ in range(c["epochs"]):
+                if stop:
+                    break
+                key, k = jax.random.split(key)
+                perm = jax.random.permutation(k, n)
+                for i in range(c["minib"]):
+                    idx = perm[i * mb:(i + 1) * mb]
+                    if idx.size == 0:
+                        continue
+                    mbargs = [z[idx] for z in args_all]
+                    (loss, aux_last), g = grad_fn(params, *mbargs)
+                    gnorm = float(optax.global_norm(g))
+                    if not np.isfinite(gnorm):      # never apply a NaN update
+                        stop = True
+                        break
+                    # Trust region, enforced by REVERTING (B1 consequence).
+                    # The MPC mean is far more sensitive to the cost map than an
+                    # MLP's output is to its weights: measured, one clipped Adam
+                    # step moves mu by 0.32 for a 0.5 % change in S, which at
+                    # sigma = 0.05 is already KL 4.8.  Checking KL only after
+                    # the step -- the usual PPO early stop -- lets that step
+                    # land, and the next iteration goes NaN.  So the step is
+                    # applied, measured, and undone if it left the region.
+                    prev = jax.tree_util.tree_map(lambda z: z, params)
+                    prev_opt = opt_state
+                    upd, opt_state = opt.update(g, opt_state, params)
+                    params = optax.apply_updates(params, upd)
+                    kl_new = float(loss_fn(params, *mbargs)[1][3])
+                    if not np.isfinite(kl_new) or kl_new > 4 * c["kl_target"]:
+                        params, opt_state = prev, prev_opt
+                        aux_last = (aux_last[0], aux_last[1], aux_last[2],
+                                    jnp.asarray(kl_new), aux_last[4])
+                        lr_cur = max(lr_cur * c["lr_decay"], c["lr_min"])
+                        opt_state.hyperparams["lr"] = jnp.asarray(lr_cur)
+                        stop = True
+                        break
+                    kl_seen = max(kl_seen, kl_new)
+        # B4: the observation statistics are refreshed at the END of the
+        # iteration, never between the rollout and the update.  Updating them in
+        # between makes mpc_mean in the loss normalise differently from the
+        # rollout that produced lp_old, so the ratio is comparing two different
+        # policies: measured, KL jumps to 2.1e4 on the first minibatch and the
+        # parameters go NaN one iteration later.
+        if "obs_norm" in params["actor"]:
+            params["actor"] = dict(
+                params["actor"],
+                obs_norm=obs_norm_update(params["actor"]["obs_norm"], F["o"]))
+        if kl_seen and kl_seen < 0.5 * c["kl_target"]:     # slack -> step up
+            lr_cur = min(lr_cur * c["lr_grow"], c["lr"])
+            opt_state.hyperparams["lr"] = jnp.asarray(lr_cur)
+        rows.append(dict(iter=it, reward=float(ST["rw"].mean()), ep_len=float(T_rollout),
                          value_loss=float(aux_last[1]), policy_loss=float(aux_last[0]),
                          entropy=float(aux_last[2]), kl=float(aux_last[3]),
                          clipfrac=float(aux_last[4]), grad_norm=gnorm,
-                         sat=float(np.mean(sat_acc)), crash_rate=float(np.mean(crash_acc)),
-                         wall_s=time.time()))
+                         sigma=float(jnp.exp(params["log_sigma"]).mean()),
+                         lr=lr_cur, sat=float(np.mean(sat_acc)),
+                         crash_rate=float(np.mean(crash_acc)), wall_s=time.time()))
         if verbose and (it % max(iters // 10, 1) == 0 or it == iters - 1):
             r_ = rows[-1]
             print(f"  it {it:4d}  R {r_['reward']:+8.3f}  vloss {r_['value_loss']:8.3f} "
-                  f"kl {r_['kl']:.4f}  sat {r_['sat']:.3f}  crash {r_['crash_rate']:.3f}")
+                  f"kl {r_['kl']:.4f}  lr {r_['lr']:.2e}  sat {r_['sat']:.3f}  "
+                  f"crash {r_['crash_rate']:.3f}")
     df = pd.DataFrame(rows)
     df["wall_s"] = df["wall_s"] - df["wall_s"].iloc[0]
     tail = df.iloc[int(0.8 * len(df)):]
@@ -2002,9 +2309,6 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
     return params["actor"], params["critic"], df
 
 
-# --------------------------------------------------------------------------- #
-# §5.13  TRPO and the model-free control arm
-# --------------------------------------------------------------------------- #
 def _flat(tree):
     leaves = jax.tree_util.tree_leaves(tree)
     return jnp.concatenate([jnp.ravel(l) for l in leaves])

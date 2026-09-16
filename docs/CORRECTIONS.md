@@ -1,5 +1,13 @@
 # Corrections to `AGENTS_SPEC_Adaptive_ACMPC.md`
 
+> **See also [`AUDIT.md`](AUDIT.md)**, a later pass that checks the
+> implementation against the *real* PX4 x500 SDF, the `gz_x500` airframe file,
+> and the two source papers (arXiv:2306.09852, arXiv:2605.16015) rather than
+> against this specification. It supersedes several numbers below — in
+> particular `u_hover = 0.728742` and `∂a_z/∂c = 21.6670`, because PX4's
+> `SIM_GZ_EC_MIN = 150` makes thrust affine-in-Ω rather than proportional to
+> `c²` — and adds eight further corrections.
+
 The spec says (§ rules of engagement) *"if a table contradicts the surrounding
 prose, the prose is wrong"* and *"never let a claim outrun a measurement"*.
 Applying that to the spec itself: every constant in §2 and §4.2 was re-derived
@@ -29,7 +37,8 @@ spectral radius **1.1807 — unstable**. The corrected sign gives 0.9386.
 
 **Implemented:** `+g·Ξ`. `x500_core_jax.lqr_matrices()` *derives* `A_c, B_c` by
 autodiff and asserts them against the corrected analytic form, so the sign
-cannot regress. Test `T-5b`.
+cannot regress. Test `T-5b`. (The measured spectral radii were taken under the
+pre-audit actuator model; the sign argument is unchanged by `AUDIT.md` A2.)
 
 ## C-2 — (5.6) `B_c` attitude block is off by a factor of two
 
@@ -39,7 +48,9 @@ cannot regress. Test `T-5b`.
 `δ = 2q_v`, `δ̇ = ω = diag(ω_max)·ω̄`. The factor ½ is already consumed by the
 factor 2 in the definition of `δ`.
 
-**Measurement.** autodiff gives `diag(10, 10, 4)`, not `(5, 5, 2)`.
+**Measurement.** autodiff gives `diag(10, 10, 4)`, not `(5, 5, 2)`. Note that
+`AUDIT.md` D7 then constrains the *box* on those channels to the reachable
+±0.384, which is a separate matter from the scaling.
 
 **Implemented:** `diag(ω_max)`. Same test.
 
@@ -190,7 +201,8 @@ four decimals, with a "seed spread" of 0.0001 m. Nothing raises an exception.
 A linear map over five decades is also a poor use of the policy's resolution:
 90 % of its output range lies inside the top decade.
 
-**Implemented:** the same five decades, mapped **logarithmically**,
+**Implemented:** the same five decades, mapped **logarithmically**, and the
+linear term `p` is now learned alongside `Q` (`AUDIT.md` B2),
 
 ```
 S_ii = Q_LO · (Q_HI/Q_LO)^σ(z),   Q_LO = 1e-2,  Q_HI = 1e3

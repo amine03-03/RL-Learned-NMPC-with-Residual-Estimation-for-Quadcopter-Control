@@ -111,7 +111,7 @@ connect to the study's ledger: `acmpc` is the proposed method, and `nmpc1` and
 
 ### `rdp_estimator` — ring buffer, NumPy inference, watchdog, timing
 
-`RingBuffer` holds `H = 32` frames (0.64 s at 50 Hz) of the 26-D frame of (6.2):
+`RingBuffer` holds `H = 64` frames (1.28 s at 50 Hz, the paper's window) of the 26-D frame of (6.2):
 
 ```
 [ p − p_ref (3) | vec(R) row-major (9) | v (3) | ω (3) || u_{t−1} − u_ref (4) || PWM (4) ]
@@ -278,7 +278,7 @@ All four encoders are exported into `models/`:
 | `rdp_lstm.npz` | 2.32e-15 | 1.44 ms | admissible |
 | `rdp_tcn.npz` | 1.08e-14 | — | admissible |
 | `rdp_cnn.npz` | 6.22e-15 | — | admissible |
-| `rdp_selected.npz` | 2.32e-15 | **1.44 ms** | LSTM, `H = 32`, the shipped one |
+| `rdp_selected.npz` | 2.32e-15 | **1.44 ms** | the shipped one, `H = 64` |
 
 **The encoder is chosen on latency, with R² as the objective inside the
 admissible set** — the reverse of the usual ordering, and the one a 20 ms period
@@ -359,7 +359,21 @@ PYTHONPATH="rdp_acmpc_ws/src/acmpc_controller:rdp_acmpc_ws/src/rdp_estimator:stu
   python -m acmpc_controller.check_ctbr
 ```
 
-## 9. Where the specification was wrong
+## 9. Position-hold RDP training (E-0)
+
+arXiv:2605.16015 trains the adaptive policy **and** the RDP on a position-hold
+objective, arguing that is what produces aggressive disturbance recovery which
+still generalises to tracking. Training on a moving reference mixes tracking
+error into the signal the RDP has to isolate.
+
+The workspace follows that: `reference_generator` has a `hold` mode
+(`level: hold`) whose reference is a genuine fixed point — `v_d = 0`, `a_d = 0`,
+not a frozen clock on a moving curve — and the experiment plan opens with
+**E-0**, 15 runs across S0/S1/S2/S3/S5 at three seeds that generate the RDP
+training set on hold. E-A then evaluates on (9.5). `config/rdp.yaml` records
+`train_reference: hold` so a run cannot silently be trained on the wrong one.
+
+## 10. Where the specification was wrong
 
 Two of the eight corrections in `CORRECTIONS.md` are about this workspace's
 subject matter and are worth repeating here:
@@ -376,3 +390,10 @@ subject matter and are worth repeating here:
   come out better than they should.
 
 Both were found by deriving the equation and measuring, not by reading.
+
+[`AUDIT.md`](AUDIT.md) adds the deployment-side findings: PX4's `SIM_GZ_EC_MIN`
+idle floor (`u_hover = 0.7287`, not 0.7694), the allocator's `CA_ROTORn_KM = 0.05`
+against the rotors' 0.016 (a real 3.125× yaw-authority error, now modelled), and
+the `actuator_motors` PWM normalisation that the RDP's input frame must match.
+`config/acmpc.yaml` now carries `om_min`, `k_m_ctrl` and `u_hover`, all asserted
+against the study by `check_glue`.

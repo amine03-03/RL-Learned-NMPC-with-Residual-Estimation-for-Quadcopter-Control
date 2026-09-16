@@ -25,11 +25,20 @@ jax.config.update("jax_enable_x64", True)
 # --------------------------------------------------------------------------- #
 SCEN_LEVELS = {
     "central": (0.0, 0.075, 0.15, 0.25),      # payload mass / vehicle mass
-    "asym": (0.0, 0.04, 0.07, 0.11),
+    #: arXiv:2605.16015 Table 2 uses 0 / 1 / 7 / 11 %.  The 4 % the build
+    #: specification substitutes for 1 % removes the paper's near-nominal point,
+    #: which is the one that shows whether the estimator is quiet when there is
+    #: nothing to estimate (C3).
+    "asym": (0.0, 0.01, 0.07, 0.11),
     "slung": (0.0, 15.0, 10.0, 5.0, 3.0),     # level = figure-8 period [s]
 }
 SCEN_RP = {"central": (0.0, 0.0, -0.05), "asym": (0.174, 0.174, -0.05)}
-SLUNG_MFRAC, SLUNG_L = 0.149, 0.5
+#: Slung load: 4.7 g on a 31.5 g Crazyflie = 14.9 % of vehicle mass, suspended
+#: "by a thread of length equal to the arm length" (C4).  The build spec's
+#: L = 0.5 m is 2.87 arm lengths and makes the pendulum 1.42 s instead of the
+#: 0.837 s the paper's geometry gives -- a different disturbance bandwidth
+#: entirely, and a slower one than the airframe.
+SLUNG_MFRAC, SLUNG_L = 0.149, 0.174
 SLUNG_PERIOD = float(2 * np.pi * np.sqrt(SLUNG_L / X.P.g))     # 1.4187 s
 SCENARIOS = ("central", "asym", "slung")
 
@@ -193,7 +202,10 @@ def make_scenario(name, level):
 # §6.2  the residual dynamics predictor
 # --------------------------------------------------------------------------- #
 FRAME_DIM = 26          # eq (6.2)
-H_DEFAULT = 32          # 0.64 s at 50 Hz -- matches the ROS deployment (§9.5)
+#: arXiv:2605.16015 uses H = 64 (1.28 s at 50 Hz).  The deployment spec's 32 was
+#: chosen to match §9.5; the two are aligned here on the paper's value, and §9.5
+#: and config/rdp.yaml follow (C5).
+H_DEFAULT = 64
 H_BENCH = (16, 32, 64, 128)
 OUT_DIM = 6
 CHANNEL_NAMES = ("F_x", "F_y", "F_z", "M_x", "M_y", "M_z")
@@ -381,10 +393,13 @@ def cnn_apply(p, x):
 ENCODERS = ("GRU", "LSTM", "TCN", "CNN")
 
 
-def rdp_init(key, kind="GRU", H=H_DEFAULT, nin=FRAME_DIM, hid=(128, 64), out=OUT_DIM,
+def rdp_init(key, kind="GRU", H=H_DEFAULT, nin=FRAME_DIM, hid=(64, 64), out=OUT_DIM,
              **kw):
-    """Default deployment architecture (§9.5): normalise -> GRU(128) -> GRU(64)
-    -> Linear(6)."""
+    """Deployment architecture: normalise -> GRU(64) -> GRU(64) -> Linear(6).
+
+    arXiv:2605.16015 uses "two GRU layers (hidden dimension of 64)"; the build
+    specification's GRU(128) -> GRU(64) doubles the first layer for no stated
+    reason and costs latency for it (C5)."""
     ks = jax.random.split(key, 6)
     p = {"kind": kind, "H": H, "nin": nin, "out": out, "hid": tuple(hid)}
     if kind == "GRU":
@@ -585,15 +600,19 @@ WRENCH_DR_SWEEP = (0.05, 0.10, 0.20, 0.32)      # fractions of vehicle weight
 WRENCH_DR_START = 0.10                          # **do not start at 0.32**
 
 
-def wrench_dr_magnitudes(frac):
-    """F_DR = frac*m*g [N];  tau_DR = 0.30625*frac*m*g*arm [N m].
+#: Moment-to-force coefficient of the training wrench randomisation.
+#: arXiv:2605.16015 injects U(-0.1, 0.1) N and U(-0.001, 0.001) N.m on a 31.5 g
+#: Crazyflie with a 28 mm arm.  Non-dimensionalised: force = 0.3236 of weight,
+#: moment = 0.1156 of weight*arm, so the moment rides at 0.1156/0.3236 = 0.3572
+#: of the force coefficient.  The build specification's worked example implies
+#: 0.30625, which is 15 % milder in moment than the paper (C2).
+DR_MOMENT_COEF = 0.35720
 
-    The ratio is fixed by the §4.4 worked example: at frac = 0.32 the
-    specification quotes F = 6.478 N and tau = 0.098*m*g*0.174 = 0.3452 N m, so
-    the moment coefficient is 0.098/0.32 = 0.30625 of the force coefficient.
-    """
+
+def wrench_dr_magnitudes(frac):
+    """F_DR = frac*m*g [N];  tau_DR = DR_MOMENT_COEF*frac*m*g*arm [N m]."""
     mg = X.M_TOT * X.P.g
-    return float(frac * mg), float(0.30625 * frac * mg * 0.174)
+    return float(frac * mg), float(DR_MOMENT_COEF * frac * mg * 0.174)
 
 
 class AdaptEnv(X.Env):
@@ -669,24 +688,39 @@ class AdaptEnv(X.Env):
     def ready(self):
         return self._buf_fill >= self.H
 
-    def attach(self, params, scales, filt=0.0):
+    SMOOTH_N = 32          # arXiv:2605.16015: "a rolling buffer of length 32"
+
+    def attach(self, params, scales, filt=0.0, smooth=None):
         """Attach a predictor: ``d_channel()`` then returns the estimate.
 
-        ``filt`` is the optional first-order causal filter of §9.11 step 4.
+        Smoothing follows the paper: the prediction is averaged over a rolling
+        buffer of ``smooth`` frames (default 32) and the temporal **mean** is
+        what reaches the controller.  ``filt`` additionally applies the
+        first-order causal filter of §9.11 step 4; both are causal, so neither
+        can violate §9.1.  The build specification offered only the IIR, and
+        defaulted it off, so no smoothing happened at all (C5).
         """
-        st = {"y": None}
+        n_s = self.SMOOTH_N if smooth is None else int(smooth)
+        st = {"y": None, "buf": []}
         f = jax.jit(lambda w: rdp_apply(params, w, scales["mu"], scales["sd"])
                     * scales["out_sd"])
 
         def est(env):
             y = f(jnp.asarray(env.window()))
             y = jnp.where(env.ready(), y, 0.0)
+            if n_s > 1:
+                st["buf"].append(y)
+                if len(st["buf"]) > n_s:
+                    st["buf"].pop(0)
+                y = jnp.mean(jnp.stack(st["buf"]), 0)
             if filt > 0.0 and st["y"] is not None:
                 y = filt * st["y"] + (1 - filt) * y
             st["y"] = y
             return y
 
         self.estimator = est
+        self._est_reset = lambda: (st.__setitem__("buf", []),
+                                   st.__setitem__("y", None))
         return self
 
     # -- transition --------------------------------------------------------- #

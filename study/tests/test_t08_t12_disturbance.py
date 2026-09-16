@@ -40,7 +40,8 @@ def test_T8_holds_after_flying():
 
 
 @pytest.mark.parametrize("scen,lvl", [("central", 0.075), ("central", 0.15),
-                                      ("central", 0.25), ("asym", 0.04)])
+                                      ("central", 0.25), ("asym", 0.01),
+                                      ("asym", 0.07)])
 def test_T9_payload_statics(scen, lvl):
     """T-9: external_wrench matches (9.7) within 5 % in **steady hover**.
 

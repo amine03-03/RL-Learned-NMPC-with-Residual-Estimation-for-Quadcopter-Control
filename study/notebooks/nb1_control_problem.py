@@ -38,6 +38,11 @@ RNG = np.random.default_rng(0)
 #
 # Assert §2's constants and tests T-1…T-5. **Refuse to continue on failure**: a
 # wrong constant here is not a small error, it is a different aircraft.
+#
+# The expected values are the **real PX4 x500**, not the build specification's:
+# `SIM_GZ_EC_MIN = 150` makes `u_hover = 0.728742` and `∂a_z/∂c = 21.6670`, and
+# the allocator's `CA_ROTORn_KM = 0.05` gives `cond(M_ctrl) = 20` against the
+# rotors' 62.5. See `docs/AUDIT.md` (A2, A3).
 
 # %%
 S.section(1, "physics self-test", "assert §2 and T-1..T-5 before anything else",
@@ -46,16 +51,19 @@ S.section(1, "physics self-test", "assert §2 and T-1..T-5 before anything else"
 rows = [
     ("m [kg]", X.M_TOT, 2.064308),
     ("cg0_z [m]", float(X.CG_NOM[2]), 0.001869131),
-    ("J_xx [kg m^2]", float(X.J_NOM[0, 0]), 0.023830955),
-    ("J_zz [kg m^2]", float(X.J_NOM[2, 2]), 0.043893959),
+    ("J_xx [kg m^2]", float(X.J_NOM[0, 0]), 0.023832494),
+    ("J_yy [kg m^2]", float(X.J_NOM[1, 1]), 0.023935416),
+    ("J_zz [kg m^2]", float(X.J_NOM[2, 2]), 0.043999950),
     ("f_max [N]", X.F_MAX, 8.54858),
     ("T_max [N]", X.T_MAX, 34.19432),
     ("T/W [-]", X.TW, 1.689122),
-    ("u_hover [-]", X.U_HOVER, 0.769431),
+    ("u_hover [-]", X.U_HOVER, 0.728742),
+    ("T_idle [N]", X.T_IDLE, 0.769372),   # = T_max*(150/1000)^2
     ("a_lat_max [m/s^2]", X.A_LAT_MAX, 13.349711),
     ("alpha*a_lat [m/s^2]", X.P.alpha_feas * X.A_LAT_MAX, 8.009827),
     ("cond(M) [-]", float(np.linalg.cond(X.M_NOM)), 62.5),
-    ("d a_z/d c [1/s^2]", X.DAZ_DC_HOVER, 25.490538),
+    ("cond(M_ctrl) [-]", float(np.linalg.cond(X.M_CTRL)), 20.0),
+    ("d a_z/d c [1/s^2]", X.DAZ_DC_HOVER, 21.666957),
     ("kappa_a fig8 [-]", X.KAPPA_A[3], 2.125),
     ("kappa_a square [-]", X.KAPPA_A[5], 9.077877),
 ]
@@ -64,7 +72,7 @@ s_h, u_h = X.hover_state(1, par=par), X.hover_u(1, par=par)
 h = 1e-6
 fd = float((X.fc(X.plant_to_ctrl(s_h), u_h.at[:, 0].add(h))[0, 5]
             - X.fc(X.plant_to_ctrl(s_h), u_h.at[:, 0].add(-h))[0, 5]) / (2 * h))
-rows.append(("T-5 d a_z/d c (finite diff)", fd, 25.490538))
+rows.append(("T-5 d a_z/d c (finite diff)", fd, 21.666957))
 rows.append(("T-8 |residual| on nominal plant",
              float(jnp.abs(X.true_disturbance(s_h, u_h, par)).max()), 0.0))
 rows.append(("T-8 |wrench| on nominal plant",
@@ -409,8 +417,18 @@ print(f"\n  ANALYSIS. Over the admissible grid, closed-loop RMSE runs "
       f"{worst/max(best,1e-12):.1f}x.")
 print(f"    Nothing in the theory determines Q and R.  A human picks them, and "
       f"that choice moves the result by {worst/max(best,1e-12):.1f}x.")
-print(f"    The hand-chosen operating point (Q_pos={op_q:g}, R={op_r:g}) sits at "
-      f"RMSE {adm[(adm.Q_pos==op_q)&(adm.R_rate==op_r)].rmse.iloc[0]:.4f} m.")
+_op = adm[(adm.Q_pos == op_q) & (adm.R_rate == op_r)]
+if len(_op):
+    _opv = float(_op.rmse.iloc[0])
+    print(f"    The hand-chosen operating point (Q_pos={op_q:g}, R={op_r:g}) sits at "
+          f"RMSE {_opv:.4f} m, {100*(_opv-best)/best:+.1f}% off this grid's argmin "
+          f"({adm.loc[adm.rmse.idxmin(),'Q_pos']:g}, "
+          f"{adm.loc[adm.rmse.idxmin(),'R_rate']:g}).")
+    print(f"    Note the operating point was chosen on the **LQR** sweep while this "
+          f"grid scores **NMPC N=1**; the two disagree slightly about the optimum "
+          f"and the chosen point is within ~8% of both.  That disagreement is "
+          f"itself part of the answer: even 'the right weights' is controller "
+          f"dependent, which is what §8.3 removes.")
 
 # %% [markdown]
 # ## Step 7 — ledger row

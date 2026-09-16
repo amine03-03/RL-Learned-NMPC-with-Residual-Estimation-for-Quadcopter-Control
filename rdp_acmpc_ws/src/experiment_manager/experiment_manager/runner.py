@@ -85,13 +85,36 @@ CONTROLLERS = {
 INCUMBENTS = {"PID": dict(mode="pid"), "NMPC1": dict(mode="nmpc1")}
 
 
+#: Reference mode used to GENERATE the RDP training set.  The predictor is
+#: trained on position hold (arXiv:2605.16015) and only evaluated on (9.5), so
+#: the estimator never sees tracking error mixed into its disturbance signal.
+RDP_TRAIN_MODE = "hold"
+RDP_EVAL_MODE = "moderate"
+
+
+def plan_rdp_data(scenarios=("S0", "S1", "S2", "S3", "S5"), seeds=(0, 1, 2),
+                  episodes=20):
+    """E-0: RDP training-set generation, POSITION HOLD.
+
+    Run before E-A.  Flying the training scenarios on a hold setpoint keeps the
+    residual the only thing moving the vehicle; on a tracking reference the
+    predictor would have to separate its own tracking transient from the
+    disturbance it is meant to estimate.
+    """
+    return [dict(exp="E-0", scenario=s, controller="C0", seed=k,
+                 reference=RDP_TRAIN_MODE, episodes=episodes, purpose="rdp_train")
+            for s in scenarios for k in seeds]
+
+
 def plan_EA(scenarios=("S0", "S1", "S2", "S3", "S4", "S5", "S6"), seeds=(0, 1, 2)):
     """E-A scenario matrix: S0..S6 x C0..C3, three seeds, median and spread."""
-    plan = [dict(exp="E-A", scenario=s, controller=c, seed=k)
+    plan = [dict(exp="E-A", scenario=s, controller=c, seed=k,
+                 reference=RDP_EVAL_MODE)
             for s in scenarios for c in CONTROLLERS for k in seeds]
     # the realistic incumbents, on S0/S1 only, so the deployment result connects
     # to the study ledger
-    plan += [dict(exp="E-A", scenario=s, controller=c, seed=k)
+    plan += [dict(exp="E-A", scenario=s, controller=c, seed=k,
+                  reference=RDP_EVAL_MODE)
              for s in ("S0", "S1") for c in INCUMBENTS for k in seeds]
     return plan
 
@@ -121,7 +144,8 @@ def plan_ED(H=(16, 32, 64), seeds=(0,)):
 
 
 def full_plan():
-    return plan_EA() + plan_EB() + plan_EC() + plan_ED()
+    """E-0 (position-hold RDP data) then the evaluation experiments."""
+    return plan_rdp_data() + plan_EA() + plan_EB() + plan_EC() + plan_ED()
 
 
 def summarise(rows, by=("scenario", "controller"), value="pos_rmse"):

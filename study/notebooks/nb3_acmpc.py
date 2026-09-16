@@ -49,7 +49,7 @@ def mk_env(task, seed=0, spec=None, **kw):
 
 def base_cfg(**kw):
     c = dict(N=1, rep="diag", n_iter=NIT, n_diff=2, hid=HID, minib=S.CFG["minib"],
-             epochs=S.CFG["epochs"], sigma=0.15, algo="ppo", mpve=False, lam=0.95,
+             epochs=S.CFG["epochs"], sigma=0.05, algo="ppo", mpve=False, lam=0.95,
              dist_label="nominal")
     c.update(kw)
     return c
@@ -203,6 +203,11 @@ print(f"\n  learned/hand weight ratio spans "
 # perturb the action: it drives the input onto the box and corrupts the
 # linearisation $\mathbf A_k,\mathbf B_k$ *inside* the solve. A model-free MLP
 # has no solve to corrupt.
+#
+# This is testable only because the noise is now on the **action**, as
+# arXiv:2306.09852 eq (7) specifies. An earlier version perturbed the cost-map
+# parameters, under which saturation does not rise with $\sigma$ at all and the
+# mechanism cannot occur — see `docs/AUDIT.md` (B1).
 #
 # Saturation fraction is recorded to test the **mechanism**, not just the effect.
 

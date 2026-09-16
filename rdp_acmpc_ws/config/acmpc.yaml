@@ -8,7 +8,9 @@
     control_rate_hz: 50.0
     rate_hz: 50.0
     use_d: true            # feed the estimate through B_d into the prediction model
-    dmod_mode: first_order # (4.13); 'none' zeroes the moment block -- report both
+    dmod_mode: closed_loop # (4.13) scaled by the measured closed-loop gain (D3);
+                           # 'first_order' is the t->0 limit and overstates a
+                           # standing moment ~9x; 'none' is the settled limit
     # reference (9.5); the node REFUSES to fly an infeasible one
     A: 1.2
     B: 0.9
@@ -18,7 +20,16 @@
       m: 2.064308
       T_max: 34.19432      # the ONE definition; recalibrate via check_ctbr --y-measured
       K_T: 8.54858e-06
-      k_m: 0.016
+      k_m: 0.016           # Gazebo momentConstant -- what the ROTORS produce
+      k_m_ctrl: 0.05       # CA_ROTORn_KM -- what the PX4 ALLOCATOR believes (A3)
       arm: 0.174
       g: 9.8066
-      J: [0.023830955, 0.023830955, 0.043893959]
+      # includes the rotors' own inertia, not just their point masses (A6)
+      J: [0.023832493, 0.023935418, 0.043999954]
+      # SIM_GZ_EC_MIN/MAX: Omega = om_min + c (om_max - om_min), NOT c*om_max (A2)
+      om_min: 150.0
+      om_max: 1000.0
+      u_hover: 0.728741895     # 0.7287, not sqrt(mg/T_max) = 0.7694
+      # SDF rotor aerodynamics, previously unmodelled (A5)
+      rotor_drag_coeff: 8.06428e-05
+      rolling_moment_coeff: 1.0e-06
