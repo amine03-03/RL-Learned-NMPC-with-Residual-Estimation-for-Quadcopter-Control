@@ -193,9 +193,19 @@ training split **by complete episode, never by shuffled samples**, and lets
 
 ### `experiment_manager` — sweeps and config capture
 
-Plans **118 runs**: E-A (96) the S0…S6 × C0…C3 matrix at three seeds plus the PID
-and NMPC incumbents on S0/S1; E-B (7) the frequency response; E-C (12) the MPC
-horizon interaction; E-D (3) history length.
+Plans **134 runs**: E-0 (15) the RDP training set, E-A (96) the S0…S6 × C0…C3
+matrix at three seeds plus the PID and NMPC incumbents on S0/S1; E-B (7) the
+frequency response; E-C (12) the MPC horizon interaction; E-D (4) history
+length.
+
+**E-0 flies position hold, not the Lissajous.** The residual predictor is fitted
+on a hold setpoint (`RDP_TRAIN_MODE = "hold"`), following arXiv:2605.16015: on a
+hold the disturbance is the only thing moving the vehicle, so the regression
+target is the residual rather than the residual plus the controller's own
+tracking transient. Every *evaluation* experiment still flies the tracking
+reference (`RDP_EVAL_MODE = "moderate"`), so the predictor is always tested off
+its training distribution. Every planned run carries an explicit `reference`
+field — none inherits the node default.
 
 `capture_config` records the git commit and dirty flag, PX4 and Gazebo versions,
 ROS distro, host, rates, horizon, `H`, seed, plant parameters and the calibrated

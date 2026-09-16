@@ -121,9 +121,11 @@ def plan_EA(scenarios=("S0", "S1", "S2", "S3", "S4", "S5", "S6"), seeds=(0, 1, 2
 
 def plan_EB(freqs=(0.1, 0.25, 0.5, 1.0, 2.0, 4.0), seeds=(0,)):
     """E-B frequency response, from S4."""
-    return [dict(exp="E-B", scenario="S4", controller="C2", seed=k, freq_hz=f)
+    return [dict(exp="E-B", scenario="S4", controller="C2", seed=k, freq_hz=f,
+                 reference=RDP_EVAL_MODE)
             for f in freqs for k in seeds] + \
-           [dict(exp="E-B", scenario="S4", controller="C2", seed=k, chirp=True)
+           [dict(exp="E-B", scenario="S4", controller="C2", seed=k, chirp=True,
+                 reference=RDP_EVAL_MODE)
             for k in seeds]
 
 
@@ -133,13 +135,24 @@ def plan_EC(horizons=(10, 20, 30, 40), seeds=(0,)):
     The report must **mark which horizons violate (9.4)**, which is why the
     horizon is a planned axis rather than a fixed choice.
     """
-    return [dict(exp="E-C", scenario="S3", controller=c, seed=k, horizon=N)
+    return [dict(exp="E-C", scenario="S3", controller=c, seed=k, horizon=N,
+                 reference=RDP_EVAL_MODE)
             for N in horizons for c in ("C0", "C1", "C2") for k in seeds]
 
 
-def plan_ED(H=(16, 32, 64), seeds=(0,)):
-    """E-D history length: accuracy and latency."""
-    return [dict(exp="E-D", scenario="S3", controller="C2", seed=k, H=h)
+def plan_ED(H=(16, 32, 64, 128), seeds=(0,)):
+    """E-D history length: accuracy and latency.
+
+    The brackets straddle the study default (``H = 64``) on both sides, and
+    match ``E_D.history`` in ``config/experiments.yaml`` -- a sweep that stops
+    at the default cannot show it is a maximum.
+
+    Each H retrains the predictor on the **position-hold** set of E-0 and then
+    evaluates it on the tracking reference, so the axis varies only the history
+    length and not what the predictor was fitted to.
+    """
+    return [dict(exp="E-D", scenario="S3", controller="C2", seed=k, H=h,
+                 train_reference=RDP_TRAIN_MODE, reference=RDP_EVAL_MODE)
             for h in H for k in seeds]
 
 
