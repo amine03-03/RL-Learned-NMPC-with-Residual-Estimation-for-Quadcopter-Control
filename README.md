@@ -65,7 +65,14 @@ rdp_acmpc_ws/              §9     ROS 2 / PX4 / Gazebo
   config/                    acmpc, rdp, disturbances, experiments
 artifacts/                 every CSV, figure and checkpoint the notebooks write
 docs/CORRECTIONS.md        the eight corrections, with their measurements
+docs/ROS2_WORKSPACE.md     what is in the workspace, why, and what is not flown
 ```
+
+[`docs/ROS2_WORKSPACE.md`](docs/ROS2_WORKSPACE.md) covers the deployment half in
+detail: the pure-core / thin-wrapper split and the reason for it, how causality
+is enforced structurally rather than by convention, each package and the trap it
+guards, the two check binaries with their measured results, and an explicit list
+of what is verified here against what needs a live PX4/Gazebo graph.
 
 ## Running it
 
