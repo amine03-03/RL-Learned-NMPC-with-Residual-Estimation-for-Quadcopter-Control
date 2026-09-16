@@ -324,3 +324,21 @@ noise on the action and a six-iteration smoke budget, training genuinely fails.
 all.** The same applies to the estimator R² (LSTM 0.277, GRU 0.261, CNN 0.160,
 TCN 0.030): all four are latency-admissible, and the §9.5 rule correctly selects
 on R² among them, but 0.28 is a weak predictor and is a smoke-budget artefact.
+
+## Verification of the corrected tree
+
+Run against the final tree, on an otherwise idle machine:
+
+| check | result |
+|---|---|
+| `pytest study/tests/` | **83 passed** (23 of them pin audit findings) |
+| `study/check_consistency.py` | **all consistency checks passed** |
+| `acmpc_controller.check_glue` | **PASSED** |
+| notebooks 1–7 | all seven run to completion in one chain |
+| `export_estimator.py` ×5 | parity ~1e-14 against a 1e-5 tolerance |
+
+The exported predictors all sit inside the 20 ms control period on the
+deployment NumPy path — CNN 0.78, TCN 1.95, GRU 5.24, LSTM/selected 5.94 ms
+p95. Note that this is a different measurement from the ledger's `ms_p95`
+column, which times the JAX study path via `solve_latency_ms`; F1 above is what
+happens when that distinction is not held carefully.
