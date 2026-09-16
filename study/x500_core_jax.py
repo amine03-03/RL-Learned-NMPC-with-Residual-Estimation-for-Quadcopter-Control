@@ -1342,7 +1342,13 @@ def normalise_obs(theta, obs):
     nrm = theta.get("obs_norm")
     if nrm is None:
         return obs
-    return (obs - nrm["mu"]) / jnp.sqrt(nrm["var"] + 1e-8)
+    # Floor the variance and clip the result, as every production PPO
+    # normaliser does.  Several observation channels are near-constant within a
+    # batch -- a frozen preview under position hold, an integral that has not
+    # moved -- and an unfloored 1/sqrt(var) then amplifies the first sample that
+    # does move by ~1e4, which takes the policy to NaN within three iterations.
+    return jnp.clip((obs - nrm["mu"]) / jnp.sqrt(jnp.maximum(nrm["var"], OBS_VAR_FLOOR)),
+                    -OBS_CLIP, OBS_CLIP)
 
 
 def costmap_head(theta, obs, rep, N):
@@ -1350,6 +1356,10 @@ def costmap_head(theta, obs, rep, N):
     h = mlp_apply(theta["trunk"], normalise_obs(theta, obs))
     z = mlp_apply(theta["head"], h)
     return z.reshape(obs.shape[0], N, REP_DIM[rep])
+
+
+#: Variance floor and clip for :func:`normalise_obs`.
+OBS_VAR_FLOOR, OBS_CLIP = 1e-4, 10.0
 
 
 def obs_norm_init(obs_dim):
@@ -2389,8 +2399,14 @@ def trpo_step(actor, log_sigma, act_mu, ob, zz, lp_old, adv, max_kl=0.01,
     return actor, 0.0, 0.0
 
 
-def mlp_policy_init(key, obs_dim, hid, n_layer=2):
-    return mlp_init(key, [obs_dim] + [hid] * n_layer + [NU], scale_last=0.01)
+def mlp_policy_init(key, obs_dim, hid, n_layer=2, normalise=True):
+    """The model-free arm.  It gets the SAME observation normalisation as the
+    cost map, or §8.3's exploration comparison would be measuring the
+    normalisation rather than the architecture (B4)."""
+    p = {"net": mlp_init(key, [obs_dim] + [hid] * n_layer + [NU], scale_last=0.01)}
+    if normalise:
+        p["obs_norm"] = obs_norm_init(obs_dim)
+    return p
 
 
 def make_mlp_ctrl(actor, name="MLP"):
@@ -2405,7 +2421,8 @@ def make_mlp_ctrl(actor, name="MLP"):
     """
     @jax.jit
     def _act(o, uref):
-        return jnp.clip(uref + jnp.tanh(mlp_apply(actor, o)) * 0.5,
+        return jnp.clip(uref + jnp.tanh(mlp_apply(actor["net"],
+                                                  normalise_obs(actor, o))) * 0.5,
                         jnp.asarray(U_LO), jnp.asarray(U_HI))
 
     def f(o, e, xr, uref=None, d=None):
@@ -2434,7 +2451,7 @@ def train_mlp(env, cfg, seed=0, iters=100, T_rollout=64, verbose=True,
 
     @jax.jit
     def act(p, o):
-        return jnp.tanh(mlp_apply(p, o)) * 0.5
+        return jnp.tanh(mlp_apply(p["net"], normalise_obs(p, o))) * 0.5
 
     rows = []
     o, e, xr = env.obs()
@@ -2446,13 +2463,14 @@ def train_mlp(env, cfg, seed=0, iters=100, T_rollout=64, verbose=True,
             a = mu + jnp.exp(log_sigma) * jax.random.normal(k, mu.shape)
             _, uref, _ = env.ref_now()
             u = jnp.clip(uref + a, jnp.asarray(U_LO), jnp.asarray(U_HI))
-            v = mlp_apply(params["critic"], o)[:, 0]
+            v = mlp_apply(params["critic"],
+                          normalise_obs(params["actor"], o))[:, 0]
             r, done, info = env.step(u)
             O.append(o); A.append(a); LP.append(_logp(a, mu, log_sigma))
             RW.append(r); VL.append(v); DN.append(done.astype(jnp.float64))
             sat_acc.append(float(info["sat"])); cr_acc.append(float(jnp.mean(info["crash"])))
             o, e, xr = env.obs()
-        v_last = mlp_apply(params["critic"], o)[:, 0]
+        v_last = mlp_apply(params["critic"], normalise_obs(params["actor"], o))[:, 0]
         O, A, LP = jnp.stack(O), jnp.stack(A), jnp.stack(LP)
         RW, VL, DN = jnp.stack(RW), jnp.stack(VL), jnp.stack(DN)
         ADV = gae(RW, VL, v_last, DN, c["gamma"], c["lam"])
@@ -2467,7 +2485,8 @@ def train_mlp(env, cfg, seed=0, iters=100, T_rollout=64, verbose=True,
             ratio = jnp.exp(lp - lp_old)
             l_pi = -jnp.mean(jnp.minimum(
                 ratio * adv, jnp.clip(ratio, 1 - c["clip"], 1 + c["clip"]) * adv))
-            l_v = jnp.mean((mlp_apply(p["critic"], ob)[:, 0] - ret) ** 2)
+            l_v = jnp.mean((mlp_apply(p["critic"],
+                                      normalise_obs(p["actor"], ob))[:, 0] - ret) ** 2)
             return l_pi + c["vf_coef"] * l_v, (l_pi, l_v, jnp.mean(lp_old - lp))
 
         gfn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
@@ -2485,6 +2504,10 @@ def train_mlp(env, cfg, seed=0, iters=100, T_rollout=64, verbose=True,
                                   ADVf[idx], RETf[idx])
                 upd, opt_state = opt.update(g, opt_state, params)
                 params = optax.apply_updates(params, upd)
+        if "obs_norm" in params["actor"]:            # end of iteration, as in PPO
+            params["actor"] = dict(params["actor"],
+                                   obs_norm=obs_norm_update(
+                                       params["actor"]["obs_norm"], Of))
         rows.append(dict(iter=it, reward=float(RW.mean()),
                          value_loss=float(aux[1]), policy_loss=float(aux[0]),
                          kl=float(aux[2]), sat=float(np.mean(sat_acc)),

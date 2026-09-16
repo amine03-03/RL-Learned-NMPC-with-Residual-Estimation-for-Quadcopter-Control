@@ -241,3 +241,26 @@ def test_E3_task_field_is_read():
     import inspect
     src = inspect.getsource(X)
     assert 'cfg.task == "stabilize"' in src, "EnvCfg.task is still a dead field"
+
+
+def test_B4_normaliser_is_floored_and_clipped():
+    """A near-constant observation channel must not blow up the normaliser.
+
+    Several channels are near-constant within a batch -- a frozen preview under
+    position hold, an integral that has not moved -- and an unfloored
+    1/sqrt(var) amplifies the first sample that does move by ~1e4.  Measured,
+    that took the model-free arm to NaN within three iterations.
+    """
+    th = {"obs_norm": {"mu": jnp.zeros(3), "var": jnp.asarray([1.0, 0.0, 1e-12]),
+                       "count": jnp.asarray(100.0)}}
+    o = jnp.asarray([[0.0, 5.0, 5.0]])
+    n = X.normalise_obs(th, o)
+    assert bool(jnp.all(jnp.isfinite(n)))
+    assert float(jnp.abs(n).max()) <= X.OBS_CLIP + 1e-9
+    assert X.OBS_VAR_FLOOR > 0.0
+
+
+def test_B4_model_free_arm_is_normalised_too():
+    """§8.3's exploration comparison must not be measuring the normalisation."""
+    p = X.mlp_policy_init(jax.random.PRNGKey(0), X.OBS_DIM, 8)
+    assert "obs_norm" in p and "net" in p

@@ -280,6 +280,69 @@ pd.DataFrame(np.c_[yt1[::nveh], pv[::nveh]],
     f"{FIG}/F19_wrench_timeseries.csv", index=False)
 
 # %% [markdown]
+# ## The two disturbance objects, measured against each other
+#
+# §4.3 defines two different things and §4.4 warns they must not be confused:
+# the **wrench** (b) in [N, N·m], and the **model residual** (a) in
+# [m/s², rad/s]. `oracle_target` selects which the observation carries, and it
+# had never been exercised on `'residual'` (audit E4).
+#
+# This matters because of D3: (4.13) converts the moment block using the rate
+# loop's steady state *with $K_i$ neglected*, which is a short-transient model.
+# The payload scenarios are quasi-static, so the conversion and the true
+# residual can differ by an order of magnitude. Here both are measured.
+
+# %%
+S.section(2.5, "wrench vs residual", "the two disturbance objects, side by side",
+          produces="acmpc_adaptive/nb5_dmod_validity.csv")
+
+rows = []
+for scen, lvl in (("central", 0.15), ("asym", 0.01), ("asym", 0.07)):
+    env = A.AdaptEnv(4, 1, 200000, S.nominal_spec(speed=(0.0, 0.0)), scen, lvl,
+                     paths=("hover",), task="stabilize", H=H,
+                     fixed=dict(e0=[0.0, 0.0, 0.0]))
+    pilot2 = X.make_lqr_ctrl()
+    for _ in range(800):
+        o, e, xr = env.obs()
+        _, uref, _ = env.ref_now()
+        u, _ = pilot2(o, e, xr, uref=uref)
+        env.step(u)
+    truth = np.asarray(env.residual_truth()).mean(0)           # (4.9), the truth
+    for mode in X.DMOD_MODES:
+        conv = np.asarray(X.wrench_to_dmod(env.d_truth(), mode)).mean(0)
+        rows.append(dict(scen=scen, level=lvl, mode=mode,
+                         a_res_conv=float(np.linalg.norm(conv[:3])),
+                         a_res_true=float(np.linalg.norm(truth[:3])),
+                         om_res_conv=float(np.linalg.norm(conv[3:])),
+                         om_res_true=float(np.linalg.norm(truth[3:])),
+                         om_ratio=float(np.linalg.norm(conv[3:])
+                                        / max(np.linalg.norm(truth[3:]), 1e-9))))
+DV = pd.DataFrame(rows)
+S.table(DV, "(4.13) conversion against the true residual (4.9)",
+        note="om_ratio = 1 would mean the conversion is exact; the force block "
+             "converts exactly by 1/m, the moment block does not",
+        csv=("acmpc_adaptive", "nb5_dmod_validity.csv"))
+print(f"\n  The force block converts exactly (a_res = F/m).  The moment block is a")
+print(f"  MODEL: 'first_order' is (4.13) verbatim and is the t -> 0 limit, so on a")
+print(f"  standing moment it overstates the rate residual; 'closed_loop' scales it")
+print(f"  by moment_gain({X.DMOD_SETTLE_S}) = {np.round(X.moment_gain(X.DMOD_SETTLE_S),3)}.")
+print(f"  The model path below uses mode={DMOD_MODE!r}.")
+
+# and the observation channel can carry either object
+for tgt in ("wrench", "residual"):
+    env = A.AdaptEnv(4, 1, 200000, S.nominal_spec(speed=(0.0, 0.0)), "asym", 0.07,
+                     paths=("hover",), task="stabilize", oracle=True,
+                     oracle_target=tgt, H=H, fixed=dict(e0=[0.0, 0.0, 0.0]))
+    for _ in range(60):
+        o, e, xr = env.obs()
+        _, uref, _ = env.ref_now()
+        u, _ = X.make_lqr_ctrl()(o, e, xr, uref=uref)
+        env.step(u)
+    blk = np.asarray(env.obs()[0])[:, X.OBS_DIM:]
+    print(f"  oracle_target={tgt!r:10s} observation block rms = {np.sqrt((blk**2).mean()):.4f} "
+          f"[{'N, N.m' if tgt == 'wrench' else 'm/s^2, rad/s'}]")
+
+# %% [markdown]
 # ## Closed loop — the three variants
 #
 # | variant | → model | → observation | interpretation |
