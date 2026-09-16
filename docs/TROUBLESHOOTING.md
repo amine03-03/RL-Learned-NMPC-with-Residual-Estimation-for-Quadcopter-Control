@@ -34,6 +34,10 @@ equivalent: verified bit-identical (`0.0`) across flat, batched and single
 shapes, with and without the disturbance argument, and pinned by `test_D8_*`
 in `study/tests/test_audit_corrections.py`.
 
+Verified after the change: the full suite passes (86 tests) and Notebook 1 runs
+to completion with its physics self-test green, so none of the corrected
+constants moved.
+
 ### It is backend-specific, and that is the trap
 
 **This only happens on the CUDA backend.** The same code compiles fine on a
