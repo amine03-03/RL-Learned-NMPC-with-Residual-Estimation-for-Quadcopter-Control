@@ -52,6 +52,11 @@ CFG = dict(N=1, rep="diag", n_iter=S.CFG["ilqr"], n_diff=2, hid=S.CFG["hid"],
 ITERS = S.CFG["iters_sweep"]
 S2 = M.moderate(S.disturbed_spec(), wind=(0.0, 2.0))
 H = A.H_DEFAULT                      # 64, aligned with the paper (C5)
+#: How (4.13) converts the moment block.  It neglects K_i, so a standing moment
+#: the integrator has absorbed is overstated; 'closed_loop' scales it by
+#: moment_gain(DMOD_SETTLE_S).  Defined here rather than beside its first use
+#: because section 2.5 measures all three modes against the true residual.
+DMOD_MODE = "closed_loop"
 
 # %% [markdown]
 # ## Precondition gate — checked before any closed-loop number is read
@@ -392,13 +397,6 @@ for v, spec_v in VARIANTS.items():
 
 #: Which (4.13) mode the MODEL path uses.  D3 measures the closed-loop gain of
 #: the rate loop to a step moment: ~0.9 out to 0.3 s but 0.10 by 8 s, because
-#: (4.13) neglects K_i and the integrator absorbs a standing moment.  The
-#: payload scenarios are quasi-static, so 'first_order' overstates the rate
-#: residual by ~9x there; 'closed_loop' scales it by the derived gain.  Both are
-#: reported below.
-DMOD_MODE = "closed_loop"
-
-
 def adapt_ctrl(actor, name, to_model, attach_rdp):
     cfg = dict(CFG, n_diff=1, name=name)
     dmod_fn = (lambda ev: ev.dmod()) if to_model else None
