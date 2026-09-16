@@ -701,25 +701,40 @@ class AdaptEnv(X.Env):
         defaulted it off, so no smoothing happened at all (C5).
         """
         n_s = self.SMOOTH_N if smooth is None else int(smooth)
-        st = {"y": None, "buf": []}
+        st = {"y": None, "buf": None, "cnt": 0}
         f = jax.jit(lambda w: rdp_apply(params, w, scales["mu"], scales["sd"])
                     * scales["out_sd"])
+
+        # The rolling mean runs on a FIXED-SHAPE ring buffer, not on a growing
+        # Python list.  A list that fills from 1 to n_s entries makes
+        # jnp.stack see a new shape on every step, and eager JAX compiles per
+        # shape: measured, that cost 68 ms per step while the buffer filled
+        # against 0.29 ms once saturated.  solve_latency_ms probes T = 30 steps
+        # from a fresh episode, so the whole probe landed inside that warm-up
+        # and reported the adaptive controller at 45 ms median / 112 ms p95 --
+        # an artefact of the measurement window, not of the controller.
+        @jax.jit
+        def _roll(buf, y, k):
+            buf = jnp.concatenate([buf[1:], y[None]], 0)
+            keep = (jnp.arange(buf.shape[0]) >= buf.shape[0] - k)[:, None, None]
+            return buf, jnp.sum(jnp.where(keep, buf, 0.0), 0) / k
 
         def est(env):
             y = f(jnp.asarray(env.window()))
             y = jnp.where(env.ready(), y, 0.0)
             if n_s > 1:
-                st["buf"].append(y)
-                if len(st["buf"]) > n_s:
-                    st["buf"].pop(0)
-                y = jnp.mean(jnp.stack(st["buf"]), 0)
+                if st["buf"] is None:
+                    st["buf"] = jnp.zeros((n_s,) + y.shape, y.dtype)
+                st["cnt"] = min(st["cnt"] + 1, n_s)
+                st["buf"], y = _roll(st["buf"], y, jnp.asarray(st["cnt"]))
             if filt > 0.0 and st["y"] is not None:
                 y = filt * st["y"] + (1 - filt) * y
             st["y"] = y
             return y
 
         self.estimator = est
-        self._est_reset = lambda: (st.__setitem__("buf", []),
+        self._est_reset = lambda: (st.__setitem__("buf", None),
+                                   st.__setitem__("cnt", 0),
                                    st.__setitem__("y", None))
         return self
 

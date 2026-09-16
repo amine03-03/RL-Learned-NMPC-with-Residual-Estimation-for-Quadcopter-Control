@@ -264,3 +264,57 @@ def test_B4_model_free_arm_is_normalised_too():
     """§8.3's exploration comparison must not be measuring the normalisation."""
     p = X.mlp_policy_init(jax.random.PRNGKey(0), X.OBS_DIM, 8)
     assert "obs_norm" in p and "net" in p
+
+
+def test_C5_smoothing_uses_a_fixed_shape_ring_buffer():
+    """The rolling mean must not change shape as its buffer fills.
+
+    A growing Python list makes ``jnp.stack`` see a new shape on every step,
+    and eager JAX compiles per shape.  Measured, that cost 68 ms per step while
+    the buffer filled against 0.29 ms once saturated -- and since
+    ``solve_latency_ms`` probes only T = 30 steps from a fresh episode, the
+    entire probe landed inside the warm-up and reported the adaptive controller
+    at 45 ms median / 112 ms p95 instead of 4.2 / 4.8.  That is a measurement
+    artefact reported as a design property, on the one number that decides
+    deployability.
+    """
+    import inspect
+    src = inspect.getsource(A.AdaptEnv.attach)
+    # match the call, not the prose: the comment above the fix names jnp.stack
+    assert 'jnp.stack(st[' not in src, \
+        "smoothing is stacking a variable-length list again"
+    assert '.append(' not in src.split("def est(")[1].split("return y")[0], \
+        "the estimator is growing a Python list again"
+    assert "jnp.zeros((n_s,)" in src, "ring buffer is not preallocated at a fixed shape"
+
+
+def test_C5_ring_buffer_matches_the_growing_list_exactly():
+    """The fix must be a performance change only, not a semantics change."""
+    n_s = 32
+
+    @jax.jit
+    def _roll(buf, y, k):
+        buf = jnp.concatenate([buf[1:], y[None]], 0)
+        keep = (jnp.arange(buf.shape[0]) >= buf.shape[0] - k)[:, None, None]
+        return buf, jnp.sum(jnp.where(keep, buf, 0.0), 0) / k
+
+    rng = np.random.default_rng(0)
+    ys = [jnp.asarray(rng.normal(size=(3, 6))) for _ in range(80)]
+
+    ref, lst = [], []
+    for y in ys:                                   # the original semantics
+        lst.append(y)
+        if len(lst) > n_s:
+            lst.pop(0)
+        ref.append(np.asarray(jnp.mean(jnp.stack(lst), 0)))
+
+    got, buf, cnt = [], None, 0
+    for y in ys:
+        if buf is None:
+            buf = jnp.zeros((n_s,) + y.shape, y.dtype)
+        cnt = min(cnt + 1, n_s)
+        buf, m = _roll(buf, y, jnp.asarray(cnt))
+        got.append(np.asarray(m))
+
+    err = max(float(np.abs(a - b).max()) for a, b in zip(ref, got))
+    assert err == 0.0, f"ring buffer changed the smoothing: max err {err:e}"
