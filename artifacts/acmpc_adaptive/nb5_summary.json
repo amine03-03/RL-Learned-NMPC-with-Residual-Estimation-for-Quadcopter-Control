@@ -2,7 +2,7 @@
   "scale": "smoke",
   "selected_encoder": "LSTM",
   "gate_passed": false,
-  "H": 32,
+  "H": 64,
   "variants": [
     "A",
     "B",
@@ -23,7 +23,7 @@
     },
     {
       "check": "asym: Oracle <= best RDP",
-      "passed": false
+      "passed": true
     },
     {
       "check": "asym: best RDP <= Robust",
@@ -35,7 +35,7 @@
     },
     {
       "check": "slung: Oracle <= best RDP",
-      "passed": true
+      "passed": false
     },
     {
       "check": "slung: best RDP <= Robust",
