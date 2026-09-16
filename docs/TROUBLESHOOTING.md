@@ -38,6 +38,29 @@ Verified after the change: the full suite passes (86 tests) and Notebook 1 runs
 to completion with its physics self-test green, so none of the corrected
 constants moved.
 
+**On "identical".** `fc` and `step_c` are bit-identical to the concatenate
+version at equal inputs (`0.0` exactly). Closed-loop *aggregates* are not quite,
+because the different lowering lets XLA fuse and reassociate downstream
+arithmetic differently, and a 250-step closed loop amplifies last-bit
+differences. Measured across the Notebook 1 artifacts:
+
+| metric | worst relative change |
+|---|---|
+| `rmse` | 1.4e-10 |
+| `rmse_iqr` | 4.5e-10 |
+| `tilt`, `effort` | ~3e-9 |
+| `maxerr` | 3.0e-8 |
+| `smooth` | 3.7e-8 |
+
+`maxerr` and `smooth` sit highest because they are cancellation-sensitive — a
+max over a trajectory and a second difference of the control. All of it is far
+below any physically meaningful scale, but it is not zero, and committed
+artifacts produced before this change differ from a fresh run by these amounts.
+
+**Do not run a single notebook to "check" things and commit the result.**
+`artifacts/common/ledger.csv` is appended to across the chain; running Notebook 1
+alone truncates it from six rows to one.
+
 ### It is backend-specific, and that is the trap
 
 **This only happens on the CUDA backend.** The same code compiles fine on a
