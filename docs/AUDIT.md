@@ -231,3 +231,96 @@ RDP training set on hold before E-A evaluates on (9.5).
   one. It does not enter the dynamics this repository simulates.
 - The bulk drag `D = (0.30, 0.30, 0.35)` remains a **declared modelling
   addition** on top of the SDF's rotor drag, as §2.1 states.
+
+---
+
+## F. Found while correcting, not in the original audit
+
+The three below were introduced or exposed by the corrections themselves. They
+are recorded here because two of them changed a reported result.
+
+### F1 — the C5 smoothing misreported the flagship latency by 10×
+
+The rolling mean added for C5 held its predictions in a growing Python list and
+called `jnp.stack` on it each step. Until the buffer saturates, every step
+produces a **new shape**, and eager JAX compiles per shape.
+
+| buffer state | cost per step |
+|---|---|
+| filling (steps 1…32) | **68 ms** |
+| saturated | **0.29 ms** |
+
+`solve_latency_ms` probes `T = 30` steps from a fresh episode, so the whole
+probe landed inside the warm-up. The ledger therefore reported
+
+```
+Adaptive AC-MPC N=1   44.9 ms median   112.1 ms p95   admissible=False
+```
+
+against a true
+
+```
+Adaptive AC-MPC N=1    3.94 ms median    4.23 ms p95   admissible=True
+```
+
+The flagship contribution was being called undeployable by a factor of ten, on
+the one number that decides deployability, because of how its own smoothing
+warmed up. Corrected to a preallocated `(n_s, B, 6)` ring buffer with the mean
+taken inside a single jitted call.
+
+The change is **performance-only**: the ring mean is bit-identical to the
+growing list across the fill and after saturation (max difference exactly `0`
+over 80 steps). Every RMSE in the ledger is unchanged to the last digit, which
+is the practical confirmation. Two tests pin both properties.
+
+*Method note.* Two earlier hypotheses were measured and rejected first — the
+RDP forward pass is already jitted, and naive smoothing at a fixed shape costs
+0.29 ms, not 45 ms. The first microbenchmark missed the real cause precisely
+because it pre-filled the buffer, which is the one condition under which the
+bug does not occur.
+
+### F2 — the observation normaliser had no variance floor
+
+`normalise_obs` divided by `sqrt(var + 1e-8)`. Several channels are
+near-constant within a batch — a frozen preview under position hold, an
+integral that has not moved — so `1/sqrt(var)` amplified the first sample that
+did move by ~1e4 and took the policy to NaN within three iterations. Floored at
+`OBS_VAR_FLOOR = 1e-4` and clipped at ±10.
+
+Related: the model-free MLP arm was left unnormalised while the cost map was
+normalised, so §8.3's exploration comparison was measuring the normalisation
+rather than the architecture. Both arms now share it.
+
+### F3 — `DMOD_MODE` was used ~90 lines before it was defined
+
+Notebook 5 died with `NameError` after the estimators had already trained.
+Hoisted to the config block. The measurement it guards was unaffected and is
+worth recording: against the true residual (4.9), the (4.13) moment conversion
+is **scenario-dependent, not a fixed factor**.
+
+| scenario | `om_true` | `first_order` | ratio |
+|---|---|---|---|
+| asym 0.01 | 0.0016 | 0.149 | **95.2×** |
+| asym 0.07 | 0.7604 | 1.129 | 1.49× |
+| central 0.15 | 0 | 0 | — (no moment) |
+
+On a small standing moment the rate integrator has absorbed nearly all of it
+and (4.13) overstates by ~95×; on a large one, by ~1.5×. `closed_loop` at
+`DMOD_SETTLE_S = 0.5 s` scales by `moment_gain = [0.901, 0.901, 0.917]` — the
+right direction, far too small for the quasi-static case. This is why all three
+modes are tabled rather than one being declared correct.
+
+## What the corrected smoke-scale ledger says
+
+`AC-MPC N=1` S1 RMSE moved **0.137 → 0.831**, from better than LQR to worse.
+That is the correction working, not a regression. Notebook 3's own header
+predicts "every learned controller diverging" at this scale, and the *old* run
+contradicted its own documented expectation because exploration noise was not
+reaching the action (B1): the policy was effectively the MPC with a near-hand
+cost map, which tracks well precisely because it is not learning. With the
+noise on the action and a six-iteration smoke budget, training genuinely fails.
+
+**These rows require `X500_SCALE=full` before they can be read as results at
+all.** The same applies to the estimator R² (LSTM 0.277, GRU 0.261, CNN 0.160,
+TCN 0.030): all four are latency-admissible, and the §9.5 rule correctly selects
+on R² among them, but 0.28 is a weak predictor and is a smoke-budget artefact.
