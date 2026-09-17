@@ -598,13 +598,25 @@ the 3 m bound — `T_rollout = 32` at `medium`, not 12 — i.e. one medium-scale
 Notebook 3 run per `term` mode. Until that exists, treat G2 as a diagnosed
 mechanism rather than a measured policy change.
 
-A related caution on the `sat` gate: with a policy that trains, `sat` sits at
-0.14–0.32 in the probe above, and that is the gate's own mechanism (B1) rather
-than a second failure. At `sigma = 0.05` on a collective whose box is [0, 1] with
-hover trim `U_HOVER = 0.729`, exploration noise puts the input on the box however
-good the cost map is. The 5 % limit in `PPO_DEFAULTS` is not reachable at these
-σ on this airframe and should be re-derived from `U_HOVER` and σ rather than left
-at 0.05.
+The `sat` gate stays a real precondition, and G1's fix does not clear it. With
+a policy that trains, `sat` still sits at 0.14–0.32 in the probe above. That is
+**not** an artefact of the exploration noise: with `U_HOVER = 0.7287` and a
+collective box of [0, 1], the probability that `u_hover + sigma*z` leaves the box
+is
+
+| σ | upper | lower | total |
+|---|---|---|---|
+| 0.05 | 2.9e-8 | 2.0e-48 | **2.9e-8** |
+| 0.15 | 0.0353 | 5.9e-7 | 0.0353 |
+| 0.30 | 0.1829 | 0.0076 | 0.1905 |
+
+against B1's measured 10.9 % / 15.6 % / 29.7 %. At σ = 0.05 noise around the trim
+cannot produce 10.9 %, let alone 35 %, by ten orders of magnitude. So the
+saturation is the policy **mean** sitting at or outside the box — the cost map is
+commanding near-maximum collective — which is precisely the condition the gate
+exists to catch. Keep the 5 % limit; a run that fails it has a policy pinned
+against its input box regardless of how many steps landed, and its rows are still
+void. Only σ = 0.30 has a noise contribution (0.19) comparable to its reading.
 
 One behavioural consequence of the G6 fix worth watching: Notebook 5 now trains
 variants B and C against the RDP trained earlier in the same notebook. That is
