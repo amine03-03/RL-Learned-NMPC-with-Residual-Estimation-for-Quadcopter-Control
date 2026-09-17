@@ -60,7 +60,7 @@ headheight=22pt]{geometry}
 
 %----------------------------------------------------------- floats
 \usepackage{graphicx}
-\graphicspath{{figures/}{../artifacts/figures/}{logos/}}
+\graphicspath{{figures/}{../artifacts/figures/}{artifacts/figures/}{report/../artifacts/figures/}{logos/}{report/logos/}}
 \usepackage{booktabs}
 \usepackage{tabularx}
 \usepackage{longtable}
@@ -187,7 +187,7 @@ headheight=22pt]{geometry}
 \newcommand{\bodyrate}{\vec{\omega}}
 \newcommand{\refsym}{\mathrm{ref}}
 
-\DeclareRobustCommand{\ACMPC}{AC\nobreakdash-MPC}
+\DeclareRobustCommand{\ACMPC}{AC\nbd MPC}
 \DeclareRobustCommand{\LLTC}{LLTC}
 \DeclareRobustCommand{\RDP}{RDP}
 \DeclareRobustCommand{\CTBR}{CTBR}
@@ -224,6 +224,11 @@ innertopmargin=4pt, innerbottommargin=4pt, innerleftmargin=10pt,
 skipabove=9pt, skipbelow=9pt
 ]{cautionbox}
 
+% amsmath's \nobreakdash is fragile: a caption carrying it is written to the
+% .toc/.lof/.lot through \protected@edef, where it expands into garbage and
+% kills the second pass.  This is the same thing with an unbreakable hyphen.
+\DeclareRobustCommand{\nbd}{\mbox{-}}
+
 \newcommand{\keyhead}[1]{\textbf{\sffamily\small\textcolor{NavyDeep}{#1}}\par\vspace{2pt}}
 
 %=======================================================================
@@ -234,20 +239,70 @@ skipabove=9pt, skipbelow=9pt
 %  figure is visible in the PDF instead of breaking the build.
 %=======================================================================
 \newcommand{\missingfig}[2]{%
+	% #1 = reserved height, #2 = file name.  The name is typeset with
+	% \detokenize so that an underscore in it stays a printable character
+	% instead of opening math mode.
+	\begingroup
+	\setlength{\fboxsep}{6pt}%
+	\setlength{\fboxrule}{0.8pt}%
+	\fcolorbox{RuleGrey}{PanelGrey}{%
+		\begin{minipage}[c][#1][c]{0.84\linewidth}%
+			\centering
+			{\sffamily\small\textcolor{NavyDeep}{\textbf{FIGURE NOT BUILT}}}\par
+			\vspace{3pt}
+			{\ttfamily\footnotesize\textcolor{TextGrey}{\detokenize{artifacts/figures/}\detokenize{#2}}}\par
+			\vspace{5pt}
+			{\rmfamily\footnotesize\textcolor{TextGrey}{Run the notebooks to generate it.}}%
+		\end{minipage}}%
+	\endgroup}
+
+%  Resolve a figure name against every directory the build might be run
+%  from.  \IfFileExists is relative to the *compile* directory, not to the
+%  directory holding this file, so `latexmk report/report.tex' from the
+%  repository root and `latexmk report.tex' from report/ need different
+%  prefixes.  \figfound is empty when none of them hit.
+\makeatletter
+\newcommand{\fig@found}{}
+\newcommand{\fig@locate}[1]{%
+	\def\fig@found{}%
+	\IfFileExists{../artifacts/figures/#1}{\def\fig@found{#1}}{%
+		\IfFileExists{artifacts/figures/#1}{\def\fig@found{#1}}{%
+			\IfFileExists{report/../artifacts/figures/#1}{\def\fig@found{#1}}{%
+				\IfFileExists{figures/#1}{\def\fig@found{#1}}{%
+					\IfFileExists{#1}{\def\fig@found{#1}}{}}}}}%
+}
+%  \figslot{width}{height}{file} -- the picture, or the fallback frame.
+\newcommand{\figslot}[3]{%
+	\fig@locate{#3}%
+	\ifx\fig@found\@empty
+	\missingfig{#2}{#3}%
+	\else
+	\includegraphics[width=#1,height=#2,keepaspectratio]{\fig@found}%
+	\fi}
+\makeatother
+
+\makeatletter
+\newcommand{\logo@found}{}
+\newcommand{\logoslot}[2]{%
+	% #1 = file inside report/logos/, #2 = placeholder caption.
+	\def\logo@found{}%
+	\IfFileExists{logos/#1}{\def\logo@found{#1}}{%
+		\IfFileExists{report/logos/#1}{\def\logo@found{#1}}{}}%
+	\ifx\logo@found\@empty
 	\begin{tikzpicture}
-		\node[draw=RuleGrey, fill=PanelGrey, line width=0.8pt, rounded corners=2pt,
-		minimum width=0.92\linewidth, minimum height=#1,
-		align=center, text width=0.86\linewidth] {%
-			\sffamily\small\textcolor{NavyDeep}{\textbf{FIGURE NOT BUILT}}\\[3pt]
-			\ttfamily\footnotesize\textcolor{TextGrey}{artifacts/figures/#2}\\[5pt]
-			\rmfamily\footnotesize\textcolor{TextGrey}{Run the notebooks to generate it.}};
-\end{tikzpicture}}
+		\node[draw=RuleGrey, fill=PanelGrey, line width=0.7pt,
+		rounded corners=2pt, minimum width=34mm, minimum height=18mm,
+		align=center, font=\sffamily\scriptsize, text=TextGrey]
+		{#2\\[1pt]\ttfamily\detokenize{logos/}\detokenize{#1}};
+	\end{tikzpicture}%
+	\else
+	\includegraphics[height=20mm,keepaspectratio]{\logo@found}%
+	\fi}
+\makeatother
 
 \newcommand{\realfig}[4]{%
 	\begin{figure}[htbp]\centering
-		\IfFileExists{../artifacts/figures/#2}
-		{\includegraphics[width=0.94\linewidth,height=#1,keepaspectratio]{#2}}
-		{\missingfig{#1}{#2}}
+		\figslot{0.94\linewidth}{#1}{#2}
 		\caption{#3}
 		\label{#4}
 \end{figure}}
@@ -256,15 +311,11 @@ skipabove=9pt, skipbelow=9pt
 \newcommand{\realfigtwo}[7]{%
 	\begin{figure}[htbp]\centering
 		\begin{subfigure}[b]{0.48\linewidth}\centering
-			\IfFileExists{../artifacts/figures/#2}
-			{\includegraphics[width=\linewidth,height=#1,keepaspectratio]{#2}}
-			{\missingfig{#1}{#2}}
+			\figslot{\linewidth}{#1}{#2}
 			\caption{#5}
 		\end{subfigure}\hfill
 		\begin{subfigure}[b]{0.48\linewidth}\centering
-			\IfFileExists{../artifacts/figures/#3}
-			{\includegraphics[width=\linewidth,height=#1,keepaspectratio]{#3}}
-			{\missingfig{#1}{#3}}
+			\figslot{\linewidth}{#1}{#3}
 			\caption{#6}
 		\end{subfigure}
 		\caption{#4}
@@ -328,28 +379,14 @@ skipabove=9pt, skipbelow=9pt
 		% Either may also be .pdf; change the extension below if so.
 		\noindent
 		\begin{minipage}[c]{0.34\linewidth}\raggedright
-			\IfFileExists{logos/institution.png}
-			{\includegraphics[height=20mm,keepaspectratio]{institution.png}}
-			{\begin{tikzpicture}
-					\node[draw=RuleGrey, fill=PanelGrey, line width=0.7pt,
-					rounded corners=2pt, minimum width=34mm, minimum height=18mm,
-					align=center, font=\sffamily\scriptsize, text=TextGrey]
-					{INSTITUTION LOGO\\[1pt]\ttfamily logos/institution.png};
-			\end{tikzpicture}}
+			\logoslot{institution.png}{INSTITUTION LOGO}
 		\end{minipage}
 		\hfill
 		\begin{minipage}[c]{0.28\linewidth}\centering
 		\end{minipage}
 		\hfill
 		\begin{minipage}[c]{0.34\linewidth}\raggedleft
-			\IfFileExists{logos/school.png}
-			{\includegraphics[height=20mm,keepaspectratio]{school.png}}
-			{\begin{tikzpicture}
-					\node[draw=RuleGrey, fill=PanelGrey, line width=0.7pt,
-					rounded corners=2pt, minimum width=34mm, minimum height=18mm,
-					align=center, font=\sffamily\scriptsize, text=TextGrey]
-					{SCHOOL LOGO\\[1pt]\ttfamily logos/school.png};
-			\end{tikzpicture}}
+			\logoslot{school.png}{SCHOOL LOGO}
 		\end{minipage}
 
 		\vspace{12mm}
@@ -1114,7 +1151,7 @@ skipabove=9pt, skipbelow=9pt
 		deliver. Enforcing the clip \emph{inside} the dynamics instead would leave zero
 		derivative beyond the knee and make $\mat Q_{uu}$ singular in the backward pass;
 		shrinking the box achieves the same physics while keeping the solve
-		well-conditioned. This is defect~D\nobreakdash-7 of \cref{sec:audit-defects}.
+		well-conditioned. This is defect~D\nbd 7 of \cref{sec:audit-defects}.
 	\end{remark}
 
 	\subsection{Plant model (\texorpdfstring{$23$}{23} states)}
@@ -1189,7 +1226,7 @@ skipabove=9pt, skipbelow=9pt
 	\end{align}
 	where $\vec\tau_\mathrm{roll}$ is the SDF rolling moment and the rotor-drag term
 	acts on the in-plane body velocity $\vec v_\perp^{\,b}$. Both were absent from
-	the first implementation and are defect~A\nobreakdash-5 of
+	the first implementation and are defect~A\nbd 5 of
 	\cref{sec:audit-defects}.
 
 	\paragraph{Wind.} Per episode, deterministic in $t$, with a horizontal mean
@@ -1218,7 +1255,7 @@ skipabove=9pt, skipbelow=9pt
 	after which the \emph{plant's} $\mat M_\tau$ is rebuilt from
 	$\vec a_i=\vec r_i-\mathrm{cg}$ while the \emph{allocator} keeps its nominal
 	geometry --- the separation of plant truth from controller belief that
-	defect~M\nobreakdash-1 required.
+	defect~M\nbd 1 required.
 
 	%-----------------------------------------------------------------------
 	\section{Error coordinates}
@@ -1265,7 +1302,7 @@ skipabove=9pt, skipbelow=9pt
 		grows quickly: $\num{-0.04}\si{\degree}$ at \SI{15}{\degree},
 		$\num{-2.70}\si{\degree}$ at \SI{60}{\degree} and $\num{-20.8}\si{\degree}$ at
 		\SI{120}{\degree}. The implementation used the approximation; this is
-		defect~E\nobreakdash-1 in \cref{sec:audit-defects}, low severity but exactly
+		defect~E\nbd 1 in \cref{sec:audit-defects}, low severity but exactly
 		quantifiable, and a one-line correction.
 	\end{remark}
 
@@ -1297,7 +1334,7 @@ skipabove=9pt, skipbelow=9pt
 			helix  & circle $+\,0.25\,\mathrm{spd}\cdot t\,\vec e_3$ & 1.0308$^{\dagger}$ & 1.0000 \\
 			square & $\vec c+R\,r(\theta)(\cos\theta,\sin\theta,0)$, $r=(\cos^8\theta+\sin^8\theta)^{-1/8}$ & 1.4160 & 9.0779 \\
 			\bottomrule
-			\multicolumn{4}{@{}l@{}}{\footnotesize $^{\dagger}$ valid only at $\omega=\mathrm{spd}/R$; see defect~P\nobreakdash-1, \cref{app:audit}.}
+			\multicolumn{4}{@{}l@{}}{\footnotesize $^{\dagger}$ valid only at $\omega=\mathrm{spd}/R$; see defect~P\nbd 1, \cref{app:audit}.}
 		\end{tabularx}
 	\end{table}
 
@@ -1308,8 +1345,12 @@ skipabove=9pt, skipbelow=9pt
 	\end{proposition}
 
 	\begin{proof}
-		Differentiating twice, $\ddot{\vec p}_\refsym=R\omega^2(-\sin\theta,-2\sin2\theta,0)$,
-		so $\|\ddot{\vec p}_\refsym\|^2/(R\omega^2)^2=\sin^2\theta+4\sin^2 2\theta$.
+		Differentiating twice,
+		\[
+		\ddot{\vec p}_\refsym=R\omega^2(-\sin\theta,-2\sin2\theta,0),
+		\qquad
+		\frac{\|\ddot{\vec p}_\refsym\|^2}{(R\omega^2)^2}=\sin^2\theta+4\sin^2 2\theta.
+		\]
 		With $u=\sin^2\theta\in[0,1]$ and $\sin^2 2\theta=4u(1-u)$ this is
 		$g(u)=17u-16u^2$, a downward parabola maximised at $u^{*}=17/32$ with
 		$g(u^{*})=289/64=4.5156$.
@@ -1544,7 +1585,7 @@ skipabove=9pt, skipbelow=9pt
 		residual slot injects \SI{6.478}{\metre\per\square\second} where
 		\SI{3.138}{\metre\per\square\second} is correct --- a factor $m=\vMass$ --- and
 		\SI{0.3572}{\radian\per\second} where \cref{eq:tau2rate} gives a quite
-		different number. See defect~D\nobreakdash-1.
+		different number. See defect~D\nbd 1.
 	\end{cautionbox}
 
 	%-----------------------------------------------------------------------
@@ -1642,7 +1683,7 @@ skipabove=9pt, skipbelow=9pt
 		densities that never generated anything, and the clipped surrogate optimises a
 		quantity unrelated to the rollout. The action is therefore drawn as
 		$a=\mu_\theta(s)+\exp(\log\sigma)\,\varepsilon$ with $\mu_\theta$ the MPC
-		solution, and $\log\sigma$ is itself learned. This is defect~B\nobreakdash-1,
+		solution, and $\log\sigma$ is itself learned. This is defect~B\nbd 1,
 		and correcting it changed the character of the smoke-scale results
 		(\cref{sec:res-comparison}).
 	\end{cautionbox}
@@ -1875,7 +1916,8 @@ skipabove=9pt, skipbelow=9pt
 	before it.
 
 	\begin{figure}[htbp]\centering
-		\begin{tikzpicture}[
+		\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[
 			node distance=4.5mm and 6mm,
 			box/.style={draw=RuleGrey, fill=PanelGrey, rounded corners=2pt, line width=0.7pt,
 				align=center, text width=26mm, minimum height=11mm, font=\scriptsize},
@@ -1897,7 +1939,7 @@ skipabove=9pt, skipbelow=9pt
 			\draw[arr] (mpc.south west) -- (crit.north east);
 			\draw[arr] (obs.south) -- (crit.north);
 			\draw[arr] (plant.north) -- ++(0,7mm) -| (obs.north);
-		\end{tikzpicture}
+		\end{tikzpicture}}
 		\caption{Architecture of the adaptive actor--critic MPC. The two shaded blocks
 			are learned --- the cost map $\theta$ and the residual predictor $\psi$ ---
 			and everything else is fixed structure. The critic consumes the MPC's own
@@ -2015,7 +2057,7 @@ skipabove=9pt, skipbelow=9pt
 	the quadratic term $\mat S_k$ \emph{and} the linear term $\vec c_k$ are emitted:
 	an earlier version emitted only $\mat S_k$ and held $\vec c_k=\vec 0$, which
 	discards exactly the part of \cref{eq:groszanon} that absorbs a \emph{bias} in
-	the model, and is defect~B\nobreakdash-2.
+	the model, and is defect~B\nbd 2.
 
 	\begin{table}[htbp]
 		\centering
@@ -2171,7 +2213,7 @@ skipabove=9pt, skipbelow=9pt
 	transient. Evaluation stays on the tracking suites, so the predictor is always
 	tested off its training distribution and the generalisation claim is tested
 	rather than assumed. The same split is applied in the ROS\,2 workspace, where
-	experiment E\nobreakdash-0 generates the training set on a hold and every
+	experiment E\nbd 0 generates the training set on a hold and every
 	evaluation experiment flies the Lissajous reference.
 
 	\subsection{Three ways to use the estimate}
@@ -2419,7 +2461,7 @@ skipabove=9pt, skipbelow=9pt
 
 	\begin{table}[htbp]
 		\centering
-		\caption{Wall-clock by stage at \texttt{full} scale, to be filled from
+		\caption[Wall-clock by stage]{Wall-clock by stage at \texttt{full} scale, to be filled from
 			\texttt{artifacts/domrand/timing\_summary.csv} after the campaign. The
 			\emph{ratios} are what matter: the domain-randomisation notebook dominates,
 			which is what motivated the reuse described below.}
@@ -2505,7 +2547,7 @@ skipabove=9pt, skipbelow=9pt
 		is \emph{throughput} over many vehicles and has nothing to do with what one
 		aircraft experiences. Only a batch-of-one measurement may be compared against
 		the control period. Mixing the two produced an apparent $200\times$ speed-up for
-		the learned controllers in an earlier revision; see defect~B\nobreakdash-1 in
+		the learned controllers in an earlier revision; see defect~B\nbd 1 in
 		\cref{app:audit}.
 	\end{cautionbox}
 
@@ -2639,7 +2681,7 @@ skipabove=9pt, skipbelow=9pt
 	\begin{table}[htbp]
 		\centering
 		\caption{ROS\,2 / Gazebo experiment matrix, as planned by
-			\texttt{experiment\_manager}. E\nobreakdash-0 generates the predictor's
+			\texttt{experiment\_manager}. E\nbd 0 generates the predictor's
 			training set on a \emph{position hold}; every evaluation experiment flies the
 			tracking reference, so the predictor is always tested off its training
 			distribution. All 134 planned runs record their reference mode explicitly.}
@@ -2834,7 +2876,7 @@ skipabove=9pt, skipbelow=9pt
 
 	\begin{table}[htbp]
 		\centering
-		\caption{Degradation of the hand-built baselines under measurement noise.
+		\caption[Baselines under measurement noise]{Degradation of the hand-built baselines under measurement noise.
 			Source: \texttt{artifacts/common/nb1\_noise.csv}.}
 		\label{tab:res-noise}
 		\small
@@ -2933,7 +2975,7 @@ skipabove=9pt, skipbelow=9pt
 
 	\begin{table}[htbp]
 		\centering
-		\caption{The claim under test: does \LLTC{} at $N=1$ reach \NMPC{} at $N=1$ or
+		\caption[Does \LLTC{} at $N=1$ reach \NMPC{} at $N=1$?]{The claim under test: does \LLTC{} at $N=1$ reach \NMPC{} at $N=1$ or
 			better? A ratio below $1.0$ supports it. Source:
 			\texttt{artifacts/lltc/nb2\_horizon\_equivalence.csv}.}
 		\label{tab:res-lltc}
@@ -3085,7 +3127,7 @@ skipabove=9pt, skipbelow=9pt
 
 	\begin{table}[htbp]
 		\centering
-		\caption{The two variances, reported separately and never pooled. The seed
+		\caption[Seed variance against vehicle variance]{The two variances, reported separately and never pooled. The seed
 			spread is the resolution of every comparison in this chapter. Sources:
 			\texttt{artifacts/domrand/seed\_study.csv}, \texttt{artifacts/acmpc/nb3\_seeds.csv}.}
 		\label{tab:res-seeds}
@@ -3256,7 +3298,7 @@ skipabove=9pt, skipbelow=9pt
 
 	\begin{table}[htbp]
 		\centering
-		\caption{Closed-loop RMSE by scenario and level (moderated). \emph{Read the
+		\caption[Closed-loop RMSE by scenario and level]{Closed-loop RMSE by scenario and level (moderated). \emph{Read the
 				zero-level row first}: with no disturbance attached, any gap between
 			controllers is pure conservatism and not a statement about disturbance
 			rejection. Source: \texttt{artifacts/acmpc\_adaptive/nb5\_scenarios.csv}.}
@@ -3652,7 +3694,7 @@ skipabove=9pt, skipbelow=9pt
 		the zero-level correctness check, and compare the predicted steady-state wrench
 		with the analytic values of \cref{eq:analytic} --- a physical prediction with
 		no free parameters, and therefore the most convincing available validation.
-		\item Sweep the predictor history length (experiment E\nobreakdash-D) around the
+		\item Sweep the predictor history length (experiment E\nbd D) around the
 		chosen $H=\vH$, retraining on the position-hold set at each value, so that the
 		choice is shown to be a maximum rather than assumed to be one.
 	\end{itemize}
@@ -4188,7 +4230,7 @@ skipabove=9pt, skipbelow=9pt
 	\begin{itemize}[nosep]
 		\item \textbf{Study half:} Python~3.11, JAX (CPU or CUDA backend), NumPy,
 		pandas, Matplotlib, \texttt{ffmpeg}. \texttt{float64} throughout. Verified on
-		jax/jaxlib \num{0.10.2} on both a CPU-only build and a CUDA build.
+		jax/jaxlib \texttt{0.10.2} on both a CPU-only build and a CUDA build.
 		\item \textbf{Robotics half:} ROS\,2, PX4-Autopilot SITL, Gazebo,
 		\texttt{px4\_msgs}. Builds without JAX and without PyTorch; the deployed
 		predictor is pure NumPy.

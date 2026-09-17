@@ -12,12 +12,28 @@ report/
 ## Build
 
 ```bash
-cd report
-latexmk -pdf report.tex        # or: pdflatex report.tex, three times
+cd report && latexmk -pdf report.tex
+# or, equivalently, from the repository root:
+latexmk -pdf report/report.tex
 ```
 
+Both invocations produce the same PDF: figure and logo paths are probed
+against every root the build might be run from, so the working directory does
+not matter.
+
 Three passes are needed for the table of contents, the lists of figures and
-tables, and `cleveref`'s forward references.
+tables, and `cleveref`'s forward references; `latexmk` handles that.
+
+On a Debian/Ubuntu machine the required TeX Live set is
+
+```bash
+apt-get install --no-install-recommends latexmk texlive-latex-base \
+    texlive-latex-recommended texlive-latex-extra texlive-pictures \
+    texlive-science texlive-fonts-recommended texlive-lang-french
+```
+
+Last verified: 94 pages, no errors, no undefined references, no overfull
+boxes.
 
 The document degrades gracefully: it compiles with no logos, with no figures,
 and without `french.ldf` or `lmodern` (only the résumé's hyphenation and the
@@ -34,7 +50,7 @@ Drop two files into `logos/`:
 
 Until they exist, each renders as a labelled frame naming the missing file, so
 the layout is visible while the logos are being sourced. For `.pdf` logos,
-change the two extensions in the title-page block.
+change the extension in the two `\logoslot` calls on the title page.
 
 ## Figures
 
