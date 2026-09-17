@@ -331,7 +331,7 @@ Run against the final tree, on an otherwise idle machine:
 
 | check | result |
 |---|---|
-| `pytest study/tests/` | **83 passed** (23 of them pin audit findings) |
+| `pytest study/tests/` | **101 passed** (23 pin the A–F findings, 15 the G series) |
 | `study/check_consistency.py` | **all consistency checks passed** |
 | `acmpc_controller.check_glue` | **PASSED** |
 | notebooks 1–7 | all seven run to completion in one chain |
@@ -566,6 +566,50 @@ Equation (9)'s consistency term is therefore regressing `V` onto targets from a
 different reward than the one it is being fitted to, optimistic in proportion to
 how hard the policy is working the rates. Documented in the docstring; no code
 change, because the quantities genuinely are not available in the prediction.
+
+## What the G-series fixes were verified against
+
+`pytest study/tests/` — **101 passed**, 15 of them the G series.
+`study/check_consistency.py` — all checks passed.
+
+G1 measured end to end, same harness before and after
+(`n_env=16, T_rollout=12, epochs=3, minib=4, hid=32`, 8 iterations):
+
+| | before | after |
+|---|---|---|
+| policy steps landed | **0** of 256 | **85** of 96 |
+| `lr` | 1.5e-4 → 4.7e-6, monotone **down** | 1.2e-7 → 3.6e-7, **growing** |
+| `sigma` | frozen, byte-identical | 0.049993 → 0.049992 |
+| ‖Δθ‖₂ (actor) | 0 | 1.5e-2 |
+| `kl` | 4.96, 2214, 519, 600, 45, 1.3 … | ≤ 0.006, inside the region |
+
+Iteration 0 lands one step — it backtracks ~11 times to find the admissible step
+size, which is the work the old ratchet spread over twelve wasted iterations —
+and every iteration after it lands all 12.
+
+**G2 is not yet verified end to end, and the distinction matters.** It rests on
+the code reading and on the direct `gae` measurement (+297.00 for the escape
+against −5 for a crash), both of which are solid. But no closed-loop run has yet
+shown `term='cut'` and `term='bootstrap'` producing *different policies*: at the
+probe size above, zero vehicles terminate over 96 steps × 16 vehicles
+(`done = 0`, `far = 0`), so `done_value` is all-zero under both modes and the two
+arms come out bit-identical. Exercising G2 needs rollouts long enough to reach
+the 3 m bound — `T_rollout = 32` at `medium`, not 12 — i.e. one medium-scale
+Notebook 3 run per `term` mode. Until that exists, treat G2 as a diagnosed
+mechanism rather than a measured policy change.
+
+A related caution on the `sat` gate: with a policy that trains, `sat` sits at
+0.14–0.32 in the probe above, and that is the gate's own mechanism (B1) rather
+than a second failure. At `sigma = 0.05` on a collective whose box is [0, 1] with
+hover trim `U_HOVER = 0.729`, exploration noise puts the input on the box however
+good the cost map is. The 5 % limit in `PPO_DEFAULTS` is not reachable at these
+σ on this airframe and should be re-derived from `U_HOVER` and σ rather than left
+at 0.05.
+
+One behavioural consequence of the G6 fix worth watching: Notebook 5 now trains
+variants B and C against the RDP trained earlier in the same notebook. That is
+the correct causal order, but it couples those two arms to the estimator's
+quality — a weak RDP is inherited by the policies that consume it.
 
 ## Does `X500_SCALE=full` fix any of this?
 
