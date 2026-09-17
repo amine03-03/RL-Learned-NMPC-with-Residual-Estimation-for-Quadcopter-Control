@@ -99,10 +99,17 @@ for name, a in ARMS.items():
                      oracle=a["oracle"]), "acmpc_adaptive", f"{name}.pkl")
 
 tail = lambda df: df.iloc[int(0.8 * len(df)):]
+# G1: `landed` is the FIRST thing this gate has to check.  A policy that never
+# took a step cannot have learned a disturbance-response manifold whatever its
+# saturation says, so the gate now fails on it too.
 T9 = pd.DataFrame([dict(policy=n, final_reward=float(tail(LOGS[n]).reward.mean()),
                         train_sat=float(tail(LOGS[n]).sat.mean()),
                         crash_rate=float(tail(LOGS[n]).crash_rate.mean()),
-                        passed=bool(tail(LOGS[n]).sat.mean() <= 0.05))
+                        landed=(int(LOGS[n].landed.sum())
+                                if "landed" in LOGS[n] else -1),
+                        passed=bool(tail(LOGS[n]).sat.mean() <= 0.05
+                                    and ("landed" not in LOGS[n]
+                                         or int(LOGS[n].landed.sum()) > 0)))
                    for n in ARMS])
 S.table(T9, "T9  training-health gate (pass at 5 % collective saturation)",
         note="a policy pinned against its input box never learns a "
@@ -110,6 +117,14 @@ S.table(T9, "T9  training-health gate (pass at 5 % collective saturation)",
              "and useless",
         csv=("acmpc_adaptive", "nb5_gate.csv"))
 GATE_OK = bool(T9.passed.all())
+if "landed" in T9 and (T9.landed == 0).any():
+    print("!" * 78)
+    print("!! G1: the trust region accepted ZERO policy steps for "
+          f"{list(T9[T9.landed == 0].policy)}.  Those actors ARE their "
+          "initialisation, so Base/Robust/Oracle are the same object up to "
+          "their observation width and every gap below is rollout noise.  "
+          "Read docs/AUDIT.md G1 first.")
+    print("!" * 78)
 if not GATE_OK:
     print("!" * 78)
     print("!! PRECONDITION GATE FAILED.  Reduce the wrench randomisation and "
@@ -290,7 +305,7 @@ pd.DataFrame(np.c_[yt1[::nveh], pv[::nveh]],
 # §4.3 defines two different things and §4.4 warns they must not be confused:
 # the **wrench** (b) in [N, N·m], and the **model residual** (a) in
 # [m/s², rad/s]. `oracle_target` selects which the observation carries, and it
-# had never been exercised on `'residual'` (audit E4).
+# had never been exercised on `'residual'` (audit G1).
 #
 # This matters because of D3: (4.13) converts the moment block using the rate
 # loop's steady state *with $K_i$ neglected*, which is a short-transient model.
@@ -382,15 +397,24 @@ VARIANTS = {"A": dict(to_model=False, to_obs=True),
             "B": dict(to_model=True, to_obs=False),
             "C": dict(to_model=True, to_obs=True)}
 p_sel, sc_sel, _ = PARAMS[SELECTED]
+# G6: a variant whose PREDICTION DYNAMICS carry the residual must be TRAINED
+# that way.  `train_ppo` reads the correction only when `use_d` is set, and CFG
+# never set it, so B and C used to train on nominal prediction dynamics and were
+# then evaluated with `dmod_fn` feeding the residual into fc() -- a train/eval
+# mismatch on the one axis the variant study is about.  The estimator is
+# attached to the TRAINING env too, so the policy learns against the prediction
+# it will be deployed with rather than against ground truth.
 for v, spec_v in VARIANTS.items():
     env = A.AdaptEnv(S.CFG["n_env"], 5, 200, S2, "central", 0.0,
                      oracle=spec_v["to_obs"], wrench_dr=A.WRENCH_DR_START,
-                     paths=PATHS, task=TRAIN_TASK)
-    actor, critic, log = X.train_ppo(None, dict(CFG, dist_label=f"variant {v}"),
+                     paths=PATHS, task=TRAIN_TASK, H=H, dmod_mode=DMOD_MODE)
+    env.attach(p_sel, sc_sel)
+    cfg_v = dict(CFG, dist_label=f"variant {v}", use_d=bool(spec_v["to_model"]))
+    actor, critic, log = X.train_ppo(None, cfg_v,
                                      seed=5, iters=ITERS,
                                      T_rollout=S.CFG["T_rollout"], env=env,
                                      verbose=False)
-    X.save_ckpt(dict(actor=actor, critic=critic, cfg=CFG, variant=v, **spec_v),
+    X.save_ckpt(dict(actor=actor, critic=critic, cfg=cfg_v, variant=v, **spec_v),
                 "acmpc_adaptive", "variants", f"{v}.pkl")
     VARIANTS[v]["actor"] = actor
 
@@ -406,9 +430,14 @@ def adapt_ctrl(actor, name, to_model, attach_rdp):
 rows = []
 for scen in A.SCENARIOS:
     for lvl in A.moderate_levels(A.SCEN_LEVELS[scen]):
+        # G6: `to_model=False` for all three reference arms.  Base, Robust and
+        # Oracle are trained with `use_d` unset -- nominal prediction dynamics --
+        # so handing Oracle a residual-corrected fc() at evaluation only was a
+        # train/eval mismatch, and it is the arm the whole decomposition is
+        # measured against.  Oracle's privilege is the OBSERVATION channel.
         entries = [("Base", POL["Base"], False, False),
                    ("Robust", POL["Robust"], False, False),
-                   ("Oracle", POL["Oracle"], True, False)]
+                   ("Oracle", POL["Oracle"], False, False)]
         entries += [(f"RDP-{v}", VARIANTS[v]["actor"], VARIANTS[v]["to_model"], True)
                     for v in VARIANTS]
         for name, actor, to_model, attach in entries:

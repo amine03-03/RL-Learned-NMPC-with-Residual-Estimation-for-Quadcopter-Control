@@ -133,10 +133,27 @@ for sid, spec in SUITES.items():
             rows.append(dict(suite=sid, path=path, ctrl=name, **st))
 GRID = pd.DataFrame(rows)
 S.table(GRID[["suite", "path", "ctrl", "rmse", "maxerr", "tilt", "smooth", "sat",
-              "crash"]],
+              "crash", "bound_frac"]],
         "nb6 grid", note="saturation is reported beside RMSE everywhere: if the "
-        "path stops mattering you are measuring the disturbance",
+        "path stops mattering you are measuring the disturbance; bound_frac is "
+        "the fraction of vehicle-steps that hit the 3 m respawn, above which "
+        "rmse is a property of the bound and not of the controller",
         csv=("common", "nb6_grid.csv"))
+
+# G9: the bound is a CEILING on rmse, so a diverging controller cannot report a
+# large one.  Name the rows where that happened instead of letting the number
+# read as a tracking error.
+_bd = GRID[GRID.bound_frac > 0.005]
+if len(_bd):
+    print(f"\n  !! {len(_bd)} of {len(GRID)} cells respawned at the "
+          f"{X.MAX_POS_ERR:g} m position bound on more than 0.5 % of steps.  In "
+          f"those cells |e_p| is truncated at the bound, so `rmse` saturates "
+          f"near {X.MAX_POS_ERR/np.sqrt(3):.2f} m however badly the controller "
+          f"diverges -- it is NOT comparable with the rows that never respawned.")
+    print(_bd.groupby("ctrl").bound_frac.max().sort_values(ascending=False)
+          .to_string())
+    print("     Re-read those rows with env.no_respawn = True (as Notebook 7 "
+          "does) for the unclipped divergence.")
 
 # %% [markdown]
 # ## Latency — on a batch of ONE

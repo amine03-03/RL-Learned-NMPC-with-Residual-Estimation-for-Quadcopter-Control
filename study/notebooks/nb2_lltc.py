@@ -56,10 +56,17 @@ env = S.ev_env("circle", n=min(N_CAND, 256), spec=S.nominal_spec(speed=(1.0, 1.5
                seed=11)
 o, e0, xr = env.obs()
 B = env.n
-KEY, k1 = jax.random.split(KEY)
+KEY, k1, k1b = jax.random.split(KEY, 3)
 scale = jnp.asarray([DISP, DISP, DISP, DISP, DISP, DISP,
                      0.3 * DISP, 0.3 * DISP, 0.3 * DISP])
-cand = jax.random.normal(k1, (B, X.NE)) * scale
+# G7: sample over DECADES of error magnitude, not one shell at `disp`.
+# P_theta is an MLP of e, so it is only constrained where candidates were drawn.
+# Drawn at |e| ~ 0.8 m alone, the closed loop -- which lives at |e| ~ 0.05 m --
+# queries the network a factor ~15 inside its support, i.e. pure extrapolation,
+# which is a candidate explanation for LLTC's 26 % saturation next to NMPC
+# N=1's 0.07 %.
+decade = 10.0 ** jax.random.uniform(k1b, (B, 1), minval=-1.5, maxval=0.0)
+cand = jax.random.normal(k1, (B, X.NE)) * scale * decade
 xr_seq, uref_seq = env.ref_traj(N_LONG), env.ref_useq(N_LONG)
 Sm, cm = X.quad_cost_blocks(B, N_LONG)
 Pt = jnp.broadcast_to(X.PTt, (B, X.NE, X.NE))
@@ -73,9 +80,21 @@ V1 = np.asarray(J - l0)
 # terminal-set reach: the error radius at which the terminal quadratic still
 # describes the realised cost-to-go
 REACH = float(np.sqrt(2.0 * np.median(V1) / max(float(X.P_RIC[0, 0]), 1e-9)))
-keep = np.isfinite(V1) & (V1 > 0) & (V1 < np.percentile(V1[np.isfinite(V1)], 95))
+# G7: a REAL gate.  `V1 < percentile(V1, 95)` accepts 95 % of anything, so the
+# "acceptance" column was 0.9492 in every row of every sensitivity slice by
+# construction -- a tautology printed as a diagnostic.  Accept a candidate when
+# its realised cost-to-go is finite, positive and inside the terminal set the
+# quadratic is supposed to describe.
+keep = np.isfinite(V1) & (V1 > 0.0) & (
+    np.linalg.norm(np.asarray(e_seq[:, 1])[:, 0:3], axis=-1) <= 2.0 * REACH)
 accept = float(keep.mean())
-E_fit = np.asarray(cand)[keep]
+# G7: fit the object the CONTROLLER evaluates.  V1 is the cost-to-go from
+# e_1, and `make_lltc_ctrl` scores 0.5 e_1' P(e_0) e_1 as the terminal cost of
+# the N=1 problem.  Regressing 0.5 e_0' P(e_0) e_0 onto V1 -- the old code --
+# fits a different quadratic form from the one that is later used, so the near-
+# perfect R^2 was never a statement about the deployed object.
+E_fit = np.asarray(cand)[keep]          # the argument of P_theta
+E1_fit = np.asarray(e_seq[:, 1])[keep]  # what the quadratic is contracted with
 V_fit = V1[keep]
 print(f"  candidates {B}, accepted {keep.sum()} ({100*accept:.1f}%)")
 print(f"  displacement scale CFG['disp'] = {DISP:.3f} m")
@@ -102,26 +121,27 @@ EPS = 1e-3
 opt = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-3))
 st = opt.init(params)
 Ej, Vj = jnp.asarray(E_fit), jnp.asarray(V_fit)
+E1j = jnp.asarray(E1_fit)
 
-def loss_fn(p, ee, vv):
-    P = M.lltc_matrix(p, ee, EPS)                       # (8.1)
-    pred = 0.5 * jnp.einsum("bi,bij,bj->b", ee, P, ee)
+def loss_fn(p, ee, e1, vv):
+    P = M.lltc_matrix(p, ee, EPS)                       # (8.1), evaluated at e_0
+    pred = 0.5 * jnp.einsum("bi,bij,bj->b", e1, P, e1)  # contracted with e_1
     return jnp.mean((pred - vv) ** 2)                   # (8.2)
 
 @jax.jit
-def upd(p, st, ee, vv):
-    l, g = jax.value_and_grad(loss_fn)(p, ee, vv)
+def upd(p, st, ee, e1, vv):
+    l, g = jax.value_and_grad(loss_fn)(p, ee, e1, vv)
     u, st = opt.update(g, st, p)
     return optax.apply_updates(p, u), st, l
 
 n_ep = 400 if S.SCALE != "smoke" else 120
 hist = []
 for ep in range(n_ep):
-    params, st, l = upd(params, st, Ej, Vj)
+    params, st, l = upd(params, st, Ej, E1j, Vj)
     hist.append(float(l))
 
 P_of = M.lltc_matrix(params, Ej, EPS)
-pred = np.asarray(0.5 * jnp.einsum("bi,bij,bj->b", Ej, P_of, Ej))
+pred = np.asarray(0.5 * jnp.einsum("bi,bij,bj->b", E1j, P_of, E1j))
 ss_res = float(((V_fit - pred) ** 2).sum())
 ss_tot = float(((V_fit - V_fit.mean()) ** 2).sum())
 R2 = 1.0 - ss_res / max(ss_tot, 1e-30)
@@ -251,8 +271,12 @@ for qs in (0.25, 0.5, 1.0, 2.0, 4.0):
     esq = X.rollout_err(cand, duq, xr_seq, uref_seq)
     Jq = np.asarray(X.traj_cost(esq, duq, Sm_q, cm_q,
                                 jnp.broadcast_to(jnp.asarray(Pi), (B, X.NE, X.NE))))
-    acc_q = float((np.isfinite(Jq) & (Jq > 0)
-                   & (Jq < np.percentile(Jq[np.isfinite(Jq)], 95))).mean())
+    # G7: the same real gate as the fit above.  A 95th-percentile cut accepts
+    # 95 % of any input, so this column used to read 0.9492 for every Q_scale --
+    # a constant printed beside `reach_m` as though it responded to it.
+    acc_q = float((np.isfinite(Jq) & (Jq > 0.0)
+                   & (np.linalg.norm(np.asarray(esq[:, 1])[:, 0:3], axis=-1)
+                      <= 2.0 * reach_q)).mean())
     rowsQ.append(dict(Q_scale=qs, P_00=float(Pi[0, 0]), reach_m=reach_q,
                       acceptance=acc_q))
 QS = pd.DataFrame(rowsQ)

@@ -342,3 +342,236 @@ deployment NumPy path — CNN 0.78, TCN 1.95, GRU 5.24, LSTM/selected 5.94 ms
 p95. Note that this is a different measurement from the ledger's `ms_p95`
 column, which times the JAX study path via `solve_latency_ms`; F1 above is what
 happens when that distinction is not held carefully.
+
+---
+
+# G. The medium-run debug — why no learned controller converged
+
+A third pass, prompted by the `X500_SCALE=medium` run. The symptom that started
+it is a contradiction inside that run's own output: Notebook 6 reports
+`AC-MPC N=1` at 1.07 m RMSE on **every** suite, **every** path and — in
+Notebook 5 — every disturbance scenario and level, a spread of 0.01 m across
+conditions that move LQR by 0.28 → 0.95 m; while Notebook 7 films the *same
+checkpoints* at 45–50 m, flying 0.09 rad of a 6.28 rad lap. Both numbers are
+correct. They measure different things.
+
+`study/tests/test_g_training_regressions.py` pins all of it.
+
+## G1 — the PPO trust region never let a single step land
+
+`train_ppo`'s trust region applies a step, measures the KL, and reverts if the
+region was left (B1). The mechanism is right. The bookkeeping around it was not:
+
+1. a trip set `stop = True`, which broke out of the minibatch loop **and** the
+   epoch loop, so an iteration attempted at most one update;
+2. that one update was reverted — and the revert restored the whole parameter
+   tree, so the **critic** and `log_sigma` were rolled back with the actor;
+3. `lr` was halved on every trip and grown only under
+   `if kl_seen and kl_seen < 0.5 * kl_target`. `kl_seen` is still the float
+   `0.0` when the *first* minibatch trips, and Python reads that as falsy, so
+   the growth branch was unreachable and the decay was a one-way ratchet.
+
+Measured, on the shipped code at `n_env=32, epochs=4, minib=8`:
+
+| | |
+|---|---|
+| `optax.apply_updates` calls, 8 iterations | **8** (256 intended) |
+| of which reverted | **8** |
+| net policy steps landed | **0** |
+| `lr` over those 8 iterations | 1.5e-4 → 4.7e-6, halving every iteration, never growing |
+| `sigma`, `entropy` | **byte-identical down every column** |
+
+`sigma` is a trained parameter with a non-zero gradient, so a frozen `sigma`
+column is proof that nothing was applied. The same signature is in every
+training log committed under `artifacts/` — `log_nominal.csv`,
+`log_DR-all.csv`, `log_DR-all+noise.csv` all show `lr` halving monotonically and
+`entropy` constant at `-1.9127258067248345`.
+
+From `lr = 3e-4`, twelve halvings reach `lr_min = 1e-7`. **`X500_SCALE=full`
+does not fix this**: 400 iterations ratchet the learning rate to the floor
+exactly as 80 do. The AC-MPC and Adaptive AC-MPC rows of every scale table are
+the *initialiser*, which is also why Notebook 3's representation sweep ranks
+`chol` (which starts at `S ≈ Q_LO·I`, i.e. with the quadratic term absent, so
+the solve is driven by the terminal matrix) above `diag` (which starts at the
+sigmoid mid-point, a uniform 3.16 on all 13 channels): that sweep compares three
+*initialisations*, not three learned representations.
+
+**Fixed** by making the region a backtracking line search *inside* the
+minibatch: halve the step for that minibatch until it satisfies the bound (up to
+`kl_backtracks`), keep the critic step when the actor step is rejected, gate the
+`lr` growth on whether a step landed rather than on a float being truthy, and
+carry on to the next minibatch instead of abandoning the iteration. `train_ppo`
+now reports a `landed` column and prints a **NO-UPDATE GATE** banner when it
+sums to zero.
+
+## G2 — the reward paid the policy to fly out of the ball
+
+`_step_jit` terminates a vehicle on `bad | far | spin` but charged the −5 crash
+penalty only for `bad | spin`. Leaving the 3 m position ball was a **free**
+termination, and every term of (5.4) is strictly negative, so cutting the value
+bootstrap at that termination makes the return of a terminated episode `r_k`
+instead of `r_k + γV`.
+
+Measured with the shipped `gae`, a consistent critic, `r = −3`/step, `γ = 0.99`:
+
+| | advantage at the escape step |
+|---|---|
+| no termination | +0.00 |
+| termination | **+297.00** |
+| crash penalty available to oppose it | −5.0 (1.7 % of it) |
+
+PPO was being trained to diverge. That is precisely what Notebook 7 films, and
+it is why the TRPO arm — which *does* update (it never had the G1 revert) —
+still lands at 1.07 m: it is optimising the reward it was given.
+
+**Fixed** two ways, both needed. `far` now reaches the reward like any other
+failure, and `EnvCfg.term` defaults to `'bootstrap'`: the respawn is treated as
+a **truncation**, so the value target keeps its `γV(s')` term across the
+boundary. The episode boundary is an artefact of the batched environment, not
+part of the task. `term='cut'` reproduces the old behaviour.
+
+## G3 — the running observation normaliser was being optimised
+
+`obs_norm` lives inside `params['actor']` so that it travels with the
+checkpoint, and `normalise_obs` reads it differentiably. Nothing excluded it
+from the optimised tree, so Adam updated `mu` and `var` as if they were weights
+— and `obs_norm_update` then folded the corrupted values into the next Welford
+step. It also consumed part of the `clip_by_global_norm` budget. `trpo_step` was
+worse: `_flat(actor)` put the statistics straight into the natural-gradient
+direction, so the TRPO step **overwrote the normaliser**.
+
+**Fixed**: the gradient of `obs_norm` is zeroed before the optimiser sees it
+(keeping the pytree shape, so `opt_state` is untouched), and `trpo_step`
+optimises over the weight subtree only.
+
+## G4 — the training disturbance was white noise, not a per-episode wrench
+
+`AdaptEnv.step` called `_sample_wrench_dr()` whenever **any** vehicle respawned,
+and that method redrew the wrench for the **whole batch**. At `n_env = 128` with
+a ~1.5 %/step reset rate, at least one vehicle resets on ~85 % of steps, so the
+"constant per-episode wrench" the RDP is asked to infer from a 64-step window
+was redrawn at close to the 50 Hz control rate. No window can estimate that.
+
+The window buffer had the mirror-image problem: `_buf_fill` was a single scalar
+for the batch and nothing cleared a respawned vehicle's history, so deployment
+windows spanned episode boundaries — while `make_windows` refuses exactly that
+for the *training* windows (§9.6). Train and test disagreed about what a window
+is.
+
+**Fixed**: `_sample_wrench_dr(mask=...)` redraws only the vehicles that
+respawned; `_buf_fill` is per-vehicle; `_clear_windows(mask)` drops a respawned
+vehicle's history and `ready()` returns a per-vehicle mask.
+
+## G5 — the estimator ran twice per control step for variant C
+
+A variant that routes the estimate to **both** the observation and the model
+(C) reaches `d_channel()` twice in one control step: once through
+`ctrl_from_actor`'s `dmod_fn` and once through `Env.obs()`. Each call pushed a
+fresh entry into the 32-frame rolling mean, so C's smoothing window was half the
+paper's length while A's and B's were full length — an unintended difference
+between the arms being compared. **Fixed** by caching the prediction per buffer
+version.
+
+## G6 — the model-correction variants were never trained with the correction
+
+`train_ppo` reads the residual into the prediction dynamics only when
+`cfg['use_d']` is set. Notebook 5's `CFG` never set it. Variants **B** and **C**
+— the two whose entire definition is "the residual goes into the model" — were
+therefore trained on nominal prediction dynamics and evaluated with `dmod_fn`
+feeding the residual into `fc()`. The same mismatch applied to the **Oracle**
+arm, which was evaluated with `to_model=True` although it trained without it;
+Oracle is the reference the whole "value of information / cost of estimation"
+decomposition is measured against.
+
+**Fixed**: variants train with `use_d` matching their `to_model` flag and with
+the estimator attached to the *training* environment, so the policy learns
+against the prediction it will be deployed with; Oracle evaluates with
+`to_model=False`, its privilege being the observation channel.
+
+## G7 — the LLTC fit scored a different object from the controller
+
+Two independent problems in Notebook 2, both consistent with `R² = 0.9999`
+sitting next to an LLTC row 7.5× worse than plain NMPC N=1 at 26 % saturation:
+
+- **wrong argument.** `V1 = J − ℓ₀` is the cost-to-go from `e₁`, and
+  `make_lltc_ctrl` scores `½ e₁ᵀ P(e₀) e₁` as the terminal cost of the N=1
+  problem. The fit regressed `½ e₀ᵀ P(e₀) e₀` onto `V1`. The form that was
+  validated is not the form that is used.
+- **the acceptance gate was a tautology.** `keep = V1 > 0 & V1 < percentile(V1,
+  95)` accepts 95 % of any input, which is why `acceptance` reads `0.9492` in
+  *every* row of the terminal-weight sensitivity table, unchanged while `reach_m`
+  moves 1.07 → 0.29 m. It was printed as a diagnostic beside the quantity it
+  does not respond to.
+
+A third, not a bug but worth stating: `P_θ(e) = L(e)L(e)ᵀ + εI` with `L` an MLP
+of `e` makes `½eᵀP_θ(e)e` an arbitrary non-negative function of `e`, so a high
+R² is a statement about MLP capacity on 243 points, not about a *quadratic*
+terminal cost. And candidates were drawn on one shell at `‖e‖ ≈ 0.8 m` while the
+closed loop lives at `‖e‖ ≈ 0.05 m`, so the controller queries the network a
+factor ~15 outside its fit support.
+
+**Fixed**: the fit contracts with `e₁`, the gate is `finite ∧ V1 > 0 ∧ ‖e₁‖ ≤
+2·reach`, and candidates are sampled over decades of magnitude rather than one
+shell.
+
+## G8 — the PID tilt limit was dead code
+
+`make_pid_ctrl` clamped `zb_des` to `tilt_max` and then never read it: `q_des`
+came from the unclamped `a_des` and the collective from the unclamped norm. The
+collective also used the bare square root, ignoring the idle floor that (4.8),
+`hover_u` and `uref_from_traj` all invert (A2) — 5.6 % high at hover. PID is
+excluded from the study comparison (§5.12) and is only the ROS incumbent of
+§9.8, so nothing in the tables moves. **Fixed** anyway.
+
+## G9 — RMSE under respawn is a property of the bound
+
+The `Env` docstring already names this ("The 3 m bound is a measurement trap,
+§5.10"), and `study_moderate.py` opens with the symptom. It is worth converting
+into a number, because the medium-run tables were still read as tracking errors.
+
+A cost map that was **never trained** — a fresh `costmap_init`, which after G1
+is what every AC-MPC checkpoint contains — measures:
+
+| respawn | T | rmse | maxerr | sat |
+|---|---|---|---|---|
+| on | 150 | 0.892 | 2.898 | 0.286 |
+| on | 300 | 0.904 | 3.135 | 0.332 |
+| **off** | 150 | **11.39** | 36.60 | 0.177 |
+| **off** | 300 | **41.36** | 117.89 | 0.244 |
+
+(`hid=256`, `ilqr=10`, seed 0. Whether a *particular* random draw diverges is a
+property of that draw — a smaller net sometimes holds — but the medium run's own
+checkpoints plainly did, which is what Notebook 7 films.)
+
+With the bound on, RMSE does not grow with the rollout length, because `|e_p|`
+is truncated at 3 m; without it, it grows without limit. 0.89–0.90 m against the
+medium run's 1.07 m, and 41 m against Notebook 7's 45–50 m. Notebook 7 is the
+only place `no_respawn` is set, which is the entire explanation for the
+Notebook 6 / Notebook 7 contradiction.
+
+**Fixed** by making it visible rather than by changing it: `stats()` now returns
+`bound_frac` and `bounded`, and Notebook 6 names the cells where `bound_frac`
+exceeds 0.5 % and says their `rmse` is not comparable with the rows that never
+respawned.
+
+## G10 — MPVE prices its predicted trajectory with a different reward
+
+Not a bug, but it was undocumented and it biases the critic. `mpve_value_loss`
+builds `r_hat` with `om` and `d_u` passed as **zeros**, because the 10-state
+control model has no body-rate state and predicts no command increment
+(`e[6:9]` is the tilt error `delta`, not `omega`). So the predicted reward drops
+the `-0.02|om|²` and `-0.05|Δu|²` terms of (5.4) and is systematically less
+negative than the reward the ordinary TD target in `l_v` is built from.
+Equation (9)'s consistency term is therefore regressing `V` onto targets from a
+different reward than the one it is being fitted to, optimistic in proportion to
+how hard the policy is working the rates. Documented in the docstring; no code
+change, because the quantities genuinely are not available in the prediction.
+
+## Does `X500_SCALE=full` fix any of this?
+
+No. G1 makes the iteration budget irrelevant — the learning rate reaches its
+floor in twelve iterations at any scale — and G2 means that once G1 is fixed,
+more iterations buy a *better* escape policy, not a better tracker. G9 means the
+tables cannot show either outcome. The undertrained-policy banner that fires in
+Notebooks 3 and 6 correctly identifies that the split falls along the training
+axis; it attributes it to the scale table, and the scale table is not the cause.
