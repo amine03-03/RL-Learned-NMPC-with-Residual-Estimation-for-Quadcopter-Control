@@ -2268,6 +2268,63 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
     def rollout_mean(actor_p, o, e, xr_seq, uref_seq, d):
         return mpc_mean(actor_p, o, e, xr_seq, uref_seq, d)[0]
 
+    # G11: defined ONCE, outside the iteration loop.  `jax.jit` keys its
+    # cache on the function object, so re-creating `loss_fn` every iteration
+    # made every iteration a cache MISS and fully recompiled the
+    # differentiated MPC -- a value_and_grad through a 10-iteration iLQR with
+    # a 6-alpha line search and a vmapped jacfwd.  Measured at the medium
+    # scale table: 32.8 s per iteration of which the rollout is 0.8 s, and the
+    # cost did not move when the number of optimiser trials went 46 -> 10 or
+    # when epochs*minib went 96 -> 16, because none of that was the cost.
+    # loss_fn closes only over mpc_mean, use_d and c, all loop-invariant.
+    def loss_fn(p, ob, ee, xrs, urs, dd, aa, lp_old, adv, ret):
+        mu, du = mpc_mean(p["actor"], ob, ee, xrs, urs, dd if use_d else None)
+        lp = _logp(aa, mu, p["log_sigma"])
+        # guard the ratio: a diverged actor can otherwise produce inf here
+        # and take the whole update to NaN before the KL trip can fire
+        ratio = jnp.exp(jnp.clip(lp - lp_old, -20.0, 20.0))
+        l_pi = -jnp.mean(jnp.minimum(
+            ratio * adv, jnp.clip(ratio, 1 - c["clip"], 1 + c["clip"]) * adv))
+        von = normalise_obs(p["actor"], ob)
+        l_v = jnp.mean((mlp_apply(p["critic"], von)[:, 0] - ret) ** 2)
+        if c["mpve"]:                                    # B3: actually used
+            e_seq = rollout_err(ee, du, xrs, urs, dd if use_d else None)
+            zb3 = jnp.zeros((ob.shape[0], 3))
+            l_v = l_v + c["mpve_coef"] * mpve_value_loss(
+                p["critic"], von, e_seq, du, zb3,
+                jnp.zeros((ob.shape[0], NU)), c["gamma"])
+        ent = jnp.sum(p["log_sigma"] + 0.5 * np.log(2 * np.pi * np.e))
+        loss = l_pi + c["vf_coef"] * l_v - c["ent_coef"] * ent
+        kl = jnp.mean(lp_old - lp)
+        cf = jnp.mean((jnp.abs(ratio - 1.0) > c["clip"]).astype(jnp.float64))
+        return loss, (l_pi, l_v, ent, kl, cf)
+
+    def _freeze_norm(g):
+        """G3: the running observation statistics are NOT parameters.
+
+        They sit inside ``params['actor']`` so that they travel with the
+        checkpoint, and ``normalise_obs`` reads them differentiably -- so
+        Adam was updating ``mu`` and ``var`` as if they were weights, and
+        ``obs_norm_update`` then folded the corrupted values into the next
+        Welford step.  They also consumed part of the global-norm clip
+        budget.  Zeroing their gradient leaves the pytree shape (and hence
+        ``opt_state``) untouched.
+        """
+        if "obs_norm" not in g["actor"]:
+            return g
+        gn = dict(g["actor"])
+        gn["obs_norm"] = jax.tree_util.tree_map(jnp.zeros_like, gn["obs_norm"])
+        return dict(g, actor=gn)
+
+    _grad_raw = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
+    # the backtracking search evaluates the KL once per trial, and each
+    # evaluation re-solves the MPC, so it is jitted rather than traced anew
+    _kl_only = jax.jit(lambda p, *a: loss_fn(p, *a)[1][3])
+
+    def grad_fn(p, *a):
+        (l, aux), g = _grad_raw(p, *a)
+        return (l, aux), _freeze_norm(g)
+
     rows = []
     for it in range(iters):
         keys = ("o", "e", "xr", "ur", "d", "a", "lp", "rw", "vl", "dn")
@@ -2303,53 +2360,6 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
         ADVf, RETf = flat(ADV), flat(RET)
         ADVf = (ADVf - ADVf.mean()) / (ADVf.std() + 1e-8)
 
-        def loss_fn(p, ob, ee, xrs, urs, dd, aa, lp_old, adv, ret):
-            mu, du = mpc_mean(p["actor"], ob, ee, xrs, urs, dd if use_d else None)
-            lp = _logp(aa, mu, p["log_sigma"])
-            # guard the ratio: a diverged actor can otherwise produce inf here
-            # and take the whole update to NaN before the KL trip can fire
-            ratio = jnp.exp(jnp.clip(lp - lp_old, -20.0, 20.0))
-            l_pi = -jnp.mean(jnp.minimum(
-                ratio * adv, jnp.clip(ratio, 1 - c["clip"], 1 + c["clip"]) * adv))
-            von = normalise_obs(p["actor"], ob)
-            l_v = jnp.mean((mlp_apply(p["critic"], von)[:, 0] - ret) ** 2)
-            if c["mpve"]:                                    # B3: actually used
-                e_seq = rollout_err(ee, du, xrs, urs, dd if use_d else None)
-                zb3 = jnp.zeros((ob.shape[0], 3))
-                l_v = l_v + c["mpve_coef"] * mpve_value_loss(
-                    p["critic"], von, e_seq, du, zb3,
-                    jnp.zeros((ob.shape[0], NU)), c["gamma"])
-            ent = jnp.sum(p["log_sigma"] + 0.5 * np.log(2 * np.pi * np.e))
-            loss = l_pi + c["vf_coef"] * l_v - c["ent_coef"] * ent
-            kl = jnp.mean(lp_old - lp)
-            cf = jnp.mean((jnp.abs(ratio - 1.0) > c["clip"]).astype(jnp.float64))
-            return loss, (l_pi, l_v, ent, kl, cf)
-
-        def _freeze_norm(g):
-            """G3: the running observation statistics are NOT parameters.
-
-            They sit inside ``params['actor']`` so that they travel with the
-            checkpoint, and ``normalise_obs`` reads them differentiably -- so
-            Adam was updating ``mu`` and ``var`` as if they were weights, and
-            ``obs_norm_update`` then folded the corrupted values into the next
-            Welford step.  They also consumed part of the global-norm clip
-            budget.  Zeroing their gradient leaves the pytree shape (and hence
-            ``opt_state``) untouched.
-            """
-            if "obs_norm" not in g["actor"]:
-                return g
-            gn = dict(g["actor"])
-            gn["obs_norm"] = jax.tree_util.tree_map(jnp.zeros_like, gn["obs_norm"])
-            return dict(g, actor=gn)
-
-        _grad_raw = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
-        # the backtracking search evaluates the KL once per trial, and each
-        # evaluation re-solves the MPC, so it is jitted rather than traced anew
-        _kl_only = jax.jit(lambda p, *a: loss_fn(p, *a)[1][3])
-
-        def grad_fn(p, *a):
-            (l, aux), g = _grad_raw(p, *a)
-            return (l, aux), _freeze_norm(g)
         n = F["o"].shape[0]
         mb = max(n // c["minib"], 1)
         aux_last, gnorm, kl_seen = None, 0.0, 0.0
