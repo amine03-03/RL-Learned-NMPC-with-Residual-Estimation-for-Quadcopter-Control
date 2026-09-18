@@ -56,17 +56,20 @@ env = S.ev_env("circle", n=min(N_CAND, 256), spec=S.nominal_spec(speed=(1.0, 1.5
                seed=11)
 o, e0, xr = env.obs()
 B = env.n
-KEY, k1, k1b = jax.random.split(KEY, 3)
+KEY, k1 = jax.random.split(KEY, 2)
 scale = jnp.asarray([DISP, DISP, DISP, DISP, DISP, DISP,
                      0.3 * DISP, 0.3 * DISP, 0.3 * DISP])
-# G7: sample over DECADES of error magnitude, not one shell at `disp`.
-# P_theta is an MLP of e, so it is only constrained where candidates were drawn.
-# Drawn at |e| ~ 0.8 m alone, the closed loop -- which lives at |e| ~ 0.05 m --
-# queries the network a factor ~15 inside its support, i.e. pure extrapolation,
-# which is a candidate explanation for LLTC's 26 % saturation next to NMPC
-# N=1's 0.07 %.
-decade = 10.0 ** jax.random.uniform(k1b, (B, 1), minval=-1.5, maxval=0.0)
-cand = jax.random.normal(k1, (B, X.NE)) * scale * decade
+# G7c: ONE shell at `disp`, as originally.  G7 spread the candidates over
+# decades of magnitude, reasoning that the closed loop lives at |e| ~ 0.05 m
+# while the shell sits at |e| ~ 0.8 m, so the network was being extrapolated.
+# The argument is plausible and the measurement refutes it: under an MSE on V1
+# the small-error samples contribute almost nothing to the loss, so spreading
+# the draw does not constrain the small-error region -- it only dilutes the
+# shell.  Measured at medium, LLTC N=1 on S1: 0.41 m with one shell, 1.23 m
+# with decades (and 1.27 m with decades once G7's circular gate was removed),
+# while R^2 went UP, 0.992 -> 0.999.  A better fit to a worse controller is the
+# signal that the fit target, not the sampling, is what limits this arm.
+cand = jax.random.normal(k1, (B, X.NE)) * scale
 xr_seq, uref_seq = env.ref_traj(N_LONG), env.ref_useq(N_LONG)
 Sm, cm = X.quad_cost_blocks(B, N_LONG)
 Pt = jnp.broadcast_to(X.PTt, (B, X.NE, X.NE))
