@@ -2363,7 +2363,7 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
         n = F["o"].shape[0]
         mb = max(n // c["minib"], 1)
         aux_last, gnorm, kl_seen = None, 0.0, 0.0
-        n_land = 0
+        n_land, kl_rej = 0, 0.0
         args_all = (F["o"], F["e"], F["xr"], F["ur"], F["d"], F["a"], F["lp"],
                     ADVf, RETf)
         if c["algo"] == "trpo":
@@ -2455,11 +2455,19 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
                         params = dict(base, critic=trial["critic"])
                         opt_state = trial_opt
                         trips += 1
+                        kl_rej = max(kl_rej, kl_new) if np.isfinite(kl_new) else kl_rej
                     else:
                         n_land += 1
                         kl_seen = max(kl_seen, kl_new)
-                    aux_last = (aux_last[0], aux_last[1], aux_last[2],
-                                jnp.asarray(kl_new), aux_last[4])
+                        # G12: report the KL of the step that was KEPT.  Writing
+                        # the last TRIAL's KL here -- accepted or not -- put
+                        # rejected trials in the `kl` column, so nb3's headline
+                        # PPO/TRPO table read "PPO mean_kl 1278, max 15578"
+                        # against TRPO's 0.0141 when every ACCEPTED PPO step is
+                        # <= 4*kl_target = 0.04 by construction.  The rejected
+                        # maximum is still logged, as `kl_rejected`.
+                        aux_last = (aux_last[0], aux_last[1], aux_last[2],
+                                    jnp.asarray(kl_new), aux_last[4])
         # B4: the observation statistics are refreshed at the END of the
         # iteration, never between the rollout and the update.  Updating them in
         # between makes mpc_mean in the loss normalise differently from the
@@ -2488,6 +2496,10 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
                          # `landed` is 0 for every iteration the policy is its
                          # initialisation and no downstream row is a result.
                          landed=int(n_land if c["algo"] != "trpo" else c["epochs"]),
+                         # G12: the largest KL among REJECTED trials.  A
+                         # diagnostic of how ill-conditioned the cost-map ->
+                         # command map is; it is not a KL the policy ever took.
+                         kl_rejected=float(kl_rej),
                          wall_s=time.time()))
         if verbose and (it % max(iters // 10, 1) == 0 or it == iters - 1):
             r_ = rows[-1]

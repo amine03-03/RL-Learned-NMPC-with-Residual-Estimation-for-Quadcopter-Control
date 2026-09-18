@@ -623,6 +623,69 @@ variants B and C against the RDP trained earlier in the same notebook. That is
 the correct causal order, but it couples those two arms to the estimator's
 quality — a weak RDP is inherited by the policies that consume it.
 
+## G12 — the `kl` column reported rejected trials *(regression introduced by G1)*
+
+The backtracking search of G1 wrote the last *trial's* KL into `aux_last`
+whether or not that trial was accepted, so the training log's `kl` column
+carried **rejected** trials. At `medium` this made nb3's headline table read
+"PPO mean_kl 1278, max_kl 15578" against TRPO's 0.0141, inviting the conclusion
+that TRPO's trust region is better behaved — when every *accepted* PPO step is
+`<= 4*kl_target = 0.04` by construction. Fixed: `kl` records the step that was
+kept; the largest rejected KL is logged separately as `kl_rejected`, which is a
+useful diagnostic of how ill-conditioned the cost-map → command map is but is
+not a KL the policy ever took. **The PPO/TRPO KL comparison in any run before
+this fix should be discarded.**
+
+## G7 revisited — the nb2 changes made LLTC worse, and the gate is circular
+
+Measured at `medium` after G7: LLTC N=1 went **0.41 → 1.22 m** and horizon
+equivalence **7.5× → 23.7×**. The G7 change was wrong in a way the original was
+not, and the cause is circularity that G7 introduced into the gate:
+
+`REACH` is computed from the **median of the candidates**
+(`sqrt(2*median(V1)/P_RIC[0,0])`), and G7 then used `||e1|| <= 2*REACH` to
+**filter those same candidates**. Adding the decade-spread sampling dropped the
+median `V1`, so `REACH` fell 0.556 → 0.086 m, and the gate then kept only the
+small-error candidates: acceptance 0.695, fit support `||e|| ~ 0.09 m`, deployed
+against a seeded 0.5 m offset. The original code fitted large errors and
+deployed at small ones; G7 inverted it rather than fixing it.
+
+What the gate needs is a radius that does **not** depend on the candidate draw —
+a terminal-set radius derived from `P_RIC` and a fixed cost threshold — plus
+candidate sampling that spans the closed-loop *and* the recovery scale. The
+acceptance column itself is now honest (0.695, and it moves 0.867 → 0.512 with
+`Q_scale` instead of sitting at 0.9492 in every row), so that half of G7 stands.
+
+## G13 — the saturation gate measures something the reward does not penalise
+
+With the trainer fixed, `landed` at `medium` runs 303–1851 per training and the
+closed loop **does not move**: `full/circle` reads 0.9251 m at zero landed
+updates and 0.9252 m at 1538. Reward improves ~4 % at best. Meanwhile `sat` is
+0.14–0.46 across every arm.
+
+The likely mechanism is that a clipped input flattens the map from cost-map
+parameters to realised trajectory, so the gradient has little to act on. Behind
+that sits a design inconsistency: **(5.4) never prices saturation.** It carries
+`du'Rdu` (deviation from the feed-forward) and `|u - u_prev|^2` (rate), but
+nothing for sitting on the box — so the gate fails a policy for a behaviour the
+objective is indifferent to. A learned control-cost weight is also free to fall
+to `Q_LO = 0.01` while `P_term = P_RIC` carries `P_00 = 399.8`, which at `N = 1`
+asks for one-step deadbeat control.
+
+## G14 — `landed` differs 5-6x by representation, which inverts the §8.3 finding
+
+At `medium`: `diag` lands 315–385 steps, `chol` 1672–1851, `full` 1509–1798, on
+identical budgets. `diag` maps parameters to weights through
+`S = Q_LO*(Q_HI/Q_LO)^sigmoid(z)`, whose slope at the initialisation is
+`S*ln(1e5)*sigmoid' ~ 9.1` — stiff — so its steps leave the KL region and are
+rejected. `chol`/`full` use `A A'` with `A ~ 0`, where `dS/dA ~ 2A ~ 0` — nearly
+flat — so their steps are accepted. The diagonal is not the form that learns
+best here; it is the form hardest to move inside a trust region.
+
+This also **confounds the representation sweep**, which now varies the
+representation and the effective number of policy steps together. Comparing the
+three forms needs the step counts matched, not just the iteration budgets.
+
 ## Does `X500_SCALE=full` fix any of this?
 
 No. G1 makes the iteration budget irrelevant — the learning rate reaches its
