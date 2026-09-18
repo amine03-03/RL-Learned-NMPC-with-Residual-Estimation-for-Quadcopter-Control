@@ -236,17 +236,41 @@ def test_G5_estimator_runs_once_per_control_step():
 # --------------------------------------------------------------------------- #
 # G7  the LLTC fit must score the object the controller evaluates
 # --------------------------------------------------------------------------- #
-def test_G7_lltc_fit_uses_the_terminal_state_and_a_real_gate():
+def test_G7_lltc_acceptance_gate_is_not_a_tautology():
+    """Only ONE of G7's three changes survived measurement.
+
+    G7 changed three things in nb2 and all three were argued rather than
+    measured.  Bisected afterwards at X500_SCALE=medium, LLTC N=1 on S1:
+
+        original                                   0.4134 m
+        + decades + circular gate      (G7)        1.2281 m
+        + decades, honest gate         (G7b)       1.2708 m
+        + one shell, honest gate       (G7c)       1.0640 m
+        + e0 contraction               (G7d)       0.4566 m
+
+    so the e0 -> e1 contraction cost 2.33x and the decade sampling 1.19x.
+    Both were reverted.  What is pinned here is the one change that stands:
+    the acceptance gate.  A 95th-percentile cut reports 0.95 for ANY input,
+    which is why that column read 0.9492 in every row of the terminal-weight
+    sweep while `reach_m` moved 1.07 -> 0.29 m.  It cannot affect the
+    controller, only the honesty of the diagnostic.
+    """
     import os
     nb = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                       "notebooks", "nb2_lltc.py")
     src = open(nb).read()
-    assert 'jnp.einsum("bi,bij,bj->b", e1, P, e1)' in src, (
-        "the fit still regresses 0.5 e0' P(e0) e0 onto the cost-to-go from e1, "
-        "while make_lltc_ctrl scores 0.5 e1' P(e0) e1")
     assert "np.percentile(V1[np.isfinite(V1)], 95)" not in src, (
-        "the acceptance gate is still a 95th-percentile cut, i.e. 0.95 for any "
+        "the acceptance gate is a 95th-percentile cut again, i.e. 0.95 for any "
         "input -- a tautology printed as a diagnostic")
+    assert "keep = np.isfinite(V1) & (V1 > 0.0)" in src
+    # and the two reverts stay reverted, with the measurement behind them
+    assert 'jnp.einsum("bi,bij,bj->b", ee, P, ee)' in src, (
+        "the fit contracts with e1 again; measured, that costs 2.33x because "
+        "the fit's e1 is from the N=10 hand-weighted trajectory while the "
+        "controller's is from its own N=1 solve -- not the same e1")
+    assert "decade = 10.0 **" not in src, (
+        "the decade-spread sampling is back; measured, it costs 1.19x because "
+        "an MSE on V1 is insensitive to the small-error samples it adds")
 
 
 # --------------------------------------------------------------------------- #
