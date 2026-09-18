@@ -110,10 +110,15 @@ for path in MIS_PATHS:
 MH = pd.DataFrame(rows)
 MH.to_csv(X.apath("sensitivity", "model_hand.csv"), index=False)
 
-piv = MH.pivot_table(index=["axis", "ctrl"], columns="level", values="rmse")
-S.table(piv.reset_index(), "Model mismatch, hand-built (RMSE [m], median over paths)",
-        note="the level column is the multiplicative factor on that plant parameter; "
-             "1.0 is nominal", csv=("sensitivity", "model_hand_pivot.csv"))
+# one table PER AXIS: the axes have different level grids, so a shared `level`
+# column would be half NaN and unreadable
+for _a in AXES:
+    _p = MH[MH.axis == _a].pivot_table(index="ctrl", columns="level",
+                                       values="rmse").reset_index()
+    S.table(_p, f"Model mismatch, hand-built -- lambda_{_a} (RMSE [m])",
+            note="columns are the multiplicative factor on that parameter; "
+                 "1.0 is nominal",
+            csv=("sensitivity", f"model_hand_{_a}.csv"))
 
 
 def _breakpoint(df, ctrl, axis, thresh=3.0):
@@ -328,10 +333,11 @@ if LEARNED_OK:
     ML.to_csv(X.apath("sensitivity", "model_learned.csv"), index=False)
 
     cl = sorted(ML.ctrl.unique())
-    S.table(ML.pivot_table(index=["axis", "ctrl"], columns="level",
-                           values="rmse").reset_index(),
-            "Model mismatch, learned (RMSE [m], median over paths)",
-            csv=("sensitivity", "model_learned_pivot.csv"))
+    for _a in AXES:
+        _p = ML[ML.axis == _a].pivot_table(index="ctrl", columns="level",
+                                           values="rmse").reset_index()
+        S.table(_p, f"Model mismatch, learned -- lambda_{_a} (RMSE [m])",
+                csv=("sensitivity", f"model_learned_{_a}.csv"))
     bl = pd.DataFrame([dict(axis=a, **{c: _breakpoint(ML, c, a) for c in cl})
                        for a in AXES])
     S.table(bl, "Break factor, learned (first level at 3x nominal RMSE)",
