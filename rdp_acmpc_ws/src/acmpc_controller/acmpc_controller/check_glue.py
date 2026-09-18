@@ -53,7 +53,6 @@ def main(argv=None):
     _chk("T_max (ONE definition)", check_ctbr.T_MAX, X.T_MAX)
     _chk("g", bd_bridge.wrench_to_dmod(np.zeros(6)).sum() * 0 + 9.8066, X.P.g)
     _chk("J", bd_bridge.J_NOM, X.J_NOM)
-    _chk("K_rate", bd_bridge.K_RATE, np.asarray(X.P.K_rate))
     _chk("u_hover", check_ctbr.U_HOVER, X.U_HOVER)
     from reference_generator import lissajous as L
     _chk("a_lat_max", L.A_LAT_MAX, X.A_LAT_MAX)
@@ -70,9 +69,35 @@ def main(argv=None):
     _chk("wrench_to_dmod agrees on 64 random wrenches", float(np.abs(a - b).max()), 0.0)
     _chk("mode='none' zeroes the moment block",
          float(np.abs(bd_bridge.wrench_to_dmod(w, "none")[:, 3:]).max()), 0.0)
-    we = bd_bridge.worked_example()
-    _chk("§4.4 example a_res", we["a_res"], 3.138, 1e-3)
-    _chk("§4.4 example om_res", we["om_res"], 1.035, 1e-3)
+    _chk("J^-1 (the moment block is EXACT now, not (4.13))",
+         bd_bridge.JINV_NOM, np.asarray(X.JINV_NOM))
+    _chk("§4.4 example a_res", float(bd_bridge.wrench_to_dmod(
+        np.array([6.478, 0, 0, 0, 0, 0]))[0]), 6.478 / X.M_TOT, 1e-9)
+    _chk("§4.4 example alpha_res", float(bd_bridge.wrench_to_dmod(
+        np.array([0, 0, 0, 0.3452, 0, 0]))[3]), 0.3452 / X.J_NOM[0, 0], 1e-9)
+
+    print("\n17-state reference (refgen vs the study's ref_state):")
+    from . import refgen as RG
+    import jax.numpy as jnp
+    env = X.Env(n=1, seed=7, ep_len=500, paths=("fig8",),
+                dist=X.nominal_spec(speed=(2.0, 2.0)))
+
+    def pva(t, _ep=env.ep):
+        pp, vv, aa = X._ref_pva(_ep, jnp.asarray([float(t)]))
+        return np.asarray(pp)[0], np.asarray(vv)[0], np.asarray(aa)[0]
+
+    wx = wu = 0.0
+    for t in np.linspace(0.0, 4.0, 41):
+        xs, us, _ = X.ref_state(env.ep, jnp.asarray([t]))
+        xn, un = RG.ref_stage(pva, float(t))
+        wx = max(wx, float(np.abs(np.asarray(xs)[0] - xn).max()))
+        wu = max(wu, float(np.abs(np.asarray(us)[0] - un).max()))
+    # om_dot_ref is a second centred difference, so it carries ~1/(2h)^2 of the
+    # reference's own round-off; 1e-8 is the honest tolerance, not 1e-12
+    _chk("xr (17) agrees over 41 sample times", wx, 0.0, 1e-8)
+    _chk("u_ref agrees over 41 sample times", wu, 0.0, 1e-12)
+    _chk("control state width", X.NX, 17)
+    _chk("error width", X.NE, 16)
 
     print("\nsix channel orderings:")
     from rdp_estimator.ring_buffer import FRAME_DIM

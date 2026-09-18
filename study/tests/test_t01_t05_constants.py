@@ -61,8 +61,21 @@ def test_T5_hover_linearisation_of_collective():
     x = X.plant_to_ctrl(X.hover_state(1, par=par))
     u = X.hover_u(1, par=par)
     h = 1e-6
-    fd = float((X.fc(x, u.at[:, 0].add(h))[0, 5]
-                - X.fc(x, u.at[:, 0].add(-h))[0, 5]) / (2 * h))
+    # Under the 17-state model the collective does NOT reach acceleration
+    # directly -- thrust is sum K_T Omega^2 and the input only moves Omega_cmd.
+    # The instantaneous derivative is therefore exactly zero, and (2.11) is the
+    # STEADY-STATE gain, once the rotors have caught up with the command.
+    assert abs(float((X.fc(x, u.at[:, 0].add(h))[0, 5]
+                      - X.fc(x, u.at[:, 0].add(-h))[0, 5]) / (2 * h))) < 1e-9
+
+    def settle(uu, n=400):
+        xx = x
+        for _ in range(n):
+            xx = X.step_c(xx, uu)
+        return xx
+
+    up, um = u.at[:, 0].add(h), u.at[:, 0].add(-h)
+    fd = float((X.fc(settle(up), up)[0, 5] - X.fc(settle(um), um)[0, 5]) / (2 * h))
     # A2: with the PX4 idle floor the hover slope is 21.666957, not 25.490538.
     # The pure-square form overstates control effectiveness by 17.65 %, which
     # propagates straight into K_LQR and the terminal matrix.

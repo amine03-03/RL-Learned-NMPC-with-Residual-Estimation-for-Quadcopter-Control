@@ -100,8 +100,19 @@ R_ROTOR = np.array([[+0.174, -0.174, 0.06],
                     [-0.174, -0.174, 0.06]])
 SIGMA = np.array([+1.0, +1.0, -1.0, -1.0])
 
-NX, NU, NE, NS = 10, 4, 9, 23          # control state, input, error, plant state
-NTAU = NE + NU                          # 13, the cost-map block size (5.2)
+NX, NU, NE, NS = 17, 4, 16, 23         # control state, input, error, plant state
+NTAU = NE + NU                          # 20, the cost-map block size (5.2)
+#: Control-state layout (§5.3): x = [p(3) | v(3) | q(4) | om(3) | Omega(4)].
+CP, CV, CQ, CW, CO = (slice(0, 3), slice(3, 6), slice(6, 10), slice(10, 13),
+                      slice(13, 17))
+#: Rotor speed enters the ERROR vector normalised by this, so that every channel
+#: of e is O(1).  Omega itself is ~769 rad/s at hover against O(0.1-1) for the
+#: other blocks; feeding that raw into the learned cost map of §5.9 -- whose
+#: entries already span five decades -- puts three more on top of it and makes
+#: Q_uu's conditioning a function of the rotor units.  OM_SCALE is a pure change
+#: of coordinates: err and e_to_state divide and multiply by it symmetrically,
+#: so no dynamics, gain or weight depends on the value chosen.
+OM_SCALE = 1000.0                       # = P.Om_max [rad/s]
 E3 = np.array([0.0, 0.0, 1.0])
 
 
@@ -353,6 +364,27 @@ def _ctrl_consts(par):
     return par["m_ctrl"], par["T_max_ctrl"]
 
 
+def _ctrl_mixer(par):
+    """The ALLOCATOR's belief (Minv_ctrl, J_ctrl) and a matvec that fits it.
+
+    Mirrors :func:`inner_loop`, which is the point: the control model predicts
+    the plant *including its autopilot*, so the inner loop must be driven by
+    whatever the allocator believes.  Normally that is the nominal geometry, but
+    ``Env(mixer='true')`` deliberately hands the allocator the true mixer as an
+    ablation -- and the control model has to follow it there, or the ablation
+    measures a model mismatch instead of the thing it is ablating.
+
+    The RIGID BODY is a separate question and stays nominal (J_NOM, MTAU_NOM):
+    that is the control model's belief about physics, not the autopilot's, and
+    §3.3's boxed warning is exactly this split.
+    """
+    if par is None:
+        return (jnp.asarray(MINV_CTRL), jnp.asarray(J_NOM),
+                lambda M, z: jnp.einsum("ij,bj->bi", M, z))
+    return (par["Minv_ctrl"], par["J_ctrl"],
+            lambda M, z: jnp.einsum("bij,bj->bi", M, z))
+
+
 def _assemble(lead, width, blocks, dtype):
     """Build a (``*lead``, ``width``) array from ``(start, stop, value)`` blocks.
 
@@ -383,45 +415,121 @@ def _assemble(lead, width, blocks, dtype):
 
 
 def fc(x, u, d=None, par=None):
-    """(3.3) control-model derivative.  x (B,10), u (B,4), d (B,6) -> (B,10).
+    """(3.3) control-model derivative.  x (B,17), u (B,4), d (B,6) -> (B,17).
 
-    ``d = [a_res, om_res]`` in [m/s^2, rad/s] is the optional model correction of
-    §4.3(a).  It is **not** a wrench: feed :func:`wrench_to_dmod` output here,
-    never :func:`external_wrench` output (§4.4).
+    The 17-state model of §5.3: ``x = [p, v, q, om, Omega]``.  The input is
+    still CTBR, so the deployment interface is unchanged; what the extra states
+    buy is that the rate loop and the actuator are *predicted* rather than
+    assumed instantaneous.
+
+    ``d = [a_res, alpha_res]`` in [m/s^2, rad/s^2] is the model correction of
+    §4.3(a).  Unlike the 10-state model this one HAS a torque input, so the
+    moment block of a residual now has an exact image -- see
+    :func:`wrench_to_dmod`, where the (4.13) approximation used to live.
+
+    Every parameter here is **nominal**: a control model may not know the true
+    inertia, rotor constant or motor lag, and `par` carries the true ones.  The
+    only quantities read from ``par`` are ``m_ctrl`` and ``T_max_ctrl``, both of
+    which :func:`make_par` pins to the nominal value by construction.
+
+    The inner loop is reproduced as a **pure proportional** law: ``om_f ~ om``
+    (the gyro filter is 4 ms against dt_c = 20 ms), and both ``K_i`` and ``K_d``
+    are dropped.  Each was measured, not assumed:
+
+    * carrying the rate integrator as three more states changes one-step
+      attitude prediction by under 3 %, and by -0.4 % (i.e. *worse*) on an
+      aggressive figure-of-eight, so it does not earn its states;
+    * dropping K_d as well is 15-17 % BETTER at a 0.2 s horizon.  K_d and K_i
+      are a pair: the plant's integrator drives om_f -> om_c, so its steady-state
+      rate gain is exactly om_max.  Keeping K_d without K_i leaves a 2 % droop
+      (om_ss = K_rate/(K_rate+K_d) om_c = 9.804 rather than 10) -- a STANDING
+      bias that integrates straight into attitude error.  Dropping both restores
+      the exact DC gain and costs only a slightly fast transient.
+
+    See docs/CONTROL_MODEL_17.md.
     """
     m, T_max = _ctrl_consts(par)
-    v, q = x[..., 3:6], x[..., 6:10]
+    v, q, om, Om = x[..., CV], x[..., CQ], x[..., CW], x[..., CO]
     # (3.2) with the SAME 220 deg/s clip the autopilot applies (D7).  om_max is
     # (10,10,4) rad/s but rate_cmd saturates at 3.84, so without this clip the
     # optimiser plans in a region 62 % of whose roll/pitch box the plant cannot
     # reach, and model and plant disagree above 3.84 rad/s.
-    om = _clamp(jnp.asarray(OM_MAX) * u[..., 1:4], -P.rate_max, P.rate_max)
+    om_c = _clamp(jnp.asarray(OM_MAX) * u[..., 1:4], -P.rate_max, P.rate_max)
     a_res = jnp.zeros_like(v) if d is None else d[..., 0:3]
-    om_res = jnp.zeros_like(om) if d is None else d[..., 3:6]
-    acc = thrust_of(u[..., 0:1], T_max) / m * qzaxis(q) - P.g * jnp.asarray(E3) + a_res
+    al_res = jnp.zeros_like(om) if d is None else d[..., 3:6]
+
+    # --- inner loop (3.4)-(3.5), the ALLOCATOR's geometry -------------------
+    Minv_c, J_c, mv = _ctrl_mixer(par)
+    Jc_om = mv(J_c, om)
+    ang = jnp.asarray(P.K_rate) * (om_c - om)
+    tau_cmd = mv(J_c, ang) + jnp.cross(om, Jc_om)
+    T_c = thrust_of(u[..., 0:1], T_max)
+    # _assemble, NOT jnp.concatenate: tau_cmd is a 3-wide operand and this is
+    # inside fc, which is exactly the site and shape that crashed the CUDA
+    # emitter (see docs/TROUBLESHOOTING.md and _assemble).
+    w_cmd = _assemble(jnp.broadcast_shapes(T_c.shape[:-1], tau_cmd.shape[:-1]), 4,
+                      [(0, 1, T_c), (1, 4, tau_cmd)],
+                      jnp.result_type(T_c, tau_cmd))
+    f_cmd = _clamp(mv(Minv_c, w_cmd), 0.0, F_MAX)
+    # the idle floor is a floor on the ACTUATOR, so the allocator cannot ask for
+    # less than it (A2) -- same clamp as the plant's inner_loop
+    Om_cmd = _clamp(jnp.sqrt(jnp.maximum(f_cmd / P.K_T, 0.0)), P.Om_min, P.Om_max)
+
+    # --- actuator (3.8) and rigid body (3.6)-(3.7), nominal ------------------
+    tau_m = jnp.where(Om_cmd >= Om, P.tau_up, P.tau_dn)
+    Omdot = (Om_cmd - Om) / tau_m
+    w2 = Om ** 2
+    thrust = P.K_T * jnp.sum(w2, -1, keepdims=True)
+    acc = thrust / m * qzaxis(q) - P.g * jnp.asarray(E3) + a_res
+    # the rigid body is the control model's OWN belief: nominal, always
+    Jom = jnp.einsum("ij,bj->bi", jnp.asarray(J_NOM), om)
+    tau = jnp.einsum("ij,bj->bi", jnp.asarray(MTAU_NOM) * P.K_T, w2) - jnp.cross(om, Jom)
+    omdot = jnp.einsum("ij,bj->bi", jnp.asarray(JINV_NOM), tau) + al_res
     # Assembled by scatter, NOT jnp.concatenate -- see _assemble.  Do not
     # "simplify" these back: on a CUDA backend the concatenate of 3-wide
     # operands crashes the compiler outright (see docs/TROUBLESHOOTING.md).
-    omq = _assemble(om.shape[:-1], 4, [(1, 4, om + om_res)], om.dtype)
+    omq = _assemble(om.shape[:-1], 4, [(1, 4, om)], om.dtype)
     qdot = 0.5 * qmul(q, omq)
-    return _assemble(jnp.broadcast_shapes(v.shape[:-1], acc.shape[:-1],
-                                          qdot.shape[:-1]), 10,
-                     [(0, 3, v), (3, 6, acc), (6, 10, qdot)],
-                     jnp.result_type(v, acc, qdot))
+    lead = jnp.broadcast_shapes(v.shape[:-1], acc.shape[:-1], qdot.shape[:-1],
+                                omdot.shape[:-1], Omdot.shape[:-1])
+    return _assemble(lead, NX,
+                     [(0, 3, v), (3, 6, acc), (6, 10, qdot),
+                      (10, 13, omdot), (13, 17, Omdot)],
+                     jnp.result_type(v, acc, qdot, omdot, Omdot))
 
 
-@functools.partial(jax.jit, static_argnames=("dt",))
-def step_c(x, u, d=None, par=None, dt=None):
-    """One classical RK4 step of the control model at dt_c, renormalising q."""
+#: Sub-steps per control period in :func:`step_c`.  The rotor pole is the
+#: fastest mode the control model carries: tau_up = 12.5 ms against
+#: dt_c = 20 ms, so dt/tau = 1.6 and a single RK4 step resolves it only
+#: marginally.  Two sub-steps put dt/tau at 0.8 and cost one extra derivative
+#: evaluation per stage; pinned by test_T6b_step_c_substep_converged.
+N_SUB_C = 2
+
+
+@functools.partial(jax.jit, static_argnames=("dt", "n_sub"))
+def step_c(x, u, d=None, par=None, dt=None, n_sub=None):
+    """RK4 steps of the control model over dt_c, renormalising q.
+
+    ``n_sub`` sub-steps of the classical RK4, ``N_SUB_C`` by default; the rotor
+    lag is faster than dt_c and a single step under-resolves it.
+    """
     dt = P.dt_c if dt is None else dt
-    k1 = fc(x, u, d, par)
-    k2 = fc(x + 0.5 * dt * k1, u, d, par)
-    k3 = fc(x + 0.5 * dt * k2, u, d, par)
-    k4 = fc(x + dt * k3, u, d, par)
-    xn = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-    # was jnp.concatenate([xn[..., :6], qnorm(xn[..., 6:10])], -1); the scatter
-    # is identical and does not emit a concatenate (see _assemble)
-    return xn.at[..., 6:10].set(qnorm(xn[..., 6:10]))
+    n_sub = N_SUB_C if n_sub is None else n_sub
+    h = dt / n_sub
+
+    def body(_, xx):
+        k1 = fc(xx, u, d, par)
+        k2 = fc(xx + 0.5 * h * k1, u, d, par)
+        k3 = fc(xx + 0.5 * h * k2, u, d, par)
+        k4 = fc(xx + h * k3, u, d, par)
+        xn = xx + (h / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+        xn = xn.at[..., CQ].set(qnorm(xn[..., CQ]))
+        # a floor on the ACTUATOR, mirroring _plant_project.  _clamp, not
+        # jnp.clip: the derivative must pass ON the boundary or Q_uu goes
+        # singular in the collective direction exactly when it saturates.
+        return xn.at[..., CO].set(_clamp(xn[..., CO], 0.0, P.Om_max))
+
+    return jax.lax.fori_loop(0, n_sub, body, x)
 
 
 # --------------------------------------------------------------------------- #
@@ -531,8 +639,16 @@ def step_p(s, u_ctbr, par, v_wind=None, n_sub=None):
 
 
 def plant_to_ctrl(s):
-    """The 10-state view of a 23-state plant state: [p, v, q]."""
-    return jnp.concatenate([s[..., SP], s[..., SV], s[..., SQ]], -1)
+    """The 17-state view of a 23-state plant state: [p, v, q, om, Omega].
+
+    Every block is read straight off the plant -- the control model adds no
+    state the plant does not already carry.  On hardware p/v/q/om come from the
+    EKF; Omega is NOT telemetered and is propagated open-loop by the controller
+    from the commands it sent (see rdp_acmpc_ws .../controller.py).
+    """
+    return _assemble(s.shape[:-1], NX,
+                     [(0, 3, s[..., SP]), (3, 6, s[..., SV]), (6, 10, s[..., SQ]),
+                      (10, 13, s[..., SW]), (13, 17, s[..., SO])], s.dtype)
 
 
 def hover_state(B=1, p=(0.0, 0.0, 1.5), par=None):
@@ -564,19 +680,28 @@ def hover_u(B=1, par=None):
 # --------------------------------------------------------------------------- #
 @jax.jit
 def err(x, xr):
-    """(4.1) reduced error, (B,10),(B,10) -> (B,9).
+    """(4.1) reduced error, (B,17),(B,17) -> (B,16).
+
+    ``e = [p-p_r | v-v_r | 2 sgn q_ev | om-om_r | (Omega-Omega_r)/OM_SCALE]``.
 
     The sign of q_e picks the shorter rotation, so ||e[6:9]|| = 2 sin(theta/2).
+    The rate and rotor blocks are plain vector differences -- neither lives on a
+    manifold -- so the bijection with :func:`e_to_state` stays exact.
     """
-    qe = qmul(qconj(xr[..., 6:10]), x[..., 6:10])
+    qe = qmul(qconj(xr[..., CQ]), x[..., CQ])
     sgn = jnp.where(qe[..., :1] >= 0.0, 1.0, -1.0)
-    return jnp.concatenate([x[..., 0:3] - xr[..., 0:3],
-                            x[..., 3:6] - xr[..., 3:6], 2.0 * sgn * qe[..., 1:4]], -1)
+    return _assemble(jnp.broadcast_shapes(x.shape[:-1], xr.shape[:-1]), NE,
+                     [(0, 3, x[..., CP] - xr[..., CP]),
+                      (3, 6, x[..., CV] - xr[..., CV]),
+                      (6, 9, 2.0 * sgn * qe[..., 1:4]),
+                      (9, 12, x[..., CW] - xr[..., CW]),
+                      (12, 16, (x[..., CO] - xr[..., CO]) / OM_SCALE)],
+                     jnp.result_type(x, xr))
 
 
 @jax.jit
 def e_to_state(e, xr):
-    """(4.2) the exact inverse of :func:`err`, (B,9),(B,10) -> (B,10).
+    """(4.2) the exact inverse of :func:`err`, (B,16),(B,17) -> (B,17).
 
     N-1: implemented in the algebraically identical closed form
     ``q_e = [sqrt(1 - ||d||^2/4), d/2]``.  Substituting n = 2 arcsin(||d||/2)
@@ -590,8 +715,13 @@ def e_to_state(e, xr):
     n2 = jnp.sum(dlt * dlt, -1, keepdims=True)
     qw = jnp.sqrt(jnp.clip(1.0 - n2 / 4.0, 0.0, 1.0))
     qe = jnp.concatenate([qw, dlt / 2.0], -1)
-    return jnp.concatenate([e[..., 0:3] + xr[..., 0:3],
-                            e[..., 3:6] + xr[..., 3:6], qmul(xr[..., 6:10], qe)], -1)
+    return _assemble(jnp.broadcast_shapes(e.shape[:-1], xr.shape[:-1]), NX,
+                     [(0, 3, e[..., 0:3] + xr[..., CP]),
+                      (3, 6, e[..., 3:6] + xr[..., CV]),
+                      (6, 10, qmul(xr[..., CQ], qe)),
+                      (10, 13, e[..., 9:12] + xr[..., CW]),
+                      (13, 17, e[..., 12:16] * OM_SCALE + xr[..., CO])],
+                     jnp.result_type(e, xr))
 
 
 # --------------------------------------------------------------------------- #
@@ -731,11 +861,35 @@ def ref_attitude(a_ref):
     return qnorm(qexp_tilt(ax, ang))
 
 
+def _q_ref(ep, t, hold):
+    """Reference attitude at time ``t``; the identity under position hold."""
+    if hold:
+        return jnp.broadcast_to(jnp.asarray([1.0, 0.0, 0.0, 0.0]),
+                                jnp.shape(jnp.asarray(t).reshape(-1))[:1] + (4,))
+    return ref_attitude(_ref_pva(ep, t)[2])
+
+
+def _om_ref_at(ep, t, h, hold):
+    """Reference body rate at ``t``, by the centred difference of §5.6."""
+    q = _q_ref(ep, t, hold)
+    qdot = (_q_ref(ep, t + h, hold) - _q_ref(ep, t - h, hold)) / (2 * h)
+    return 2.0 * qmul(qconj(q), qdot)[..., 1:4]
+
+
 @functools.partial(jax.jit, static_argnames=("hold",))
 def ref_state(ep, t, hold=False):
-    """(B,10) reference state, (B,4) u_ref (4.8), (B,3) a_ref.
+    """(B,17) reference state, (B,4) u_ref (4.8), (B,3) a_ref.
 
-    omega_ref comes from a centred difference of q_ref at +/- dt_c/2 (§5.6).
+    omega_ref comes from a centred difference of q_ref at +/- dt_c/2 (§5.6), and
+    omega_dot_ref from a centred difference of *that* -- which is all the 17-state
+    model needs to define a reference rotor speed, without carrying the
+    reference to jerk and snap in closed form.
+
+    Omega_ref is the nominal allocator's answer at the reference: invert (2.7)
+    on the reference wrench [T_ref, tau_ref].  At hover tau_ref = 0 and
+    T_ref = m g, so Omega_ref = sqrt(m g / 4 K_T) = OM_HOVER exactly, which is
+    what makes err() vanish on the trimmed hover state.
+
     The collective in (4.8) carries a **square root** -- it is exact, because
     thrust is quadratic in the command (2.10).
     """
@@ -749,22 +903,34 @@ def ref_state(ep, t, hold=False):
         a = jnp.zeros_like(a)
     q = ref_attitude(a)
     h = 0.5 * P.dt_c
-    if hold:
-        qdot = jnp.zeros_like(q)
-    else:
-        qp = ref_attitude(_ref_pva(ep, t + h)[2])
-        qm = ref_attitude(_ref_pva(ep, t - h)[2])
-        qdot = (qp - qm) / (2 * h)
-    om_ref = 2.0 * qmul(qconj(q), qdot)[..., 1:4]              # body rates
+    om_ref = _om_ref_at(ep, t, h, hold)                        # body rates
+    omdot_ref = (_om_ref_at(ep, t + h, h, hold)
+                 - _om_ref_at(ep, t - h, h, hold)) / (2 * h)
+
     # (4.8): exact inversion of (2.10) INCLUDING the idle floor (A2).  The bare
     # square root would be 5.6 % high at hover on the real platform.
+    T_ref = jnp.clip(M_TOT * jnp.linalg.norm(a + P.g * jnp.asarray(E3), axis=-1,
+                                             keepdims=True), 0.0, T_MAX)
     r = P.Om_min / P.Om_max
-    root = jnp.sqrt(jnp.clip(
-        M_TOT * jnp.linalg.norm(a + P.g * jnp.asarray(E3), axis=-1, keepdims=True)
-        / T_MAX, 0.0, 1.0))
+    root = jnp.sqrt(T_ref / T_MAX)
     c = jnp.clip((root - r) / (1.0 - r), 0.0, 1.0)
     u_ref = jnp.concatenate([c, om_ref / jnp.asarray(OM_MAX)], -1)
-    return jnp.concatenate([p, v, q], -1), u_ref, a
+
+    # reference rotor speeds: the nominal allocator at [T_ref, tau_ref]
+    Jw = jnp.einsum("ij,bj->bi", jnp.asarray(J_NOM), om_ref)
+    tau_ref = (jnp.einsum("ij,bj->bi", jnp.asarray(J_NOM), omdot_ref)
+               + jnp.cross(om_ref, Jw))
+    w_ref = _assemble(jnp.broadcast_shapes(T_ref.shape[:-1], tau_ref.shape[:-1]), 4,
+                      [(0, 1, T_ref), (1, 4, tau_ref)],
+                      jnp.result_type(T_ref, tau_ref))
+    f_ref = jnp.clip(jnp.einsum("ij,bj->bi", jnp.asarray(MINV_CTRL), w_ref),
+                     0.0, F_MAX)
+    Om_ref = jnp.clip(jnp.sqrt(f_ref / P.K_T), P.Om_min, P.Om_max)
+
+    xr = _assemble(p.shape[:-1], NX,
+                   [(0, 3, p), (3, 6, v), (6, 10, q), (10, 13, om_ref),
+                    (13, 17, Om_ref)], jnp.result_type(p, v, q, om_ref, Om_ref))
+    return xr, u_ref, a
 
 
 # --------------------------------------------------------------------------- #
@@ -772,16 +938,24 @@ def ref_state(ep, t, hold=False):
 # --------------------------------------------------------------------------- #
 @jax.jit
 def true_disturbance(s, u, par, v_wind=None, sdot=None):
-    """(4.9) model residual d = [a_plant - a_model, om_plant - om_cmd].
+    """(4.9) model residual d = [a_plant - a_model, omdot_plant - omdot_model].
 
-    Units **[m/s^2, rad/s]**.  This is object (a) of §4.3 and is what may be fed
-    to :func:`fc`.  It is *not* a wrench: see :func:`external_wrench`.
+    Units **[m/s^2, rad/s^2]**.  This is object (a) of §4.3 and is what may be
+    fed to :func:`fc`.  It is *not* a wrench: see :func:`external_wrench`.
+
+    Both blocks are now genuine residuals.  Under the 10-state model the second
+    block was ``om - om_cmd``, the rate loop's own tracking transient, which the
+    model had no way to represent: on a NOMINAL plant with no wrench at all it
+    measured 0.79 rad/s against a body rate of 0.82 rad/s, i.e. 97 % of the
+    signal was model error rather than disturbance.  The 17-state model
+    predicts the rate loop, so what is left here is what the nominal model
+    really fails to explain.
     """
     sdot = fp(s, u, par, v_wind) if sdot is None else sdot
-    x = plant_to_ctrl(s)
-    a_model = (thrust_of(u[..., 0:1], par["T_max_ctrl"]) / par["m_ctrl"]
-               * qzaxis(x[..., 6:10]) - P.g * jnp.asarray(E3))
-    return jnp.concatenate([sdot[..., SV] - a_model, s[..., SW] - rate_cmd(u)], -1)
+    xdot = fc(plant_to_ctrl(s), u, None, par)
+    return _assemble(sdot.shape[:-1], 6,
+                     [(0, 3, sdot[..., SV] - xdot[..., CV]),
+                      (3, 6, sdot[..., SW] - xdot[..., CW])], sdot.dtype)
 
 
 @jax.jit
@@ -809,64 +983,36 @@ def external_wrench(s, u, par, sdot=None, v_wind=None):
     return jnp.concatenate([F, tau], -1)
 
 
-def moment_gain(t):
-    """Exact closed-loop gain of the rate loop to a STEP external moment.
-
-    Neglecting K_d and the gyro filter, the loop of (3.4) gives
-
-        eps_ddot + K_r eps_dot + K_i eps = 0 ,   eps(0) = 0 , eps_dot(0) = tau/J
-
-    so  eps(t) = (tau/J)(e^{r+ t} - e^{r- t})/(r+ - r-).  This returns
-    ``eps(t) / (tau/(J K_r))``, i.e. the factor by which the true rate residual
-    differs from (4.13), which is the K_i = 0 steady state and therefore the
-    t -> small limit (gain 1).
-
-    Measured against the full plant: 0.87 at t = 0.1 s, 0.93 at 0.3 s, 0.43 at
-    3 s, **0.103 at 8 s**.  (4.13) is a SHORT-TRANSIENT model.  Applied to a
-    standing moment that has been acting for seconds -- which is exactly the
-    `asym` payload scenario -- it overstates the rate residual by ~9x (D3/D4).
-    """
-    Kr, Ki = np.asarray(P.K_rate), np.asarray(P.K_i)
-    disc = np.sqrt(np.maximum(Kr ** 2 - 4 * Ki, 1e-300))
-    rp, rm = (-Kr + disc) / 2, (-Kr - disc) / 2
-    return Kr * (np.exp(rp * t) - np.exp(rm * t)) / (rp - rm)
-
-
-#: Modes for :func:`wrench_to_dmod`.  ``first_order`` is (4.13) verbatim;
-#: ``none`` zeroes the moment block, which is the CORRECT limit for a moment the
-#: rate integrator has already absorbed; ``closed_loop`` scales (4.13) by
-#: :func:`moment_gain` at ``DMOD_SETTLE_S``.
-DMOD_MODES = ("first_order", "none", "closed_loop")
-#: Time a disturbance is assumed to have been acting when ``closed_loop`` is
-#: used.  0.5 s is ~2 MPC horizons at N = 10 and well inside the integral time
-#: constant, so it brackets the transient the MPC can actually act on.
-DMOD_SETTLE_S = 0.5
+#: Modes for :func:`wrench_to_dmod`.  ``exact`` is the identity of §4.3(a);
+#: ``none`` zeroes the moment block and exists only as an ablation.
+#:
+#: The 10-state model had no torque input, so the moment block of a wrench had
+#: no exact image and (4.13) approximated it by the steady state of the rate
+#: loop with K_i neglected -- a short-transient model that overstated a standing
+#: moment by ~9x at 8 s (D3/D4), and which measured 69-103x SMALLER than the
+#: (4.9) residual it was supposed to cancel.  The 17-state model has a torque
+#: input, so the conversion is now exact and the ``first_order`` /
+#: ``closed_loop`` modes, ``moment_gain`` and ``DMOD_SETTLE_S`` are all gone.
+DMOD_MODES = ("exact", "none")
 
 
 @functools.partial(jax.jit, static_argnames=("mode",))
-def wrench_to_dmod(w, mode: str = "first_order"):
-    """(4.12)+(4.13) convert a wrench [N, N m] to a model residual [m/s^2, rad/s].
+def wrench_to_dmod(w, mode: str = "exact"):
+    """(4.12) convert a wrench [N, N m] to a model residual [m/s^2, rad/s^2].
 
-    Force converts exactly, a_res = F/m.  The moment block has **no exact
-    image** -- the 10-state model has no torque input -- so (4.13) uses the
-    steady state of the rate loop with K_i neglected.
-
-    **Validity (D3).**  That neglect is the whole content of the approximation.
-    :func:`moment_gain` gives the exact factor: ~0.9 out to 0.3 s, 0.10 by 8 s.
-    For a genuine transient ``first_order`` is right; for a standing moment the
-    integrator has absorbed it and the true rate residual is near zero, which is
-    what ``none`` encodes.  ``closed_loop`` interpolates.  Report both, as §5.7
-    requires.
+    Both blocks convert exactly: ``a_res = F / m_nom`` and
+    ``alpha_res = J_nom^-1 tau``.  Nominal parameters throughout, because the
+    residual is by definition what the nominal model fails to explain.
     """
+    if mode not in DMOD_MODES:
+        raise ValueError(f"dmod mode {mode!r} not in {DMOD_MODES}")
     a_res = w[..., 0:3] / M_TOT
     if mode == "none":
-        om_res = jnp.zeros_like(a_res)
+        al_res = jnp.zeros_like(a_res)
     else:
-        G = jnp.asarray(np.linalg.inv(np.diag(P.K_rate) @ J_NOM))
-        om_res = jnp.einsum("ij,bj->bi", G, w[..., 3:6])              # (4.13)
-        if mode == "closed_loop":
-            om_res = om_res * jnp.asarray(moment_gain(DMOD_SETTLE_S))
-    return jnp.concatenate([a_res, om_res], -1)
+        al_res = jnp.einsum("ij,bj->bi", jnp.asarray(JINV_NOM), w[..., 3:6])
+    return _assemble(w.shape[:-1], 6, [(0, 3, a_res), (3, 6, al_res)],
+                     jnp.result_type(a_res, al_res))
 
 
 # --------------------------------------------------------------------------- #
@@ -921,7 +1067,7 @@ def edyn(e, du, xr, xr_next, d=None, par=None, uref=None):
 
 
 def rollout_err(e0, du_seq, xr_seq, uref_seq, d=None, par=None):
-    """Forward rollout of (5.1).  du_seq (B,N,4) -> e_seq (B,N+1,9)."""
+    """Forward rollout of (5.1).  du_seq (B,N,4) -> e_seq (B,N+1,16)."""
     def body(e, k):
         en = edyn(e, du_seq[:, k], xr_seq[:, k], xr_seq[:, k + 1], d, par, uref_seq[:, k])
         return en, en
@@ -932,7 +1078,7 @@ def rollout_err(e0, du_seq, xr_seq, uref_seq, d=None, par=None):
 
 def traj_cost(e_seq, du_seq, S, c, P_term):
     """(5.2) objective value, (B,)."""
-    tau = jnp.concatenate([e_seq[:, :-1], du_seq], -1)                 # (B,N,13)
+    tau = jnp.concatenate([e_seq[:, :-1], du_seq], -1)                 # (B,N,20)
     quad = 0.5 * jnp.einsum("bni,bnij,bnj->b", tau, S, tau)
     lin = jnp.einsum("bni,bni->b", c, tau)
     eN = e_seq[:, -1]
@@ -947,10 +1093,10 @@ def _edyn_row(e, du, xr, xrn, uref, d, par):
 
 
 def lin_traj(e0, du_seq, xr_seq, d=None, par=None, uref_seq=None, e_seq=None):
-    """Stage Jacobians of (5.1): A (B,N,9,9), B (B,N,9,4).
+    """Stage Jacobians of (5.1): A (B,N,16,16), B (B,N,16,4).
 
     Taken with ``vmap`` over the batch, not by differentiating the batched map:
-    the latter builds a (B,9,B,4) cross-Jacobian that is B times too large in
+    the latter builds a (B,16,B,4) cross-Jacobian that is B times too large in
     both memory and work, and is all zeros off the diagonal.  The stage loop is
     a ``scan``, so the compiled program does not grow with N.
     """
@@ -1130,7 +1276,18 @@ XI = np.array([[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
 #: Re-derived after the physics corrections (A2: control effectiveness 21.67
 #: rather than 25.49; D7: the rate box is the reachable set).  Over the grid
 #: RMSE now runs 0.0506 m to 1.0552 m, a best-to-worst ratio of 20.8.
-Q_HAND = np.diag([10.0, 10.0, 10.0, 4.0, 4.0, 4.0, 1.0, 1.0, 0.5])
+#:
+#: **Re-tuned for the 17-state model.**  The position/velocity/attitude block is
+#: the measured optimum of the 10-state grid and is carried over unchanged; the
+#: two new blocks are set, not searched.  The rate block is the attitude block
+#: scaled by 1/5, which is the ratio the hover linearisation makes the two
+#: channels comparable at; the rotor block sits at Q_LO, i.e. it is present only
+#: so that S is positive definite in those directions and carries no authority
+#: of its own.  Omega has no business being *tracked* -- it is an internal
+#: actuator state, not a task variable.  The (Q_pos, R) grid of §8.1 step 6 must
+#: be re-run before any number here is quoted as an optimum again.
+Q_HAND = np.diag([10.0, 10.0, 10.0, 4.0, 4.0, 4.0, 1.0, 1.0, 0.5,
+                  0.2, 0.2, 0.1, 1.0e-2, 1.0e-2, 1.0e-2, 1.0e-2])
 R_HAND = np.diag([0.5, 5.0, 5.0, 5.0])
 
 #: **Reward** weights of (5.4).  A *different object* from the stage cost above:
@@ -1138,26 +1295,47 @@ R_HAND = np.diag([0.5, 5.0, 5.0, 5.0])
 #: scores the closed loop for PPO.  Conflating them is the kind of silent error
 #: §11 exists to catch -- the cost weights are ~100x too small to give the
 #: policy gradient any signal against the omega and du penalties of (5.4).
-Q_REW = np.diag([200.0, 200.0, 200.0, 20.0, 20.0, 20.0, 20.0, 20.0, 10.0])
+#: The rate and rotor blocks are **zero**: (5.4) already prices body rate
+#: separately with its -0.02 ||om||^2 term, and Omega is not a task variable.
+#: Keeping them at zero makes the 17-state reward numerically identical to the
+#: 10-state one, so a reward comparison across the model change is meaningful.
+Q_REW = np.diag([200.0, 200.0, 200.0, 20.0, 20.0, 20.0, 20.0, 20.0, 10.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 R_REW = np.diag([2.0, 2.0, 2.0, 2.0])
 
 
 def _hover_ref():
-    q = jnp.asarray([[1.0, 0.0, 0.0, 0.0]])
-    return (jnp.concatenate([jnp.asarray([[0.0, 0.0, 1.5]]), jnp.zeros((1, 3)), q], -1),
-            jnp.concatenate([jnp.full((1, 1), U_HOVER), jnp.zeros((1, 3))], -1))
+    """The 17-state hover reference and the CTBR command that trims it."""
+    xr = _assemble((1,), NX,
+                   [(0, 3, jnp.asarray([[0.0, 0.0, 1.5]])),
+                    (3, 6, jnp.zeros((1, 3))),
+                    (6, 10, jnp.asarray([[1.0, 0.0, 0.0, 0.0]])),
+                    (10, 13, jnp.zeros((1, 3))),
+                    (13, 17, jnp.full((1, 4), OM_HOVER))], jnp.float64)
+    ur = _assemble((1,), NU, [(0, 1, jnp.full((1, 1), U_HOVER)),
+                              (1, 4, jnp.zeros((1, 3)))], jnp.float64)
+    return xr, ur
 
 
 def lqr_matrices(check=True):
     """(5.6) continuous error-coordinate hover linearisation (A_c, B_c).
 
     **Derived by autodiff of (4.1)+(3.3), not pasted** (C-1, C-2).  The
-    specification's (5.6) carries ``-g*Xi`` in the velocity/attitude block and
-    ``0.5*diag(om_max)`` in the rate block; both are wrong.  With ``delta =
-    2 q_ev`` we have ``z_b ~ e3 + delta x e3``, giving ``+g*Xi``; and
-    ``delta_dot = 2 q_v_dot = om``, giving ``diag(om_max)``.  Using the spec's
-    signs produces an LQR gain whose closed-loop spectral radius on the true
-    plant is 1.18 -- unstable.
+    specification's (5.6) carries ``-g*Xi`` in the velocity/attitude block; that
+    sign is wrong.  With ``delta = 2 q_ev`` we have ``z_b ~ e3 + delta x e3``,
+    giving ``+g*Xi``.  Using the spec's sign produces an LQR gain whose
+    closed-loop spectral radius on the true plant is 1.18 -- unstable.
+
+    C-2 changes shape under the 17-state model.  With omega a STATE, the spec's
+    ``0.5*diag(om_max)`` rate block of B_c is not merely mis-scaled, it is in
+    the wrong matrix: ``delta_dot = om`` is a statement about A_c, and the
+    input reaches attitude only through omega and omega only through Omega.  So
+    **B_c is zero on every row but the rotor block** -- the model is a cascade,
+    and that is the whole content of the change.  The 10-state model's direct
+    ``B[6:9,1:4] = diag(om_max)`` was the statement that the rate loop is
+    infinitely fast; measured against the plant it overstated one-step rate
+    authority by 24x.  The steady-state gains it was standing in for survive and
+    are pinned behaviourally by test_T5b/test_T5c.
     """
     xr, ur = _hover_ref()
     edot = lambda e, u: jax.jvp(
@@ -1165,11 +1343,18 @@ def lqr_matrices(check=True):
     Ac = np.asarray(jax.jacobian(edot, 0)(jnp.zeros((1, NE)), ur))[0, :, 0, :]
     Bc = np.asarray(jax.jacobian(edot, 1)(jnp.zeros((1, NE)), ur))[0, :, 0, :]
     if check:
-        A_ref = np.zeros((NE, NE)); A_ref[0:3, 3:6] = np.eye(3); A_ref[3:6, 6:9] = P.g * XI
-        B_ref = np.zeros((NE, NU)); B_ref[5, 0] = DAZ_DC_HOVER
-        B_ref[6:9, 1:4] = np.diag(OM_MAX)
-        assert np.abs(Ac - A_ref).max() < 1e-9, f"A_c drifted:\n{Ac}"
-        assert np.abs(Bc - B_ref).max() < 1e-9, f"B_c drifted:\n{Bc}"
+        eye3 = np.eye(3)
+        assert np.abs(Ac[0:3, 3:6] - eye3).max() < 1e-9, "A_c: p_dot != v"
+        assert np.abs(Ac[3:6, 6:9] - P.g * XI).max() < 1e-9, \
+            f"A_c: velocity/attitude block is not +g*Xi (C-1):\n{Ac[3:6, 6:9]}"
+        assert np.abs(Ac[6:9, 9:12] - eye3).max() < 1e-9, \
+            f"A_c: delta_dot != om (C-2):\n{Ac[6:9, 9:12]}"
+        # the control model carries no drag, so velocity feeds back nowhere
+        assert np.abs(Ac[3:6, 0:6]).max() < 1e-9, "A_c: unexpected p/v feedback"
+        # the cascade: u touches the state only through the rotor block
+        assert np.abs(Bc[:12, :]).max() < 1e-9, \
+            f"B_c: input reaches a non-rotor state directly:\n{Bc[:12]}"
+        assert np.abs(Bc[12:16, :]).max() > 1e-6, "B_c: rotor block is dead"
     return Ac, Bc
 
 
@@ -1426,7 +1611,7 @@ def obs_norm_update(nrm, batch):
 
 
 def costmap_from_z(z, rep):
-    """Raw head output (B,N,REP_DIM) -> (S (B,N,13,13) PSD, c (B,N,13)).
+    """Raw head output (B,N,REP_DIM) -> (S (B,N,20,20) PSD, c (B,N,20)).
 
     The **single** implementation, shared by training and by inference.  Keeping
     two copies of this map in step is exactly the kind of silent divergence §11
@@ -1457,7 +1642,7 @@ def costmap_from_z(z, rep):
 
 
 def costmap_apply(theta, obs, rep, N):
-    """-> S (B,N,13,13) PSD, c (B,N,13).
+    """-> S (B,N,20,20) PSD, c (B,N,20).
 
     Initialisation asymmetry, recorded because it matters (§5.9): with a
     0.1-scaled zero-bias head, ``chol``/``full`` start at A ~ 0 so S ~ Q_LO*I --
@@ -1512,7 +1697,10 @@ def mpc_layer(obs, e0, xr_seq, theta, cfg, d=None, uref_seq=None, par=None):
 # --------------------------------------------------------------------------- #
 # §5.10  observation and reward
 # --------------------------------------------------------------------------- #
-OBS_DIM = 40
+#: (5.3): e (16) + preview 3 x [p_ref-p, v_ref] (18) + int_ep (3) + du_bar (4)
+#: + ev_bar (3) + om_bar (3).  Was 40 under the 10-state model; the error block
+#: grew by the rate and rotor channels.
+OBS_DIM = 47
 PREVIEW_STRIDE = 5        # control steps -> lookaheads of 0.1 / 0.2 / 0.3 s
 PREVIEW_H = (1, 2, 3)
 EMA_TAU = 0.5             # [s] time constant of the running means in (5.3)
@@ -1525,7 +1713,7 @@ CRASH_Z, MAX_POS_ERR, MAX_RATE = 0.02, 3.0, 25.0
 
 
 def build_obs(e, xr, prev, ep, t, s, oracle=None, hold=False):
-    """(5.3), OBS_DIM = 40, plus 6 when the oracle channel is on.
+    """(5.3), OBS_DIM = 47, plus 6 when the oracle channel is on.
 
     Preview stride is **5 control steps**, i.e. lookaheads 0.1/0.2/0.3 s; it is
     otherwise invisible.  ``prev`` carries the integral and the running means.
@@ -1584,7 +1772,7 @@ class EnvCfg:
     oracle_target: str = "wrench"  # 'wrench' | 'residual'
     mixer: str = "nominal"         # 'nominal' | 'true'
     reward: str = "quad"           # 'quad' | 'prog'
-    dmod_mode: str = "first_order"
+    dmod_mode: str = "exact"
     #: How a terminated vehicle is priced by the value function (G2).
     #:
     #: ``'bootstrap'`` -- the respawn is treated as a TRUNCATION: the value
@@ -1659,7 +1847,7 @@ class Env:
     def __init__(self, n, seed, ep_len, dist, paths, ep_kind=None, noise="off",
                  oracle=False, mixer="nominal", fixed=None, task="track",
                  reward="quad", oracle_target="wrench", scen=None, level=0,
-                 dmod_mode="first_order", term="bootstrap"):
+                 dmod_mode="exact", term="bootstrap"):
         self.cfg = EnvCfg(n=n, ep_len=ep_len, paths=tuple(paths),
                           ep_kind=ep_kind or "sample", task=task, noise=noise,
                           oracle=oracle, oracle_target=oracle_target, mixer=mixer,
@@ -1867,11 +2055,18 @@ def _obs_jit(cfg, state, ep, prev, t, key):
     e = err(plant_to_ctrl(state), xr)
     lv = NOISE_LEVELS[cfg.noise]
     if any(v > 0 for v in lv.values()):
-        ks = jax.random.split(key, 3)
+        ks = jax.random.split(key, 4)
         n = state.shape[0]
+        # NOISE_LEVELS['w'] was declared but unreachable under the 10-state
+        # model, whose error vector had no rate block.  It is a real gyro now.
+        # The rotor block takes NO noise: Omega is not measured, it is
+        # propagated by the controller, so its error carries the observer's
+        # drift rather than a sensor's.
         e = e + jnp.concatenate([lv["p"] * jax.random.normal(ks[0], (n, 3)),
                                  lv["v"] * jax.random.normal(ks[1], (n, 3)),
-                                 lv["q"] * jax.random.normal(ks[2], (n, 3))], -1)
+                                 lv["q"] * jax.random.normal(ks[2], (n, 3)),
+                                 lv["w"] * jax.random.normal(ks[3], (n, 3)),
+                                 jnp.zeros((n, 4))], -1)
     return build_obs(e, xr, prev, ep, t_ref, state, hold=hold), e, xr
 
 
@@ -2160,7 +2355,8 @@ def gae(rew, val, val_last, done, gamma, lam):
     return out[::-1]
 
 
-def mpve_value_loss(critic, obs_n, e_seq, du_seq, om, d_u, gamma):
+def mpve_value_loss(critic, obs_n, e_seq, du_seq, om, d_u, gamma,
+                    xr_seq=None, uref_seq=None, u_prev=None):
     """(8)-(9) Model-Predictive Value Expansion.
 
     The differentiable MPC already produced a predicted trajectory; MPVE prices
@@ -2172,30 +2368,45 @@ def mpve_value_loss(critic, obs_n, e_seq, du_seq, om, d_u, gamma):
     intermediate prediction, which is what aligns the training distribution with
     the prediction distribution.
 
-    **Documented approximation.**  The critic is V(o) over the 40-D observation,
-    while the MPC predicts the 9-D error only.  A predicted observation is
-    therefore built by substituting the predicted error into the first 9 entries
+    **Documented approximation.**  The critic is V(o) over the 47-D observation,
+    while the MPC predicts the 16-D error only.  A predicted observation is
+    therefore built by substituting the predicted error into the first 16 entries
     and holding the preview/integral/history blocks at their current values.
     Over a 20-200 ms horizon those move very little, but this is an
     approximation, not an identity.
 
-    **Second documented approximation (G10).**  ``om`` and ``d_u`` are passed as
-    ZEROS by the caller, because the 10-state control model has no body-rate
-    state and predicts no command increment -- ``e[6:9]`` is the tilt error
-    delta, not omega.  So ``r_hat`` drops the ``-0.02|om|^2`` and
-    ``-0.05|du_u|^2`` terms of (5.4) and is systematically LESS negative than
-    the reward the TD target in ``l_v`` is built from.  Equation (9)'s
-    consistency term therefore regresses V onto targets from a slightly
-    different reward than the one it is being fit to, which biases the critic
-    optimistic in proportion to how hard the policy is working the rates.  Read
-    the MPVE columns of §8.3 with that in mind; the size of the bias is
-    0.02*|om|^2 + 0.05*|du_u|^2 per predicted stage.
+    **G10 is fixed by the 17-state model.**  ``om`` and ``d_u`` used to be passed
+    as ZEROS, because the 10-state model had no body-rate state and predicted no
+    command increment, so ``r_hat`` dropped the ``-0.02|om|^2`` and
+    ``-0.05|d_u|^2`` terms of (5.4) and was systematically LESS negative than the
+    reward the TD target in ``l_v`` is built from -- biasing the critic optimistic
+    in proportion to how hard the policy was working the rates.  Both quantities
+    are available now:
+
+    * ``om`` is ``e[9:12] + om_ref``, and ``om_ref`` is ``xr_seq[..., CW]``;
+    * ``d_u`` is the difference of consecutive absolute commands, and the
+      absolute command at stage k is ``uref_seq[:, k] + du_seq[:, k]``.
+
+    Pass ``xr_seq``/``uref_seq`` (and ``u_prev``, the command applied before the
+    horizon) to get the exact (5.4); the ``om``/``d_u`` arguments are the
+    fallback used when they are not supplied, and are kept so the old
+    zero-substituted behaviour stays reproducible.
     """
     B, N = obs_n.shape[0], du_seq.shape[1]
     sub = lambda e: jnp.concatenate([e, obs_n[:, NE:]], -1)
     zc = jnp.zeros(B)
-    r_hat = jnp.stack([reward_quad(e_seq[:, k + 1], du_seq[:, k], om, d_u, zc)
-                       for k in range(N)], 1)
+    if xr_seq is not None and uref_seq is not None:
+        u_abs = uref_seq + du_seq                                    # (B,N,4)
+        prev = (uref_seq[:, 0] + du_seq[:, 0]) if u_prev is None else u_prev
+        u_lag = jnp.concatenate([prev[:, None], u_abs[:, :-1]], 1)
+        d_u_seq = u_abs - u_lag
+        om_seq = e_seq[:, 1:, 9:12] + xr_seq[:, 1:N + 1, CW]
+        r_hat = jnp.stack([reward_quad(e_seq[:, k + 1], du_seq[:, k],
+                                       om_seq[:, k], d_u_seq[:, k], zc)
+                           for k in range(N)], 1)
+    else:
+        r_hat = jnp.stack([reward_quad(e_seq[:, k + 1], du_seq[:, k], om, d_u, zc)
+                           for k in range(N)], 1)
     V_pred = jnp.stack([mlp_apply(critic, sub(e_seq[:, k]))[:, 0]
                         for k in range(N + 1)], 1)
     loss = 0.0
@@ -2304,10 +2515,11 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
         l_v = jnp.mean((mlp_apply(p["critic"], von)[:, 0] - ret) ** 2)
         if c["mpve"]:                                    # B3: actually used
             e_seq = rollout_err(ee, du, xrs, urs, dd if use_d else None)
-            zb3 = jnp.zeros((ob.shape[0], 3))
+            # G10: om and d_u are real now -- the 17-state model predicts the
+            # body rate, so r_hat is the FULL (5.4) and no longer optimistic.
             l_v = l_v + c["mpve_coef"] * mpve_value_loss(
-                p["critic"], von, e_seq, du, zb3,
-                jnp.zeros((ob.shape[0], NU)), c["gamma"])
+                p["critic"], von, e_seq, du, None, None, c["gamma"],
+                xr_seq=xrs, uref_seq=urs)
         ent = jnp.sum(p["log_sigma"] + 0.5 * np.log(2 * np.pi * np.e))
         loss = l_pi + c["vf_coef"] * l_v - c["ent_coef"] * ent
         kl = jnp.mean(lp_old - lp)

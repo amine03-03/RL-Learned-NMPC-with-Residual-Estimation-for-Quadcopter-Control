@@ -102,8 +102,13 @@ moment — the factor by which the true rate residual differs from (4.13):
 
 So for a *standing* moment — exactly the `asym` payload scenario — the converted
 residual was **≈9× the true one**, and variants B and C fed that into the
-prediction dynamics. `moment_gain(t)` now derives the gain analytically (it
-reproduces the measurements to ~0.02), `wrench_to_dmod` gains a `closed_loop`
+prediction dynamics. **Superseded by the 17-state control model**, which has a
+torque input and therefore an exact image for the moment block
+(`alpha_res = J_nom^-1 tau`); `moment_gain`, `DMOD_SETTLE_S` and the
+`first_order`/`closed_loop` modes are deleted and `DMOD_MODES` is now
+`("exact", "none")`. The text below records what the 10-state model needed.
+`moment_gain(t)` derived the gain analytically (it
+reproduced the measurements to ~0.02), `wrench_to_dmod` gained a `closed_loop`
 mode, and Notebook 5 prints the validity table beside the results.
 
 ## D5 — the helix was inconsistent when the feasibility cap bound
@@ -564,8 +569,14 @@ the `-0.02|om|²` and `-0.05|Δu|²` terms of (5.4) and is systematically less
 negative than the reward the ordinary TD target in `l_v` is built from.
 Equation (9)'s consistency term is therefore regressing `V` onto targets from a
 different reward than the one it is being fitted to, optimistic in proportion to
-how hard the policy is working the rates. Documented in the docstring; no code
-change, because the quantities genuinely are not available in the prediction.
+how hard the policy is working the rates.
+
+**Fixed by the 17-state control model.** Both quantities are available now:
+`om` is `e[9:12] + xr[..., CW]`, and `d_u` is the difference of consecutive
+absolute commands `uref_seq[:, k] + du_seq[:, k]`. `mpve_value_loss` takes
+`xr_seq`/`uref_seq` and prices the **full** (5.4); the zero-substituted path is
+kept only so the old behaviour stays reproducible. See
+[`CONTROL_MODEL_17.md`](CONTROL_MODEL_17.md).
 
 ## What the G-series fixes were verified against
 

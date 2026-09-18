@@ -30,21 +30,57 @@ def test_C1_Ac_sign_and_the_instability_it_causes():
         return np.linalg.solve(X.R_HAND + Bd.T @ Pi @ Bd, Bd.T @ Pi @ Ad)
 
     Ad_t, Bd_t = X.discretise(Ac, Bc)                    # the TRUE plant
+    # C-1 is the sign alone.  (5.6)'s other error, the halved rate block of
+    # B_c, cannot be expressed under the 17-state model: B_c has no attitude
+    # rows at all (the input reaches attitude through omega, and omega through
+    # Omega), which is what test_C2 now pins.
     A_spec = Ac.copy(); A_spec[3:6, 6:9] = -X.P.g * XI
-    B_spec = Bc.copy(); B_spec[6:9, 1:4] = 0.5 * np.diag(X.OM_MAX)
-    rho_spec = np.abs(np.linalg.eigvals(Ad_t - Bd_t @ gain(A_spec, B_spec))).max()
+    rho_spec = np.abs(np.linalg.eigvals(Ad_t - Bd_t @ gain(A_spec, Bc))).max()
     rho_corr = np.abs(np.linalg.eigvals(Ad_t - Bd_t @ gain(Ac, Bc))).max()
     assert rho_spec > 1.0, f"spec gain is stable after all: rho={rho_spec}"
     assert rho_corr < 1.0, f"corrected gain is unstable: rho={rho_corr}"
 
 
-def test_C2_Bc_attitude_block_is_not_halved():
-    """C-2: d delta_dot / d om_bar = diag(om_max), not half of it."""
-    _, Bc = X.lqr_matrices(check=False)
-    assert np.abs(np.diag(Bc[6:9, 1:4]) - np.asarray(X.OM_MAX)).max() < 1e-9
-    assert np.abs(np.diag(Bc[6:9, 1:4]) - 0.5 * np.asarray(X.OM_MAX)).max() > 1.0
-    # (2.11) under the corrected PX4 actuator map (A2): 21.666957, not 25.490538
-    assert abs(Bc[5, 0] - 21.666957) < 1e-4
+def test_C2_the_model_is_a_cascade_not_a_direct_attitude_input():
+    """C-2 under the 17-state model.
+
+    ``delta_dot = om`` is a statement about A_c, and the input reaches nothing
+    but the rotor block directly.  The 10-state model's direct
+    ``B[6:9,1:4] = diag(om_max)`` encoded "the rate loop is infinitely fast",
+    which overstated one-step rate authority against the plant by 24x.
+    """
+    Ac, Bc = X.lqr_matrices(check=False)
+    assert np.abs(Ac[6:9, 9:12] - np.eye(3)).max() < 1e-9, "delta_dot != om"
+    assert np.abs(Bc[:12, :]).max() < 1e-9, "B_c still has a direct block"
+    assert np.abs(Bc[12:16, :]).max() > 1e-6, "B_c's rotor block is dead"
+
+
+def test_C2_steady_state_gains_survive_the_cascade():
+    """The DC gains the old B_c stood in for must still be exact.
+
+    Both are identities, not fits: (2.11) under the corrected PX4 actuator map
+    (A2) is 21.666957, not 25.490538; and the rate loop's steady state is
+    om_max exactly -- which is WHY fc drops K_d along with K_i (keeping K_d
+    alone leaves a 2 % droop, 9.804 rather than 10).
+    """
+    import jax.numpy as jnp
+    par = X.make_par(1)
+    xh, uh = X.plant_to_ctrl(X.hover_state(1, par=par)), X.hover_u(1, par=par)
+
+    def settle(u, n=400):
+        x = xh
+        for _ in range(n):
+            x = X.step_c(x, u)
+        return x
+
+    eps = 1e-5
+    up, um = uh.at[:, 0].add(eps), uh.at[:, 0].add(-eps)
+    daz = float((X.fc(settle(up), up)[0, 5] - X.fc(settle(um), um)[0, 5]) / (2 * eps))
+    assert abs(daz - X.DAZ_DC_HOVER) < 1e-4, f"d a_z/d c = {daz}"
+    assert abs(daz - 21.666957) < 1e-4
+    up, um = uh.at[:, 1].add(eps), uh.at[:, 1].add(-eps)
+    dom = float((settle(up)[0, 10] - settle(um)[0, 10]) / (2 * eps))
+    assert abs(dom - X.OM_MAX[0]) < 1e-6, f"d om_x/d u_roll = {dom}, want 10"
 
 
 def test_C3_slung_tension_sign():
@@ -97,13 +133,14 @@ def test_C5_sign_flipped_u_prime_gives_6p86_not_4p65():
 def test_N1_closed_form_equals_the_arcsin_form():
     """N-1: the two forms of (4.2) agree, but only one is differentiable at 0."""
     rng = np.random.default_rng(1)
-    xr = jnp.asarray([[0.0, 0.0, 1.5, 0, 0, 0, 1.0, 0, 0, 0]])
+    xr = jnp.asarray([[0.0, 0.0, 1.5, 0, 0, 0, 1.0, 0, 0, 0, 0, 0, 0]
+                      + [float(X.OM_HOVER)] * 4])
     worst = 0.0
     for _ in range(300):
         ax = rng.normal(size=3); ax /= np.linalg.norm(ax)
         th = rng.uniform(1e-6, np.deg2rad(150))
         dlt = 2 * np.sin(th / 2) * ax
-        e = jnp.zeros((1, 9)).at[0, 6:9].set(jnp.asarray(dlt))
+        e = jnp.zeros((1, X.NE)).at[0, 6:9].set(jnp.asarray(dlt))
         n = float(np.linalg.norm(dlt))
         ang = 2 * np.arcsin(min(n / 2, 1.0))
         q_arcsin = np.r_[np.cos(ang / 2), dlt / n * np.sin(ang / 2)]

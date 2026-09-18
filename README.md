@@ -12,6 +12,27 @@ computable, so it is learned. That is the whole project.
 
 ---
 
+## The control model is now 17 states
+
+`x = [p(3) | v(3) | q(4) | om(3) | Omega(4)]`, `NX = 17`, `NE = 16`. It was
+`[p, v, q]` with `NX = 10`, which assumed the rate loop was infinitely fast and
+the actuator instantaneous. Measured against the 23-state plant on a **nominal**
+plant with no wind — so every number is structural model error, not disturbance:
+
+- one-step attitude prediction error **0.812° → 0.0029°**, 10 steps **5.67° → 0.31°**;
+- the old (4.9) rate residual was **97 % of the body rate itself** on a plant with
+  nothing wrong with it, and (4.13)'s image of the wrench was **69–103× smaller**
+  than the model error it was meant to cancel. Objects (a) and (b) of §4.3 now
+  agree to a ratio of **1.000**;
+- the old model over-claimed one-step rate authority by **24×**.
+
+The CTBR interface, the plant, the mixer and the RDP are unchanged.
+[`docs/CONTROL_MODEL_17.md`](docs/CONTROL_MODEL_17.md) has the derivation, the
+measurements, what was deliberately left out, and **what must be re-run** —
+every AC-MPC checkpoint and every CSV in `artifacts/` predates this change.
+
+---
+
 ## Read this first: two rounds of corrections
 
 Two independent passes, both recorded with the measurements that drove them:
@@ -85,6 +106,7 @@ artifacts/                 every CSV, figure and checkpoint the notebooks write
 docs/CORRECTIONS.md        the eight specification corrections
 docs/AUDIT.md              the audit against PX4 and the two source papers
 docs/ROS2_WORKSPACE.md     what is in the workspace, why, and what is not flown
+docs/CONTROL_MODEL_17.md   the 17-state control model: why, and what it invalidates
 ```
 
 [`docs/ROS2_WORKSPACE.md`](docs/ROS2_WORKSPACE.md) covers the deployment half in

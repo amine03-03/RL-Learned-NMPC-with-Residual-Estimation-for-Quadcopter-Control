@@ -52,11 +52,13 @@ CFG = dict(N=1, rep="diag", n_iter=S.CFG["ilqr"], n_diff=2, hid=S.CFG["hid"],
 ITERS = S.CFG["iters_sweep"]
 S2 = M.moderate(S.disturbed_spec(), wind=(0.0, 2.0))
 H = A.H_DEFAULT                      # 64, aligned with the paper (C5)
-#: How (4.13) converts the moment block.  It neglects K_i, so a standing moment
-#: the integrator has absorbed is overstated; 'closed_loop' scales it by
-#: moment_gain(DMOD_SETTLE_S).  Defined here rather than beside its first use
-#: because section 2.5 measures all three modes against the true residual.
-DMOD_MODE = "closed_loop"
+#: How (4.12) converts the moment block.  Under the 17-state control model the
+#: conversion is EXACT -- the model has a torque input, so tau maps to angular
+#: acceleration by J_nom^-1 -- and 'none' survives only as an ablation.  The
+#: 10-state model's (4.13), and its 'first_order'/'closed_loop' modes, are gone:
+#: section 2.5 below now measures om_ratio ~ 1 rather than the 69-103x shortfall
+#: (4.13) carried.
+DMOD_MODE = "exact"
 
 # %% [markdown]
 # ## Precondition gate — checked before any closed-loop number is read
@@ -338,14 +340,15 @@ for scen, lvl in (("central", 0.15), ("asym", 0.01), ("asym", 0.07)):
                          om_ratio=float(np.linalg.norm(conv[3:])
                                         / max(np.linalg.norm(truth[3:]), 1e-9))))
 DV = pd.DataFrame(rows)
-S.table(DV, "(4.13) conversion against the true residual (4.9)",
-        note="om_ratio = 1 would mean the conversion is exact; the force block "
-             "converts exactly by 1/m, the moment block does not",
+S.table(DV, "(4.12) conversion against the true residual (4.9)",
+        note="om_ratio = 1 means the conversion is exact.  Under the 17-state "
+             "model BOTH blocks convert exactly: F/m and J_nom^-1 tau",
         csv=("acmpc_adaptive", "nb5_dmod_validity.csv"))
-print(f"\n  The force block converts exactly (a_res = F/m).  The moment block is a")
-print(f"  MODEL: 'first_order' is (4.13) verbatim and is the t -> 0 limit, so on a")
-print(f"  standing moment it overstates the rate residual; 'closed_loop' scales it")
-print(f"  by moment_gain({X.DMOD_SETTLE_S}) = {np.round(X.moment_gain(X.DMOD_SETTLE_S),3)}.")
+print(f"\n  Both blocks convert exactly: a_res = F/m_nom and alpha_res = J_nom^-1 tau.")
+print(f"  Under the 10-state model the moment block had no exact image -- (4.13)")
+print(f"  approximated it by the rate loop's steady state with K_i neglected, which")
+print(f"  measured 69-103x SMALLER than the (4.9) residual it was meant to cancel.")
+print(f"  The 17-state model has a torque input, so om_ratio should now read ~1.")
 print(f"  The model path below uses mode={DMOD_MODE!r}.")
 
 # and the observation channel can carry either object

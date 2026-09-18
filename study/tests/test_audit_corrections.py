@@ -107,17 +107,30 @@ def test_D7_no_saturation_at_trim():
 # --------------------------------------------------------------------------- #
 # D3/D5. (4.13) validity, and the helix
 # --------------------------------------------------------------------------- #
-def test_D3_moment_gain_matches_the_plant():
-    """moment_gain(t) must reproduce the measured closed-loop response."""
-    assert abs(X.moment_gain(0.3)[0] - 0.939) < 0.02
-    assert abs(X.moment_gain(8.0)[0] - 0.101) < 0.02     # NOT 1.0 -- (4.13) is a
-    assert X.moment_gain(30.0)[0] < 0.01                 # short-transient model
-    w = jnp.asarray([[0.0, 0, 0, 0.3452, 0, 0]])
-    fo = float(X.wrench_to_dmod(w, "first_order")[0, 3])
-    cl = float(X.wrench_to_dmod(w, "closed_loop")[0, 3])
-    assert abs(fo - 1.0347) < 1e-3
-    assert abs(cl / fo - X.moment_gain(X.DMOD_SETTLE_S)[0]) < 1e-9
+def test_D3_moment_conversion_is_exact_under_the_17_state_model():
+    """(4.13) is gone: the moment block has an exact image now.
+
+    The 10-state model had no torque input, so a wrench's moment could only be
+    approximated by the rate loop's steady state with K_i neglected -- which
+    measured 69-103x SMALLER than the (4.9) residual it was meant to cancel.
+    With omega a state the conversion is alpha_res = J_nom^-1 tau, and that is
+    EXACTLY the angular acceleration the plant shows at the instant the moment
+    is applied.
+    """
+    assert X.DMOD_MODES == ("exact", "none")
+    assert not hasattr(X, "moment_gain"), "moment_gain should be gone"
+    assert not hasattr(X, "DMOD_SETTLE_S"), "DMOD_SETTLE_S should be gone"
+    tau = 0.15
+    w = jnp.asarray([[0.0, 0, 0, tau, 0, 0]])
+    predicted = float(X.wrench_to_dmod(w)[0, 3])
+    assert abs(predicted - tau / X.J_NOM[0, 0]) < 1e-12
+    # against the plant, at t = 0, before the rate loop has responded
+    par = X.par_set_wrench(X.make_par(1), w)
+    sdot = X.fp(X.hover_state(1, par=par), X.hover_u(1, par=par), par)
+    assert abs(float(sdot[0, X.SW][0]) - predicted) < 1e-9
     assert float(X.wrench_to_dmod(w, "none")[0, 3]) == 0.0
+    with pytest.raises(ValueError):
+        X.wrench_to_dmod(w, "first_order")
 
 
 @pytest.mark.parametrize("R,spd", [(2.0, 6.5), (0.5, 6.5), (1.0, 1.5)])
@@ -362,16 +375,23 @@ def test_D8_assemble_matches_concatenate():
         assert float(jnp.abs(got - want).max()) == 0.0
 
 
-def test_D8_fc_and_step_c_unchanged_numerically():
-    """Pin the values the rewrite must reproduce (regression, not derivation)."""
+def test_D8_fc_and_step_c_are_well_formed():
+    """fc/step_c must stay finite and keep their invariants on random states."""
     rng = np.random.default_rng(7)
-    x = jnp.asarray(rng.normal(size=(8, 10)))
-    x = x.at[..., 6:10].set(X.qnorm(x[..., 6:10]))
+    x = jnp.asarray(np.c_[rng.normal(size=(8, 6)), rng.normal(size=(8, 4)),
+                          rng.normal(size=(8, 3)),
+                          rng.uniform(X.P.Om_min, X.P.Om_max, size=(8, 4))])
+    x = x.at[..., X.CQ].set(X.qnorm(x[..., X.CQ]))
     u = jnp.asarray(rng.uniform(0.1, 0.9, size=(8, 4)))
     d = jnp.asarray(rng.normal(size=(8, 6)) * 0.1)
     f, sc = X.fc(x, u, d), X.step_c(x, u, d)
-    assert f.shape == (8, 10) and sc.shape == (8, 10)
+    assert f.shape == (8, X.NX) and sc.shape == (8, X.NX)
     assert bool(jnp.all(jnp.isfinite(f))) and bool(jnp.all(jnp.isfinite(sc)))
-    # step_c must leave a unit quaternion
-    n = jnp.linalg.norm(sc[..., 6:10], axis=-1)
+    # step_c must leave a unit quaternion and physical rotor speeds
+    n = jnp.linalg.norm(sc[..., X.CQ], axis=-1)
     assert float(jnp.abs(n - 1.0).max()) < 1e-12
+    assert float(sc[..., X.CO].min()) >= 0.0
+    assert float(sc[..., X.CO].max()) <= X.P.Om_max + 1e-9
+    # the gradient must survive the rotor clamp and the sqrt in the allocator
+    g = jax.jacobian(lambda uu: X.step_c(x, uu))(u)
+    assert bool(jnp.all(jnp.isfinite(g))), "step_c has a non-finite Jacobian in u"

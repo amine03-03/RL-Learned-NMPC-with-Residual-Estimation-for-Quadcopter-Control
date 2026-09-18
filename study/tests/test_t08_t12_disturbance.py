@@ -82,29 +82,43 @@ def test_T10_dmod_vs_d_channel():
     w = jnp.asarray([[6.478, 0.0, 0.0, 0.0, 0.0, 0.0]])
     assert abs(float(w[0, 0]) - 6.478) < 1e-6
     assert abs(float(X.wrench_to_dmod(w)[0, 0]) - 3.138) < 1e-3
+    # the moment block is now an ANGULAR ACCELERATION, J_nom^-1 tau, not the
+    # (4.13) rate surrogate the 10-state model needed
     w2 = jnp.asarray([[0.0, 0.0, 0.0, 0.3452, 0.0, 0.0]])
-    assert abs(float(X.wrench_to_dmod(w2)[0, 3]) - 1.035) < 1e-3
+    assert abs(float(X.wrench_to_dmod(w2)[0, 3]) - 0.3452 / X.J_NOM[0, 0]) < 1e-9
     assert float(jnp.abs(X.wrench_to_dmod(w2, "none")[:, 3:]).max()) == 0.0
     # the §4.4 worked example, recomputed
     assert abs(0.32 * X.M_TOT * X.P.g - 6.478) < 1e-3
     assert abs(0.098 * X.M_TOT * X.P.g * 0.174 - 0.3452) < 1e-3
 
 
-def test_T11_first_order_rate_model():
-    """T-11: (4.13) against a measured plant response to a constant moment.
+@pytest.mark.parametrize("kw", [
+    dict(wrench_body=[[6.478, 0, 0, 0, 0, 0]]),
+    dict(wrench_body=[[0, 0, 0, 0.3452, 0, 0]]),
+    dict(payload_m=0.4, payload_r=[[0.174, 0.0, 0.0]]),
+])
+def test_T11_residual_objects_a_and_b_agree(kw):
+    """T-11: objects (a) and (b) of §4.3 are two views of the SAME disturbance.
 
-    It is a *model*, not an identity -- the acceptance is a factor of 2.
+    (a) is ``true_disturbance``, what ``fc`` is actually wrong by; (b) is the
+    physical wrench the RDP predicts, converted by ``wrench_to_dmod``.  Under
+    the 10-state model these disagreed by 69-103x, because (a)'s moment block
+    was dominated by the rate loop's own tracking transient, which the model
+    could not represent.  Under the 17-state model they must coincide.
     """
-    tau = 0.15
-    par = X.par_set_wrench(X.make_par(1), jnp.asarray([[0., 0, 0, tau, 0, 0]]))
-    s = X.hover_state(1, par=par)
-    u = X.hover_u(1, par=par)
-    for _ in range(15):                      # ~4 x the 71 ms rate time constant
+    par = X.make_par(1, **kw)
+    s, u = X.hover_state(1, par=par), X.hover_u(1, par=par)
+    for _ in range(40):
         s = X.step_p(s, u, par)
-    measured = float(s[0, X.SW][0])
-    predicted = float(X.wrench_to_dmod(jnp.asarray([[0., 0, 0, tau, 0, 0]]))[0, 3])
-    ratio = measured / predicted
-    assert 0.5 < ratio < 2.0, f"(4.13) off by {ratio:.2f}x: {measured} vs {predicted}"
+    sdot = X.fp(s, u, par)
+    a = np.asarray(X.true_disturbance(s, u, par, sdot=sdot))[0]
+    b = np.asarray(X.wrench_to_dmod(X.external_wrench(s, u, par, sdot=sdot)))[0]
+    for lo, hi, what in ((0, 3, "force"), (3, 6, "moment")):
+        na, nb = np.linalg.norm(a[lo:hi]), np.linalg.norm(b[lo:hi])
+        if max(na, nb) < 1e-6:
+            continue                         # nothing to compare in this block
+        assert abs(nb / na - 1.0) < 1e-3, \
+            f"{what}: (a)={na:.6f} but (b)={nb:.6f}, ratio {nb / na:.4f}"
 
 
 def test_T12_mixer_nominal_vs_true():

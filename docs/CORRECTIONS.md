@@ -54,6 +54,18 @@ factor 2 in the definition of `δ`.
 
 **Implemented:** `diag(ω_max)`. Same test.
 
+**Restated under the 17-state control model.** `δ̇ = ω` is now a statement about
+`A_c`, not `B_c`: `ω` is a state, so the input reaches attitude only through it,
+and `ω` only through `Ω`. `B_c` is therefore **zero on every row but the rotor
+block** — the model is a cascade. The spec's `½·diag(ω_max)` is not merely
+mis-scaled any more, it is in the wrong matrix; and the 10-state model's direct
+`B[6:9,1:4] = diag(ω_max)` was the assertion that the rate loop is infinitely
+fast, which measured a 24× over-claim of one-step rate authority against the
+plant. The DC gain it stood in for survives exactly (`∂ω_ss/∂ū = diag(ω_max)`,
+and `∂a_z/∂c = 21.666957`) and is pinned behaviourally by
+`test_C2_steady_state_gains_survive_the_cascade`. See
+[`CONTROL_MODEL_17.md`](CONTROL_MODEL_17.md).
+
 > C-1 and C-2 are the only two places in the spec where the `2` of
 > `e₇..₉ = 2·sgn(q_w)·q_v` was dropped; everything else in §4–§5 is consistent
 > with it.

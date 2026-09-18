@@ -15,14 +15,46 @@ def _rand_q(rng, max_deg):
     return np.r_[np.cos(th / 2), ax * np.sin(th / 2)]
 
 
+def _rand_x(rng, n):
+    """A batch of valid 17-state control states: [p, v, q, om, Omega]."""
+    return np.array([np.r_[rng.normal(size=6), _rand_q(rng, 150),
+                           rng.normal(size=3),
+                           rng.uniform(X.P.Om_min, X.P.Om_max, size=4)]
+                     for _ in range(n)])
+
+
 def test_T3_error_round_trip():
     """T-3: err(e_to_state(err(x,xr),xr),xr) for 1000 attitudes to 150 deg."""
     rng = np.random.default_rng(3)
-    xs = np.array([np.r_[rng.normal(size=6), _rand_q(rng, 150)] for _ in range(1000)])
-    xrs = np.array([np.r_[rng.normal(size=6), _rand_q(rng, 150)] for _ in range(1000)])
-    x, xr = jnp.asarray(xs), jnp.asarray(xrs)
+    x, xr = jnp.asarray(_rand_x(rng, 1000)), jnp.asarray(_rand_x(rng, 1000))
     e = X.err(x, xr)
+    assert e.shape[1] == X.NE == 16
     assert float(jnp.abs(X.err(X.e_to_state(e, xr), xr) - e).max()) < 1e-9
+    # and the other direction.  The attitude block only reconstructs q up to
+    # SIGN -- err takes the shorter rotation, and q and -q are the same
+    # rotation -- so compare attitudes by angle, not by components.  Every
+    # other block, including the rate and rotor ones that OM_SCALE passes
+    # through, must come back bit-for-bit.
+    back = X.e_to_state(e, xr)
+    for sl, name in ((X.CP, "p"), (X.CV, "v"), (X.CW, "om"), (X.CO, "Omega")):
+        assert float(jnp.abs(back[:, sl] - x[:, sl]).max()) < 1e-9, name
+    qe = X.qmul(X.qconj(back[:, X.CQ]), x[:, X.CQ])
+    ang = 2 * jnp.arctan2(jnp.linalg.norm(qe[:, 1:4], axis=-1), jnp.abs(qe[:, 0]))
+    assert float(jnp.abs(ang).max()) < 1e-9, "attitude not recovered"
+
+
+def test_T3_om_scale_is_a_pure_change_of_coordinates():
+    """OM_SCALE must cancel between err and e_to_state, whatever its value."""
+    rng = np.random.default_rng(31)
+    x, xr = jnp.asarray(_rand_x(rng, 64)), jnp.asarray(_rand_x(rng, 64))
+    dOm = (x[:, X.CO] - xr[:, X.CO]) / X.OM_SCALE
+    assert float(jnp.abs(X.err(x, xr)[:, 12:16] - dOm).max()) < 1e-12
+
+
+def _hover_xr():
+    """The 17-state hover reference used by the geometry tests."""
+    return jnp.asarray([[0., 0, 1.5, 0, 0, 0, 1., 0, 0, 0, 0, 0, 0]
+                        + [float(X.OM_HOVER)] * 4])
 
 
 def test_T3_shortcut_is_not_used():
@@ -30,8 +62,8 @@ def test_T3_shortcut_is_not_used():
     must not be using it."""
     for deg in (60.0, 120.0):
         th = np.deg2rad(deg)
-        e = jnp.zeros((1, 9)).at[0, 6].set(2 * np.sin(th / 2))
-        xr = jnp.asarray([[0., 0, 1.5, 0, 0, 0, 1., 0, 0, 0]])
+        e = jnp.zeros((1, X.NE)).at[0, 6].set(2 * np.sin(th / 2))
+        xr = _hover_xr()
         q = X.e_to_state(e, xr)[0, 6:10]
         ang = 2 * np.arcsin(min(1.0, float(jnp.linalg.norm(q[1:]))))
         assert abs(np.rad2deg(ang) - deg) < 1e-6, f"{deg}: got {np.rad2deg(ang)}"
@@ -40,8 +72,8 @@ def test_T3_shortcut_is_not_used():
 def test_T3_gradient_is_finite_at_zero_error():
     """N-1: the spec's form of (4.2) divides by ||delta||; its gradient at zero
     error is NaN -- and zero error is exactly where the iLQR linearises."""
-    xr = jnp.asarray([[0., 0, 1.5, 0, 0, 0, 1., 0, 0, 0]])
-    g = jax.jacobian(lambda e: X.e_to_state(e, xr))(jnp.zeros((1, 9)))
+    xr = _hover_xr()
+    g = jax.jacobian(lambda e: X.e_to_state(e, xr))(jnp.zeros((1, X.NE)))
     assert bool(jnp.all(jnp.isfinite(g))), "e_to_state has a non-finite Jacobian at e=0"
 
 
@@ -97,9 +129,10 @@ def test_T6_edyn_matches_step_c_then_err():
     """T-6: edyn == err(step_c(e_to_state(.)), xr_next) to 1e-9."""
     rng = np.random.default_rng(6)
     B = 8
-    e = jnp.asarray(rng.normal(size=(B, 9)) * 0.2)
-    xr = jnp.asarray(np.c_[rng.normal(size=(B, 6)), np.tile([1., 0, 0, 0], (B, 1))])
-    xr = jnp.concatenate([xr[:, :6], X.qnorm(xr[:, 6:10])], -1)
+    e = jnp.asarray(rng.normal(size=(B, X.NE)) * 0.2)
+    xr = jnp.asarray(np.c_[rng.normal(size=(B, 6)), np.tile([1., 0, 0, 0], (B, 1)),
+                           np.zeros((B, 3)), np.full((B, 4), X.OM_HOVER)])
+    xr = xr.at[:, X.CQ].set(X.qnorm(xr[:, X.CQ]))
     xrn = xr
     du = jnp.asarray(rng.normal(size=(B, 4)) * 0.05)
     ur = jnp.zeros((B, 4)).at[:, 0].set(X.U_HOVER)
@@ -134,17 +167,19 @@ def test_T7_lin_traj_vs_finite_difference(at_boundary):
     """
     rng = np.random.default_rng(7)
     B, k = 4, 0
-    e0 = jnp.asarray(rng.normal(size=(B, 9)) * 0.2)
-    xr_seq = jnp.broadcast_to(jnp.asarray([0., 0, 1.5, 0, 0, 0, 1., 0, 0, 0]), (B, 3, 10))
+    e0 = jnp.asarray(rng.normal(size=(B, X.NE)) * 0.2)
+    xr_seq = jnp.broadcast_to(
+        jnp.asarray([0., 0, 1.5, 0, 0, 0, 1., 0, 0, 0, 0, 0, 0]
+                    + [float(X.OM_HOVER)] * 4), (B, 3, X.NX))
     ur = jnp.broadcast_to(jnp.asarray([X.U_HOVER, 0., 0., 0.]), (B, 2, 4))
     du = (jnp.zeros((B, 2, 4)).at[:, :, 0].set(1.0 - X.U_HOVER) if at_boundary
           else jnp.zeros((B, 2, 4)) + 0.05)
     A, Bm = X.lin_traj(e0, du, xr_seq, None, None, ur)
     f = lambda ee, dd: X.edyn(ee, dd, xr_seq[:, k], xr_seq[:, k + 1], None, None, ur[:, k])
     h = 1e-6
-    Afd = np.zeros((B, 9, 9))
-    Bfd = np.zeros((B, 9, 4))
-    for j in range(9):
+    Afd = np.zeros((B, X.NE, X.NE))
+    Bfd = np.zeros((B, X.NE, 4))
+    for j in range(X.NE):
         Afd[:, :, j] = (f(e0.at[:, j].add(h), du[:, k])
                         - f(e0.at[:, j].add(-h), du[:, k])) / (2 * h)
     hi = np.asarray(X.U_HI) - np.asarray(ur)[0, k]

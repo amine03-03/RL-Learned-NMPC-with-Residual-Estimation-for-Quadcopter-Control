@@ -12,6 +12,7 @@ import sys
 import numpy as np
 
 from . import frames as F
+from . import refgen as RG
 from .controller import ACMPCController
 
 
@@ -77,7 +78,11 @@ def main(args=None):                                       # pragma: no cover
             p = F.ned_to_enu_vec(np.asarray(m.position, float))
             v = F.ned_to_enu_vec(np.asarray(m.velocity, float))
             q = F.px4_quat_to_enu_flu(np.asarray(m.q, float))
-            self.state = np.concatenate([p, v, q])
+            # the 17-state control model needs the body rate; PX4 publishes it
+            # in FRD on the same message.  Omega is NOT published and is
+            # estimated inside ACMPCController.
+            om = F.frd_to_flu_vec(np.asarray(m.angular_velocity, float))
+            self.state = np.concatenate([p, v, q, om])
 
         def on_d(self, m):
             self.d_hat = np.array([m.wrench.force.x, m.wrench.force.y,
@@ -93,22 +98,16 @@ def main(args=None):                                       # pragma: no cover
             g = lambda k: self.get_parameter(k).value
             N = int(g("horizon"))
             dt = 1.0 / float(g("rate_hz"))
-            xr, ur = [], []
-            for k in range(N + 1):
-                p, v, a = L.lissajous(t + k * dt, g("A"), g("B"), g("omega"), g("z0"))
-                zb = a[0] + np.array([0, 0, 9.8066])
-                nz = np.linalg.norm(zb)
-                ax = np.cross([0, 0, 1.0], zb / nz)
-                ang = np.arccos(np.clip(zb[2] / nz, -1, 1))
-                s = np.linalg.norm(ax)
-                qr = (np.array([1.0, 0, 0, 0]) if s < 1e-12 else
-                      np.concatenate([[np.cos(ang / 2)], ax / s * np.sin(ang / 2)]))
-                xr.append(np.concatenate([p[0], v[0], qr]))
-                if k < N:
-                    ur.append(np.array([np.sqrt(min(2.0643076923076924 * nz
-                                                    / 34.19432, 1.0)), 0, 0, 0]))
-            u, info = self.ctrl.step(self.state, np.array(xr), np.array(ur),
-                                     d_hat=self.d_hat)
+            # (p, v, a) of the flown path at an arbitrary time -- refgen takes
+            # the derivatives it needs (om_ref, om_dot_ref, Omega_ref) from this
+            # by the same centred differences the study's ref_state uses, so the
+            # node and the study cannot drift apart on the reference.
+            def pva(tau, _g=g):
+                p, v, a = L.lissajous(tau, _g("A"), _g("B"), _g("omega"), _g("z0"))
+                return p[0], v[0], a[0]
+
+            xr, ur = RG.ref_traj(pva, t, N, dt)
+            u, info = self.ctrl.step(self.state, xr, ur, d_hat=self.d_hat)
             om = F.ctbr_to_px4_rates(u[1:4] * np.array([10.0, 10.0, 4.0]))
             mm = OffboardControlMode()
             mm.timestamp = int(now * 1e6); mm.body_rate = True

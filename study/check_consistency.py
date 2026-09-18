@@ -131,6 +131,12 @@ def check_internal():
     _chk("arm length", float(abs(X.R_ROTOR[0, 0])), 0.174)
     _chk("wrench->dmod force = 1/m", float(X.wrench_to_dmod(
         np.asarray([[1.0, 0, 0, 0, 0, 0]]))[0, 0]), 1.0 / X.M_TOT)
+    # the moment block is EXACT under the 17-state model: J_nom^-1 tau, not the
+    # (4.13) rate surrogate the 10-state model needed
+    _chk("wrench->dmod moment = J^-1", float(X.wrench_to_dmod(
+        np.asarray([[0, 0, 0, 1.0, 0, 0]]))[0, 3]), 1.0 / X.J_NOM[0, 0])
+    _chk("control state is 17", X.NX, 17, 0)
+    _chk("error state is 16", X.NE, 16, 0)
     # (4.9) and (4.10) must agree on the nominal plant: both identically zero
     par = X.make_par(2)
     s, u = X.hover_state(2, par=par), X.hover_u(2, par=par)

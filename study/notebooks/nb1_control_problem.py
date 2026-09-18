@@ -70,9 +70,28 @@ rows = [
 par = X.make_par(1)
 s_h, u_h = X.hover_state(1, par=par), X.hover_u(1, par=par)
 h = 1e-6
-fd = float((X.fc(X.plant_to_ctrl(s_h), u_h.at[:, 0].add(h))[0, 5]
-            - X.fc(X.plant_to_ctrl(s_h), u_h.at[:, 0].add(-h))[0, 5]) / (2 * h))
-rows.append(("T-5 d a_z/d c (finite diff)", fd, 21.666957))
+
+
+def _settle(u, n=400):
+    """Run the control model to the rotor steady state for the command u.
+
+    Under the 17-state model the collective does not reach acceleration
+    directly -- thrust is sum K_T Omega^2 and u only moves Omega_cmd -- so
+    (2.11) is the STEADY-STATE gain, not an instantaneous derivative.
+    """
+    x = X.plant_to_ctrl(s_h)
+    for _ in range(n):
+        x = X.step_c(x, u)
+    return x
+
+
+_up, _um = u_h.at[:, 0].add(h), u_h.at[:, 0].add(-h)
+fd = float((X.fc(_settle(_up), _up)[0, 5] - X.fc(_settle(_um), _um)[0, 5]) / (2 * h))
+rows.append(("T-5 d a_z/d c (steady state)", fd, 21.666957))
+_rp, _rm = u_h.at[:, 1].add(h), u_h.at[:, 1].add(-h)
+rows.append(("T-5b d om_x/d u_roll (steady state)",
+             float((_settle(_rp)[0, 10] - _settle(_rm)[0, 10]) / (2 * h)),
+             float(X.OM_MAX[0])))
 rows.append(("T-8 |residual| on nominal plant",
              float(jnp.abs(X.true_disturbance(s_h, u_h, par)).max()), 0.0))
 rows.append(("T-8 |wrench| on nominal plant",
