@@ -80,13 +80,17 @@ V1 = np.asarray(J - l0)
 # terminal-set reach: the error radius at which the terminal quadratic still
 # describes the realised cost-to-go
 REACH = float(np.sqrt(2.0 * np.median(V1) / max(float(X.P_RIC[0, 0]), 1e-9)))
-# G7: a REAL gate.  `V1 < percentile(V1, 95)` accepts 95 % of anything, so the
-# "acceptance" column was 0.9492 in every row of every sensitivity slice by
-# construction -- a tautology printed as a diagnostic.  Accept a candidate when
-# its realised cost-to-go is finite, positive and inside the terminal set the
-# quadratic is supposed to describe.
-keep = np.isfinite(V1) & (V1 > 0.0) & (
-    np.linalg.norm(np.asarray(e_seq[:, 1])[:, 0:3], axis=-1) <= 2.0 * REACH)
+# G7b: the gate must NOT depend on the candidate draw.  G7 filtered on
+# ||e1|| <= 2*REACH while REACH is itself sqrt(2*median(V1)/P_00) -- computed
+# from the very candidates being filtered.  Adding the decade sampling dropped
+# the median, REACH fell 0.556 -> 0.086 m, the gate then kept only the
+# small-error candidates, and that fit was deployed against a seeded 0.5 m
+# offset: LLTC went 0.41 -> 1.22 m, horizon equivalence 7.5x -> 23.7x, and the
+# clip diverged to 35.6 m.  It INVERTED the original defect (fit large, deploy
+# small) instead of removing it.  A realised cost-to-go that is finite and
+# positive is a real criterion and is all that is needed; REACH stays a
+# reported diagnostic, never a filter.
+keep = np.isfinite(V1) & (V1 > 0.0)
 accept = float(keep.mean())
 # G7: fit the object the CONTROLLER evaluates.  V1 is the cost-to-go from
 # e_1, and `make_lltc_ctrl` scores 0.5 e_1' P(e_0) e_1 as the terminal cost of
@@ -271,12 +275,9 @@ for qs in (0.25, 0.5, 1.0, 2.0, 4.0):
     esq = X.rollout_err(cand, duq, xr_seq, uref_seq)
     Jq = np.asarray(X.traj_cost(esq, duq, Sm_q, cm_q,
                                 jnp.broadcast_to(jnp.asarray(Pi), (B, X.NE, X.NE))))
-    # G7: the same real gate as the fit above.  A 95th-percentile cut accepts
-    # 95 % of any input, so this column used to read 0.9492 for every Q_scale --
-    # a constant printed beside `reach_m` as though it responded to it.
-    acc_q = float((np.isfinite(Jq) & (Jq > 0.0)
-                   & (np.linalg.norm(np.asarray(esq[:, 1])[:, 0:3], axis=-1)
-                      <= 2.0 * reach_q)).mean())
+    # G7b: same gate as the fit -- finite and positive, never filtered on a
+    # radius derived from the candidates themselves.
+    acc_q = float((np.isfinite(Jq) & (Jq > 0.0)).mean())
     rowsQ.append(dict(Q_scale=qs, P_00=float(Pi[0, 0]), reach_m=reach_q,
                       acceptance=acc_q))
 QS = pd.DataFrame(rowsQ)
