@@ -1473,9 +1473,24 @@ def costmap_apply(theta, obs, rep, N):
 def costmap_init(key, obs_dim, hid, rep, N, n_layer=2, normalise=True):
     """Cost map: trunk -> head producing the Q and p blocks for all N stages."""
     k1, k2 = jax.random.split(key, 2)
+    # G15: the head scale must go as 1/sqrt(fan_in).  With a flat 0.1 on a
+    # 256-wide trunk, z = sum_i h_i W_ij has std = 0.1*sqrt(hid)*rms(h) ~ 1.0,
+    # and under the FIVE-DECADE log map of C-7 that is not a small
+    # perturbation: sigmoid(+-3) sends S_ii to 0.017 and 590, a spread of
+    # 3.5e4 BEFORE any learning.  Measured: costmap_init('diag') flown as a
+    # controller reads 0.856 m at sat 0.276, while a fixed uniform S = 3.16 --
+    # the value the initialisation is *described* as having, and its median
+    # (3.39) -- reads 0.069 m at sat 0.000, indistinguishable from the
+    # hand-tuned NMPC baseline's 0.068 m.  The spread is the entire gap.
+    # It also worsens with width (hid=1024 at `full` gives std(z) ~ 2), which
+    # is why more capacity never helped.  The same std(z) ~ 1 put the linear
+    # term at |c| ~ 1.25 against P_HI = 2.0, i.e. 62 % of its bound at init,
+    # which dominates any channel whose weight landed near Q_LO.
+    # C-7 fixed the linear map's location and left its variance unexamined.
     th = {"trunk": mlp_init(k1, [obs_dim] + [hid] * n_layer,
                             scale_last=np.sqrt(2.0 / hid)),
-          "head": mlp_init(k2, [hid, N * REP_DIM[rep]], scale_last=0.1)}
+          "head": mlp_init(k2, [hid, N * REP_DIM[rep]],
+                           scale_last=0.1 / np.sqrt(hid))}
     if normalise:
         th["obs_norm"] = obs_norm_init(obs_dim)
     return th
