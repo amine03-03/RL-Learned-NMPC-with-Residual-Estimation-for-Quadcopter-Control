@@ -583,6 +583,175 @@ def F26_ground_tracks(d):
     _save(fig, "F26_ground_tracks")
 
 
+# --------------------------------------------------------------------------- #
+# Notebook 8 -- sensitivity
+# --------------------------------------------------------------------------- #
+def _mismatch_panels(d, name, title):
+    """One panel per swept plant axis, one line per controller, log RMSE.
+
+    The quantity to read is the *slope* either side of nominal and whether the
+    curves cross -- not the height, which is set by the controller's accuracy on
+    the nominal plant and is already in the ledger.
+    """
+    axes = [a for a in ("m", "J", "kt", "km", "cd", "tau") if a in set(d.axis)]
+    ctrls = sorted(d.ctrl.unique())
+    paths = sorted(d.path.unique())
+    fig, axs = plt.subplots(len(paths), len(axes),
+                            figsize=(3.1 * len(axes), 2.6 * len(paths)),
+                            squeeze=False)
+    for i, path in enumerate(paths):
+        for j, ax_ in enumerate(axes):
+            a = axs[i, j]
+            for k, c in enumerate(ctrls):
+                q = d[(d.path == path) & (d.axis == ax_) & (d.ctrl == c)]
+                q = q.sort_values("level")
+                a.plot(q.level, q.rmse, color=C[k % len(C)], ls=DASH[k % len(DASH)],
+                       marker=MK[k % len(MK)], ms=3, lw=1.4, label=str(c))
+            a.axvline(1.0, color=MUTED, lw=0.7, ls=(0, (3, 2)))
+            a.set_yscale("log")
+            _tidy(a, rf"$\lambda_{{{ax_}}}$" if i == 0 else None,
+                  "factor on nominal", "RMSE [m]" if j == 0 else None)
+            if i == 0 and j == 0:
+                a.annotate("nominal", (1.0, 1.0), xycoords=("data", "axes fraction"),
+                           xytext=(2, -7), textcoords="offset points",
+                           fontsize=5.4, color=INK2)
+    axs[0, 0].legend(fontsize=5.4)
+    fig.suptitle(title, fontsize=8.5, x=0.02, ha="left", y=1.02, color=INK)
+    _save(fig, name)
+
+
+def F27_model_mismatch_hand(d):
+    _mismatch_panels(d, "F27_model_mismatch_hand",
+                     "F27  hand-built controllers against plant mismatch")
+
+
+def F28_cost_mismatch_hand(d):
+    """Sequential heat maps: one hue only, because the quantity is one-signed.
+
+    A diverging map here would imply a meaningful midpoint; there is none.  The
+    best cell of each panel is boxed, and the companion CSV is the table view
+    that discharges the low-contrast end of the ramp.
+    """
+    from matplotlib.colors import LinearSegmentedColormap, LogNorm
+    cm = LinearSegmentedColormap.from_list("seq", SEQ)
+    ctrls, paths = sorted(d.ctrl.unique()), sorted(d.path.unique())
+    fig, axs = plt.subplots(len(ctrls), len(paths),
+                            figsize=(2.5 * len(paths), 2.3 * len(ctrls)),
+                            squeeze=False)
+    fin = pd.to_numeric(d.rmse, errors="coerce")
+    fin = fin[np.isfinite(fin) & (fin > 0)]
+    nrm = LogNorm(vmin=max(fin.min(), 1e-4), vmax=fin.max()) if len(fin) else None
+    for i, c in enumerate(ctrls):
+        for j, path in enumerate(paths):
+            a = axs[i, j]
+            g = d[(d.ctrl == c) & (d.path == path)].pivot_table(
+                index="Q_pos", columns="R_rate", values="rmse")
+            if not g.size:
+                a.axis("off")
+                continue
+            a.imshow(g.values, cmap=cm, norm=nrm, aspect="auto", origin="lower")
+            fl = np.where(np.isfinite(g.values), g.values, np.inf)
+            bi, bj = np.unravel_index(np.argmin(fl), fl.shape)
+            a.add_patch(plt.Rectangle((bj - .5, bi - .5), 1, 1, fill=False,
+                                      edgecolor=C[1], linewidth=1.4))
+            a.set_xticks(range(len(g.columns)))
+            a.set_xticklabels([f"{v:g}" for v in g.columns], fontsize=5.2,
+                              rotation=90)
+            a.set_yticks(range(len(g.index)))
+            a.set_yticklabels([f"{v:g}" for v in g.index], fontsize=5.2)
+            a.grid(False)
+            _tidy(a, f"{c} / {path}",
+                  r"$R_\mathrm{rate}$" if i == len(ctrls) - 1 else None,
+                  r"$Q_\mathrm{pos}$" if j == 0 else None)
+    fig.suptitle("F28  cost-weight stress, wide grid "
+                 "(orange box = best cell of that panel)",
+                 fontsize=8.5, x=0.02, ha="left", y=1.02, color=INK)
+    _save(fig, "F28_cost_mismatch_hand")
+
+
+def F29_model_mismatch_learned(d):
+    _mismatch_panels(d, "F29_model_mismatch_learned",
+                     "F29  learned controllers against plant mismatch")
+
+
+def _r2clip(ax, d, cols, floor=-1.0):
+    """Clip an R^2 axis at ``floor`` and label the series that fall below it."""
+    v = pd.concat([pd.to_numeric(d[c], errors="coerce") for c in cols])
+    v = v[np.isfinite(v)]
+    if not len(v) or v.min() >= floor:
+        return
+    ax.set_ylim(floor, max(1.02, float(v.max()) * 1.02))
+    off = sorted({f"{r.encoder} H={int(r.H)}" for _, r in d.iterrows()
+                  for c in cols
+                  if np.isfinite(pd.to_numeric(r[c], errors="coerce"))
+                  and float(r[c]) < floor})
+    ax.annotate("below axis: " + ", ".join(off[:4])
+                + ("" if len(off) <= 4 else f" (+{len(off) - 4})"),
+                (0.0, 0.0), xycoords="axes fraction", xytext=(2, 2),
+                textcoords="offset points", fontsize=5.2, color=C[7])
+
+
+def F30_rdp_window(d):
+    """Accuracy, the force/moment split and latency against window length.
+
+    Three panels rather than one with twin axes: R^2 and milliseconds do not
+    share a scale, and a dual axis would let the author choose where they cross.
+    """
+    encs = sorted(d.encoder.unique())
+    fig, axs = plt.subplots(1, 3, figsize=(8.2, 2.6))
+    for k, e in enumerate(encs):
+        q = d[d.encoder == e].sort_values("H")
+        kw = dict(color=C[k % len(C)], ls=DASH[k % len(DASH)],
+                  marker=MK[k % len(MK)], ms=4)
+        axs[0].plot(q.H, q.r2_overall, label=str(e), **kw)
+        axs[1].plot(q.H, q.r2_force, **kw)
+        axs[1].plot(q.H, q.r2_moment, mfc="white", alpha=0.75, **kw)
+        axs[2].plot(q.H, q.lat_p95_ms, label=str(e), **kw)
+    _tidy(axs[0], "(a) overall accuracy", None, r"$R^2$")
+    axs[0].legend(fontsize=6)
+    _tidy(axs[1], "(b) force (filled) vs moment (hollow)", None, r"$R^2$")
+    # A single diverged fit (R^2 of -70 is a fit that failed, not a fit that is
+    # worse) would compress every informative curve onto one flat line.  Clip
+    # the R^2 panels to a readable window and NAME what fell off the bottom --
+    # the value is in the companion CSV and must not simply vanish.
+    _r2clip(axs[0], d, ["r2_overall"])
+    _r2clip(axs[1], d, ["r2_force", "r2_moment"])
+    axs[2].axhline(20.0, color=MUTED, lw=0.9, ls=(0, (4, 2)))
+    axs[2].annotate("20 ms period", (d.H.min(), 20.0), xytext=(1, 2),
+                    textcoords="offset points", fontsize=5.8, color=INK2)
+    axs[2].set_yscale("log")
+    _tidy(axs[2], "(c) inference latency, one window", None, "p95 [ms]")
+    hs = sorted(d.H.unique())
+    for a in axs:
+        a.set_xscale("log", base=2)
+        a.set_xticks(hs)
+        a.set_xticklabels([str(int(h)) for h in hs])
+        a.set_xlabel("window length H [frames]")
+    wu = d.warmup_ms if "warmup_ms" in d.columns else None
+    tail = (f" -- H is also the warm-up: {wu.min():.0f}-{wu.max():.0f} ms"
+            if wu is not None and len(wu) else "")
+    fig.subplots_adjust(wspace=0.34)        # the y-labels need their own gutter
+    fig.suptitle(f"F30  how much history the RDP needs{tail}", fontsize=8.5,
+                 x=0.02, ha="left", y=1.03, color=INK)
+    _save(fig, "F30_rdp_window")
+
+
+def F31_fragility(d):
+    piv = d.pivot_table(index="axis", columns="ctrl", values="factor")
+    order = [a for a in ("m", "J", "kt", "km", "cd", "tau") if a in piv.index]
+    piv = piv.reindex(order).reset_index()
+    fig, ax = plt.subplots(figsize=(6.4, 2.9))
+    _barcmp(ax, piv, "axis", [c for c in piv.columns if c != "axis"],
+            "worst / nominal RMSE",
+            "F31  what each controller is fragile to (1.0 = unmoved by the sweep)",
+            logy=True)
+    ax.margins(y=0.30)                 # headroom so the legend clears the bars
+    ax.axhline(1.0, color=MUTED, lw=0.8, ls=(0, (3, 2)))
+    ax.set_xticklabels([rf"$\lambda_{{{a}}}$" for a in piv.axis], rotation=0,
+                       ha="center")
+    _save(fig, "F31_fragility")
+
+
 REG = {f.__name__.split("_")[0]: f for f in (
     F1_feasibility, F2_lqr_feedforward, F3_horizon, F3b_noise, F4_corner,
     F5_qr_heatmap, F6_lltc_fit, F7_lltc_locality, F8_lltc_spectrum,
@@ -590,7 +759,9 @@ REG = {f.__name__.split("_")[0]: f for f in (
     F13_axis_competence, F14_variances, F15_curriculum, F16_encoder_trade,
     F17_channel_r2, F18_closed_loop, F19_wrench_timeseries, F20_training_gate,
     F21_headline, F22_by_condition, F23_radar, F24_saturation_guard,
-    F25_contact_sheet, F26_ground_tracks)}
+    F25_contact_sheet, F26_ground_tracks, F27_model_mismatch_hand,
+    F28_cost_mismatch_hand, F29_model_mismatch_learned, F30_rdp_window,
+    F31_fragility)}
 NAME = {f.__name__.split("_")[0]: f.__name__ for f in REG.values()}
 
 
