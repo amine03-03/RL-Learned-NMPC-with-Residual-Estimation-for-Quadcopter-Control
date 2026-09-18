@@ -51,14 +51,17 @@ SPEED = (1.2, 1.2)          # pinned: a speed band would blur every sweep
 #: one-sided because tau < 1 is a *faster* rotor than nominal, which is not a
 #: stress; the interesting direction is lag.
 LEVELS = {
-    "m":   (0.60, 0.75, 0.90, 1.00, 1.15, 1.35, 1.60),
-    "D":   (0.25, 0.50, 1.00, 1.75, 2.50, 3.25, 4.00),
-    "tau": (1.00, 1.50, 2.00, 3.00, 4.00, 5.00, 6.00),
-    "T":   (0.70, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30),
-    "Kw":  (0.40, 0.60, 0.80, 1.00, 1.30, 1.55, 1.80),
-    "J":   (0.50, 0.70, 0.85, 1.00, 1.30, 1.60, 2.00),
+    "m": (0.55, 0.70, 0.85, 1.00, 1.20, 1.45, 1.75, 2.10),
+    "J": (0.40, 0.60, 0.80, 1.00, 1.30, 1.70, 2.20, 2.80),
 }
 AXES = tuple(LEVELS)
+#: The mismatch sweeps run on **fig8 only**.  It is the path that is partly at
+#: the feasibility cap (NB1: capped on 6.2 % of radii, against square's 100 % and
+#: circle's none), so it stresses a controller without the collective already
+#: being pinned -- on square the sweep would largely measure the cap.  The cost
+#: sweep of §2 still runs on all three, because there the path is the variable
+#: of interest rather than a confound.
+MIS_PATHS = ("fig8",)
 
 
 def mismatch_env(axis, level, path, seed=4242, n=None, T=None, adapt=False, **kw):
@@ -90,11 +93,11 @@ def ev(env, ctrl, T=None):
 # was shown to buy in NB1.
 
 # %%
-S.section(1, "model mismatch, hand-built", "LQR and NMPC N=1 off-nominal on six "
-          "plant axes x three paths", produces="sensitivity/model_hand.csv, F27")
+S.section(1, "model mismatch, hand-built", "LQR and NMPC N=1 off-nominal in mass "
+          "and inertia, on fig8", produces="sensitivity/model_hand.csv, F27")
 
 rows = []
-for path in PATHS:
+for path in MIS_PATHS:
     for axis in AXES:
         for lv in LEVELS[axis]:
             env = mismatch_env(axis, lv, path)
@@ -136,10 +139,10 @@ S.table(bp, "Break factor (first level at 3x the nominal RMSE; NaN = never)",
              "range -- read it beside the range, not alone",
         csv=("sensitivity", "model_hand_breakpoints.csv"))
 
-fig, axs = plt.subplots(len(PATHS), len(AXES), figsize=(2.05 * len(AXES),
-                                                        1.95 * len(PATHS)),
-                        sharex="col")
-for i, path in enumerate(PATHS):
+fig, axs = plt.subplots(len(MIS_PATHS), len(AXES),
+                        figsize=(3.1 * len(AXES), 2.6 * len(MIS_PATHS)),
+                        squeeze=False)
+for i, path in enumerate(MIS_PATHS):
     for j, axis in enumerate(AXES):
         a = axs[i, j]
         for k, c in enumerate(("LQR", "NMPC N=1")):
@@ -156,8 +159,7 @@ for i, path in enumerate(PATHS):
             a.set_title(rf"$\lambda_{{{axis}}}$", fontsize=8)
         if j == 0:
             a.set_ylabel(f"{path}\nRMSE [m]", fontsize=7)
-        if i == len(PATHS) - 1:
-            a.set_xlabel("factor", fontsize=7)
+        a.set_xlabel("factor", fontsize=7)
 axs[0, 0].legend(fontsize=5.6)
 fig.suptitle("F27  hand-built controllers against plant mismatch "
              "(dashed line = nominal)", fontsize=9, x=0.02, ha="left", y=1.005)
@@ -278,7 +280,7 @@ for _, r in SP.iterrows():
 
 # %%
 S.section(3, "model mismatch, learned", "AC-MPC and Adaptive AC-MPC on the same "
-          "six axes x three paths", produces="sensitivity/model_learned.csv, F29")
+          "two axes, on fig8", produces="sensitivity/model_learned.csv, F29")
 
 acm = X.load_ckpt("acmpc", "model.pkl")
 est = X.load_ckpt("acmpc_adaptive", "estimators", "all.pkl")
@@ -300,7 +302,7 @@ if LEARNED_OK:
     if ADAPT_OK:
         p_sel, sc_sel, Hsel = A.rebuild_rdp(est[est["__selected__"]])
     rows = []
-    for path in PATHS:
+    for path in MIS_PATHS:
         for axis in AXES:
             for lv in LEVELS[axis]:
                 env = mismatch_env(axis, lv, path)
@@ -338,10 +340,10 @@ if LEARNED_OK:
     COL = {"AC-MPC N=1": "#1baf7a", "Adaptive AC-MPC N=1": "#4a3aa7"}
     MKR = {"AC-MPC N=1": "^", "Adaptive AC-MPC N=1": "D"}
     LS = {"AC-MPC N=1": "-", "Adaptive AC-MPC N=1": "--"}
-    fig, axs = plt.subplots(len(PATHS), len(AXES),
-                            figsize=(2.05 * len(AXES), 1.95 * len(PATHS)),
-                            sharex="col")
-    for i, path in enumerate(PATHS):
+    fig, axs = plt.subplots(len(MIS_PATHS), len(AXES),
+                            figsize=(3.1 * len(AXES), 2.6 * len(MIS_PATHS)),
+                            squeeze=False)
+    for i, path in enumerate(MIS_PATHS):
         for j, axis in enumerate(AXES):
             a = axs[i, j]
             for c in cl:
@@ -358,8 +360,7 @@ if LEARNED_OK:
                 a.set_title(rf"$\lambda_{{{axis}}}$", fontsize=8)
             if j == 0:
                 a.set_ylabel(f"{path}\nRMSE [m]", fontsize=7)
-            if i == len(PATHS) - 1:
-                a.set_xlabel("factor", fontsize=7)
+            a.set_xlabel("factor", fontsize=7)
     axs[0, 0].legend(fontsize=5.2)
     fig.suptitle("F29  learned controllers against plant mismatch",
                  fontsize=9, x=0.02, ha="left", y=1.005)
@@ -378,95 +379,164 @@ if LEARNED_OK:
 
 
 # %% [markdown]
-# ## 4 — the adaptive arm against horizon length
+# ## 4 — how much history does the RDP need?
 #
-# **This one requires a retrain per horizon.** `costmap_head` emits
-# `N × REP_DIM[rep]` numbers and reshapes to `(B, N, REP_DIM)`, so an actor
-# trained at `N=1` has no cost map for stages 2…N and cannot simply be evaluated
-# at a longer horizon. Reusing the `N=1` actor would silently reinterpret its 26
-# outputs as stage 1 of a 3-stage problem, which is not the same object.
+# The predictor's horizon is its **causal window length** $H$: how many past
+# frames of (6.2) it sees before predicting the wrench. `H_BENCH = (16, 32, 64,
+# 128)` has been in `adaptive_core_jax` since the start and was never swept — NB5
+# compares the four encoders at the single value $H=64$.
 #
-# Read against NB1's horizon sweep for the *tuned* NMPC, and against the p95
-# latency, since a horizon is only admissible if it fits the 20 ms period.
+# $H$ is not free. It sets the deployment ring-buffer length, the warm-up before
+# the estimate is usable, and the inference latency that has to fit inside the
+# 20 ms period. It also sizes two of the architectures: `tcn_blocks_for(H)` and
+# `cnn_layers_for(H)` pick the smallest depth whose receptive field covers the
+# whole window, so a TCN at $H=128$ is a deeper network than at $H=16$, not the
+# same one fed more input.
+#
+# The question this answers: **is a long window buying accuracy, or is the
+# residual essentially memoryless?**
 
 # %%
-S.section(4, "adaptive horizon sweep", "train the adaptive arm at each N, then "
-          "evaluate -- the head shape makes a retrain mandatory",
-          produces="sensitivity/adaptive_horizon.csv, F30")
+S.section(4, "RDP window length", "sweep H over H_BENCH for every encoder -- "
+          "accuracy, cost and warm-up against how much history is kept",
+          produces="sensitivity/rdp_window.csv, F30")
 
-HORIZONS = (1, 2, 3, 5)
-H_ITERS = max(S.CFG["iters_sweep"] // 2, 4)
-S2 = __import__("study_moderate").moderate(S.disturbed_spec(), wind=(0.0, 2.0))
+import study_moderate as M                                          # noqa: E402
+
+H_LIST = A.H_BENCH
+S2 = M.moderate(S.disturbed_spec(), wind=(0.0, 2.0))
+N_EP_D = 8 if S.SCALE == "smoke" else 24
+T_D = 200 if S.SCALE == "smoke" else 500
+pilot = X.make_nmpc_ctrl(N=1, n_iter=NIT)
+
+
+def collect(scen, level, seed, n, T):
+    """Fly under a known disturbance, log the causal frame and the truth.
+
+    Generated ONCE at the largest H and re-windowed per H, so every row of the
+    sweep sees the same flights -- otherwise a window-length comparison would
+    also be a different-data comparison.
+    """
+    env = A.AdaptEnv(n, seed, T + 10, S2, scen, level, paths=("circle", "fig8"),
+                     wrench_dr=A.WRENCH_DR_START, task="stabilize", H=max(H_LIST))
+    pilot.bind_env(env)
+    F, Y, EP = [], [], []
+    o, e, xr = env.obs()
+    for _ in range(T):
+        _, uref, _ = env.ref_now()
+        u, _ = pilot(o, e, xr, uref=uref)
+        F.append(np.asarray(env.frame26()))
+        Y.append(np.asarray(env.d_truth()))
+        EP.append(np.asarray(env.n_step))
+        env.step(u)
+        o, e, xr = env.obs()
+    return np.array(F), np.array(Y), np.array(EP)
+
+
+print(f"  generating data once: {N_EP_D} vehicles x {T_D} steps x 3 scenarios")
+FR_, YR_, EID_ = [], [], []
+for scen, lvl in (("central", 0.15), ("asym", 0.07), ("slung", 10.0)):
+    f, y, ep = collect(scen, lvl, 31, N_EP_D, T_D)
+    FR_.append(f); YR_.append(y)
+    EID_.append(np.cumsum(np.diff(ep, axis=0, prepend=ep[:1]) < 0, axis=0))
 
 rows = []
-for N in HORIZONS:
-    cfg = dict(N=N, rep="diag", n_iter=NIT, n_diff=2, hid=S.CFG["hid"],
-               minib=S.CFG["minib"], epochs=S.CFG["epochs"], sigma=0.05,
-               dist_label=f"adaptive N={N}")
-    env = A.AdaptEnv(S.CFG["n_env"], 5, 200, S2, "central", 0.0, oracle=True,
-                     wrench_dr=A.WRENCH_DR_START, paths=("circle", "fig8"),
-                     task="stabilize")
-    actor, _, log = X.train_ppo(None, cfg, seed=5, iters=H_ITERS,
-                                T_rollout=S.CFG["T_rollout"], env=env, verbose=False)
-    lat = None
-    for path in PATHS:
-        eenv = A.AdaptEnv(N_EV, 4242, 100000, S.nominal_spec(speed=SPEED),
-                          "central", 0.0, paths=(path,), oracle=True)
-        st = ev(eenv, X.ctrl_from_actor(actor, dict(cfg, n_diff=1)))
-        if lat is None:
-            e1 = A.AdaptEnv(1, 4242, 100000, S.nominal_spec(speed=SPEED),
-                            "central", 0.0, paths=(path,), oracle=True)
-            lat = X.solve_latency_ms(X.ctrl_from_actor(actor, dict(cfg, n_diff=1)),
-                                     e1, T=25)
-        rows.append(dict(N=N, path=path, rmse=st["rmse"], sat=st["sat"],
-                         crash=st["crash"], bound_frac=st["bound_frac"],
-                         landed=int(log.landed.sum()) if "landed" in log else -1,
-                         final_reward=float(log.reward.tail(3).mean()),
-                         ms_median=lat["median"], ms_p95=lat["p95"]))
-AH = pd.DataFrame(rows)
-AH.to_csv(X.apath("sensitivity", "adaptive_horizon.csv"), index=False)
-S.table(AH.pivot_table(index="N", columns="path", values="rmse").reset_index(),
-        "Adaptive AC-MPC: RMSE [m] against horizon",
-        note=f"trained {H_ITERS} iterations per horizon; a retrain is mandatory "
-             f"because the cost-map head emits N x REP_DIM numbers",
-        csv=("sensitivity", "adaptive_horizon_pivot.csv"))
+for H in H_LIST:
+    Ws, Ys = [], []
+    for f, y, eid in zip(FR_, YR_, EID_):
+        w, yy = A.make_windows(f, y, H, ep_id=eid)
+        Ws.append(w); Ys.append(yy)
+    W, Y = np.concatenate(Ws), np.concatenate(Ys)
+    blocks = np.arange(W.shape[0]) // max(T_D - H, 1)
+    ub = np.unique(blocks)
+    tr_b, va_b, te_b = A.split_by_episode(len(ub), seed=0)
+    m_tr = np.isin(blocks, ub[tr_b]); m_va = np.isin(blocks, ub[va_b])
+    m_te = np.isin(blocks, ub[te_b])
+    for kind in A.ENCODERS:
+        p, sc, _ = A.train_rdp(__import__("jax").random.PRNGKey(7), kind,
+                               W[m_tr], Y[m_tr], W[m_va], Y[m_va], H=H,
+                               epochs=S.CFG["est_epochs"], batch=S.CFG["est_batch"],
+                               verbose=False)
+        pred = A.rdp_predict(p, sc, W[m_te])
+        r2 = A.r2_score(Y[m_te], pred)
+        lat = A.rdp_latency_ms(p, sc, H)
+        rows.append(dict(H=H, encoder=kind, n_windows=int(W.shape[0]),
+                         params=A.rdp_param_count(p),
+                         r2_overall=float(np.mean(r2)),
+                         r2_force=float(np.mean(r2[:3])),
+                         r2_moment=float(np.mean(r2[3:])),
+                         lat_median_ms=lat["median"], lat_p95_ms=lat["p95"],
+                         admissible=bool(lat["p95"] <= 20.0),
+                         warmup_ms=float(H * X.P.dt_c * 1e3)))
+        print(f"    H={H:4d}  {kind:5s}  R2 {np.mean(r2):+.4f}  "
+              f"p95 {lat['p95']:.2f} ms  warm-up {H * X.P.dt_c * 1e3:.0f} ms")
+RW = pd.DataFrame(rows)
+RW.to_csv(X.apath("sensitivity", "rdp_window.csv"), index=False)
+S.table(RW.pivot_table(index="H", columns="encoder", values="r2_overall").reset_index(),
+        "RDP accuracy against window length (R^2 overall)",
+        note="H is also the deployment warm-up: the estimate is unusable for the "
+             "first H frames (H*dt_c ms) after every respawn",
+        csv=("sensitivity", "rdp_window_pivot.csv"))
 
-fig, axs = plt.subplots(1, 2, figsize=(6.6, 2.6))
-for k, path in enumerate(PATHS):
-    d = AH[AH.path == path].sort_values("N")
-    axs[0].plot(d.N, d.rmse, color=["#2a78d6", "#eb6834", "#1baf7a"][k],
-                ls=["-", "--", "-."][k], marker=["o", "s", "^"][k], ms=4, label=path)
-axs[0].set_yscale("log")
-axs[0].set_title("(a) accuracy vs horizon", loc="left", fontsize=8.5)
-axs[0].set_xlabel("horizon N"); axs[0].set_ylabel("RMSE [m]")
+fig, axs = plt.subplots(1, 3, figsize=(8.2, 2.6))
+PAL = {"GRU": "#2a78d6", "LSTM": "#eb6834", "TCN": "#1baf7a", "CNN": "#eda100"}
+MKS = {"GRU": "o", "LSTM": "s", "TCN": "^", "CNN": "D"}
+LSS = {"GRU": "-", "LSTM": "--", "TCN": "-.", "CNN": ":"}
+for enc in A.ENCODERS:
+    d = RW[RW.encoder == enc].sort_values("H")
+    if not len(d):
+        continue
+    axs[0].plot(d.H, d.r2_overall, color=PAL[enc], ls=LSS[enc], marker=MKS[enc],
+                ms=4, label=enc)
+    axs[1].plot(d.H, d.r2_force, color=PAL[enc], ls=LSS[enc], marker=MKS[enc], ms=4)
+    axs[1].plot(d.H, d.r2_moment, color=PAL[enc], ls=LSS[enc], marker=MKS[enc],
+                ms=4, mfc="white", alpha=0.75)
+    axs[2].plot(d.H, d.lat_p95_ms, color=PAL[enc], ls=LSS[enc], marker=MKS[enc],
+                ms=4, label=enc)
+axs[0].set_title("(a) overall accuracy", loc="left", fontsize=8.5)
+axs[0].set_ylabel(r"$R^2$")
 axs[0].legend(fontsize=6)
-lat = AH.groupby("N")[["ms_median", "ms_p95"]].first().reset_index()
-axs[1].plot(lat.N, lat.ms_median, "-", color="#2a78d6", marker="o", label="median")
-axs[1].plot(lat.N, lat.ms_p95, "--", color="#eb6834", marker="s", label="p95")
-axs[1].axhline(20.0, color="#8a8a84", lw=0.9, ls=(0, (4, 2)))
-axs[1].annotate("20 ms period", (lat.N.min(), 20.0), xytext=(1, 2),
+axs[1].set_title("(b) force (filled) vs moment (hollow)", loc="left", fontsize=8.5)
+axs[1].set_ylabel(r"$R^2$")
+axs[2].axhline(20.0, color="#8a8a84", lw=0.9, ls=(0, (4, 2)))
+axs[2].annotate("20 ms period", (min(H_LIST), 20.0), xytext=(1, 2),
                 textcoords="offset points", fontsize=5.8, color="#52514e")
-axs[1].set_yscale("log")
-axs[1].set_title("(b) single-vehicle solve latency", loc="left", fontsize=8.5)
-axs[1].set_xlabel("horizon N"); axs[1].set_ylabel("ms")
-axs[1].legend(fontsize=6)
+axs[2].set_yscale("log")
+axs[2].set_title("(c) inference latency, one window", loc="left", fontsize=8.5)
+axs[2].set_ylabel("p95 [ms]")
 for a in axs:
+    a.set_xscale("log", base=2)
+    a.set_xticks(list(H_LIST))
+    a.set_xticklabels([str(h) for h in H_LIST])
+    a.set_xlabel("window length H [frames]")
     a.grid(color="#e6e6e2", lw=0.5)
     for sp_ in ("top", "right"):
         a.spines[sp_].set_visible(False)
-fig.suptitle("F30  adaptive AC-MPC against horizon length (retrained per N)",
-             fontsize=9, x=0.02, ha="left", y=1.02)
-fig.savefig(f"{FIG}/F30_adaptive_horizon.png", bbox_inches="tight", dpi=200)
-AH.to_csv(f"{FIG}/F30_adaptive_horizon.csv", index=False)
+fig.suptitle("F30  how much history the RDP needs (H is also the warm-up: "
+             f"{min(H_LIST)*X.P.dt_c*1e3:.0f}-{max(H_LIST)*X.P.dt_c*1e3:.0f} ms)",
+             fontsize=9, x=0.02, ha="left", y=1.03)
+fig.savefig(f"{FIG}/F30_rdp_window.png", bbox_inches="tight", dpi=200)
+RW.to_csv(f"{FIG}/F30_rdp_window.csv", index=False)
 plt.close(fig)
 
-best = AH.groupby("N").rmse.median().idxmin()
-adm = AH[AH.ms_p95 <= 20.0].N.max() if (AH.ms_p95 <= 20.0).any() else None
-print(f"\n  ANALYSIS.  Best horizon by median RMSE: N = {best}.")
-print(f"  Largest horizon inside the 20 ms period: N = {adm}.")
-print(f"  Trained {H_ITERS} iterations per horizon -- a longer horizon is a "
-      f"bigger optimisation, so a flat or rising curve at this budget is a "
-      f"statement about the budget as much as about the horizon.")
+print("\n  ANALYSIS -- is a longer window buying accuracy?")
+for enc in A.ENCODERS:
+    d = RW[RW.encoder == enc].sort_values("H")
+    if len(d) < 2:
+        continue
+    lo, hi = d.iloc[0], d.iloc[-1]
+    print(f"    {enc:5s}: R2 {lo.r2_overall:+.4f} at H={int(lo.H)} -> "
+          f"{hi.r2_overall:+.4f} at H={int(hi.H)} "
+          f"({hi.r2_overall - lo.r2_overall:+.4f}), p95 "
+          f"{lo.lat_p95_ms:.2f} -> {hi.lat_p95_ms:.2f} ms")
+_best = RW.loc[RW.r2_overall.idxmax()]
+_cheap = RW[RW.r2_overall >= 0.95 * RW.r2_overall.max()].sort_values("H").iloc[0]
+print(f"  Best overall: {_best.encoder} at H={int(_best.H)} "
+      f"(R2 {_best.r2_overall:+.4f}).")
+print(f"  Within 5 % of it at the SHORTEST window: {_cheap.encoder} at "
+      f"H={int(_cheap.H)} (R2 {_cheap.r2_overall:+.4f}, warm-up "
+      f"{_cheap.warmup_ms:.0f} ms) -- H is a warm-up cost after every respawn, "
+      f"so the shortest adequate window is the one to deploy.")
 
 
 # %% [markdown]
@@ -537,6 +607,6 @@ for c in sorted(FR.ctrl.unique()):
 S.checkpoint(model_hand=("sensitivity", "model_hand.csv"),
              cost_hand=("sensitivity", "cost_hand.csv"),
              model_learned=("sensitivity", "model_learned.csv"),
-             adaptive_horizon=("sensitivity", "adaptive_horizon.csv"),
+             rdp_window=("sensitivity", "rdp_window.csv"),
              fragility=("sensitivity", "fragility.csv"))
 print("\nNotebook 8 complete.")
