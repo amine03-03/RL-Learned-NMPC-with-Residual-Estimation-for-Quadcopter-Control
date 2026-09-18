@@ -122,11 +122,14 @@ for _a in AXES:
 
 
 def _breakpoint(df, ctrl, axis, thresh=3.0):
-    """Factor at which RMSE first exceeds `thresh` x its nominal value.
+    """Factor at which RMSE first exceeds `thresh` x **its own** nominal.
 
-    Reported instead of a bare worst case because 'where it breaks' is the
-    question; a controller that degrades gracefully to 2x over a 4x parameter
-    error is a different object from one that is fine until it is not.
+    A RELATIVE measure, and it must be read as one: a controller that starts
+    four times more accurate trips a 3x threshold four times sooner while still
+    being ahead in absolute terms.  Measured here, NMPC N=1 sits at 0.031 m at
+    nominal against LQR's 0.127 m, so "NMPC breaks at 0.55x mass" means it
+    reached 0.093 m there -- where LQR was at 0.168 m and therefore still worse.
+    Read this column beside :func:`_crossover`, never alone.
     """
     d = df[(df.ctrl == ctrl) & (df.axis == axis)].groupby("level").rmse.median()
     if 1.0 not in d.index:
@@ -136,12 +139,43 @@ def _breakpoint(df, ctrl, axis, thresh=3.0):
     return float(bad.index.min()) if len(bad) else np.nan
 
 
+def _crossover(df, a, b, axis, side):
+    """Factor at which `a` stops being better than `b`, in ABSOLUTE RMSE.
+
+    The question the relative break factor cannot answer: a steeper slope from a
+    lower starting point may never actually lose.  `side` is 'up' or 'down' --
+    mismatch has two directions and a controller can be robust to one and not
+    the other.
+    """
+    da = df[(df.ctrl == a) & (df.axis == axis)].groupby("level").rmse.median()
+    db = df[(df.ctrl == b) & (df.axis == axis)].groupby("level").rmse.median()
+    lv = sorted(set(da.index) & set(db.index))
+    lv = [x for x in lv if (x >= 1.0 if side == "up" else x <= 1.0)]
+    if side == "down":
+        lv = lv[::-1]
+    for x in lv:
+        if da.loc[x] > db.loc[x]:
+            return float(x)
+    return np.nan
+
+
 bp = pd.DataFrame([
-    dict(axis=a, **{c: _breakpoint(MH, c, a) for c in ("LQR", "NMPC N=1")})
+    dict(axis=a,
+         nominal_LQR=float(MH[(MH.ctrl == "LQR") & (MH.axis == a) &
+                              (MH.level == 1.0)].rmse.median()),
+         nominal_NMPC=float(MH[(MH.ctrl == "NMPC N=1") & (MH.axis == a) &
+                               (MH.level == 1.0)].rmse.median()),
+         break_LQR=_breakpoint(MH, "LQR", a),
+         break_NMPC=_breakpoint(MH, "NMPC N=1", a),
+         NMPC_loses_above=_crossover(MH, "NMPC N=1", "LQR", a, "up"),
+         NMPC_loses_below=_crossover(MH, "NMPC N=1", "LQR", a, "down"))
     for a in AXES])
-S.table(bp, "Break factor (first level at 3x the nominal RMSE; NaN = never)",
-        note="NaN means the controller never degraded 3x anywhere in the swept "
-             "range -- read it beside the range, not alone",
+S.table(bp, "Where each hand-built arm gives way",
+        note="`break_*` is RELATIVE (3x that controller's OWN nominal) and a more "
+             "accurate controller trips it sooner while still leading; "
+             "`NMPC_loses_*` is the ABSOLUTE crossover, the factor at which NMPC "
+             "N=1 stops beating LQR.  NaN in the crossover columns means NMPC "
+             "never lost on that side of nominal.",
         csv=("sensitivity", "model_hand_breakpoints.csv"))
 
 fig, axs = plt.subplots(len(MIS_PATHS), len(AXES),
@@ -161,22 +195,33 @@ for i, path in enumerate(MIS_PATHS):
         for sp in ("top", "right"):
             a.spines[sp].set_visible(False)
         if i == 0:
-            a.set_title(rf"$\lambda_{{{axis}}}$", fontsize=8)
+            a.set_title(rf"$\lambda_{{{axis}}}$", fontsize=8.5, loc="left")
         if j == 0:
-            a.set_ylabel(f"{path}\nRMSE [m]", fontsize=7)
+            a.set_ylabel("RMSE [m]", fontsize=7)
         a.set_xlabel("factor", fontsize=7)
 axs[0, 0].legend(fontsize=5.6)
-fig.suptitle("F27  hand-built controllers against plant mismatch "
-             "(dashed line = nominal)", fontsize=9, x=0.02, ha="left", y=1.005)
+fig.suptitle(f"F27  hand-built controllers against plant mismatch, {MIS_PATHS[0]} "
+             "(vertical line = nominal)", fontsize=9, x=0.02, ha="left", y=1.06)
 fig.savefig(f"{FIG}/F27_model_mismatch_hand.png", bbox_inches="tight", dpi=200)
 MH.to_csv(f"{FIG}/F27_model_mismatch_hand.csv", index=False)
 plt.close(fig)
 
-print("\n  ANALYSIS -- where each hand-built arm breaks:")
+f_ = lambda v: "never in range" if not np.isfinite(v) else f"{v:g}x"
+print("\n  ANALYSIS -- two different questions, two different answers:")
+print("    (a) RELATIVE: 3x its own nominal.  The more accurate controller")
+print("        trips this sooner even while still leading in absolute terms.")
 for a_ in AXES:
-    l_, n_ = _breakpoint(MH, "LQR", a_), _breakpoint(MH, "NMPC N=1", a_)
-    f = lambda v: "never in range" if not np.isfinite(v) else f"{v:g}x"
-    print(f"    lambda_{a_:4s}: LQR {f(l_):>14s}   NMPC N=1 {f(n_):>14s}")
+    print(f"        lambda_{a_:4s}: LQR {f_(_breakpoint(MH, 'LQR', a_)):>14s}"
+          f"   NMPC N=1 {f_(_breakpoint(MH, 'NMPC N=1', a_)):>14s}")
+print("    (b) ABSOLUTE: the factor at which NMPC N=1 stops beating LQR.")
+for a_ in AXES:
+    up = _crossover(MH, "NMPC N=1", "LQR", a_, "up")
+    dn = _crossover(MH, "NMPC N=1", "LQR", a_, "down")
+    print(f"        lambda_{a_:4s}: above nominal {f_(up):>14s}"
+          f"   below nominal {f_(dn):>14s}")
+print("    The online solve degrades FASTER from a lower base.  Whether that")
+print("    means it is less robust depends on which question is being asked,")
+print("    and the two columns disagree over much of the range.")
 
 
 # %% [markdown]
@@ -363,13 +408,13 @@ if LEARNED_OK:
             for sp_ in ("top", "right"):
                 a.spines[sp_].set_visible(False)
             if i == 0:
-                a.set_title(rf"$\lambda_{{{axis}}}$", fontsize=8)
+                a.set_title(rf"$\lambda_{{{axis}}}$", fontsize=8.5, loc="left")
             if j == 0:
-                a.set_ylabel(f"{path}\nRMSE [m]", fontsize=7)
+                a.set_ylabel("RMSE [m]", fontsize=7)
             a.set_xlabel("factor", fontsize=7)
     axs[0, 0].legend(fontsize=5.2)
-    fig.suptitle("F29  learned controllers against plant mismatch",
-                 fontsize=9, x=0.02, ha="left", y=1.005)
+    fig.suptitle(f"F29  learned controllers against plant mismatch, "
+                 f"{MIS_PATHS[0]}", fontsize=9, x=0.02, ha="left", y=1.06)
     fig.savefig(f"{FIG}/F29_model_mismatch_learned.png", bbox_inches="tight", dpi=200)
     ML.to_csv(f"{FIG}/F29_model_mismatch_learned.csv", index=False)
     plt.close(fig)
