@@ -725,19 +725,40 @@ This is also the candidate explanation for G14: `chol`/`full` start where
 `dS/dA ~ 2A ~ 0`, so both their spread and their step sizes are small, which is
 why they landed 5-6x more steps than `diag`.
 
-## G14 — `landed` differs 5-6x by representation, which inverts the §8.3 finding
+## G14 -- `landed` tracks the quality of the starting controller
 
-At `medium`: `diag` lands 315–385 steps, `chol` 1672–1851, `full` 1509–1798, on
-identical budgets. `diag` maps parameters to weights through
-`S = Q_LO*(Q_HI/Q_LO)^sigmoid(z)`, whose slope at the initialisation is
-`S*ln(1e5)*sigmoid' ~ 9.1` — stiff — so its steps leave the KL region and are
-rejected. `chol`/`full` use `A A'` with `A ~ 0`, where `dS/dA ~ 2A ~ 0` — nearly
-flat — so their steps are accepted. The diagonal is not the form that learns
-best here; it is the form hardest to move inside a trust region.
+*Originally written as a claim about the log map's slope. The first medium run
+after G15 inverted the ordering, so that claim is withdrawn; what follows is
+what the two runs together show.*
 
-This also **confounds the representation sweep**, which now varies the
-representation and the effective number of policy steps together. Comparing the
-three forms needs the step counts matched, not just the iteration budgets.
+`landed` per training, same budgets, before and after G15:
+
+| rep | before G15 | after G15 | `sat` after | `rmse` after |
+|---|---|---|---|---|
+| `diag` | 315-385 | **2789** | 0.0015 | **0.0778** |
+| `chol` | 1672-1851 | 1502-1561 | 0.22-0.25 | 0.4555 |
+| `full` | 1509-1798 | **155-187** | 0.55-0.58 | 0.7691 |
+
+The original explanation -- that `diag`'s five-decade log map has slope ~9.1 at
+init so its steps leave the KL region, while `chol`/`full` sit where
+`dS/dA ~ 2A ~ 0` -- accounted for the *before* column and fails on the *after*
+one: G15 does not change either map's slope, yet `diag` went up 9x and `full`
+down 8x.
+
+What the two columns do track is the **closed-loop quality of the initial
+policy**. After G15 `diag` starts at 0.072 m with `sat` 0.000 and lands 2789
+steps; `full` starts at 0.694 m with `sat` 0.533 and lands 187. A policy pinned
+against its input box produces advantages that carry little usable signal, so
+its steps miss the trust region -- which is the saturation gate's own premise,
+now visible in the step count. `landed` is therefore a *symptom* of the gate,
+not an independent axis, and the representation sweep is confounded by the
+starting controller rather than by the parameterisation.
+
+Comparing the three forms on their merits still needs their initialisations
+matched -- `chol` and `full` biased so that `A A' ~ 3.16 I` (a diagonal bias of
+about 1.60 and 1.78 respectively), which their own docstring argues for.
+Until then `diag` wins 3/3 partly because it is the only one that starts from a
+working controller.
 
 ## Does `X500_SCALE=full` fix any of this?
 
