@@ -56,9 +56,19 @@ env = S.ev_env("circle", n=min(N_CAND, 256), spec=S.nominal_spec(speed=(1.0, 1.5
                seed=11)
 o, e0, xr = env.obs()
 B = env.n
-KEY, k1 = jax.random.split(KEY)
+KEY, k1 = jax.random.split(KEY, 2)
 scale = jnp.asarray([DISP, DISP, DISP, DISP, DISP, DISP,
                      0.3 * DISP, 0.3 * DISP, 0.3 * DISP])
+# G7c: ONE shell at `disp`, as originally.  G7 spread the candidates over
+# decades of magnitude, reasoning that the closed loop lives at |e| ~ 0.05 m
+# while the shell sits at |e| ~ 0.8 m, so the network was being extrapolated.
+# The argument is plausible and the measurement refutes it: under an MSE on V1
+# the small-error samples contribute almost nothing to the loss, so spreading
+# the draw does not constrain the small-error region -- it only dilutes the
+# shell.  Measured at medium, LLTC N=1 on S1: 0.41 m with one shell, 1.23 m
+# with decades (and 1.27 m with decades once G7's circular gate was removed),
+# while R^2 went UP, 0.992 -> 0.999.  A better fit to a worse controller is the
+# signal that the fit target, not the sampling, is what limits this arm.
 cand = jax.random.normal(k1, (B, X.NE)) * scale
 xr_seq, uref_seq = env.ref_traj(N_LONG), env.ref_useq(N_LONG)
 Sm, cm = X.quad_cost_blocks(B, N_LONG)
@@ -73,9 +83,25 @@ V1 = np.asarray(J - l0)
 # terminal-set reach: the error radius at which the terminal quadratic still
 # describes the realised cost-to-go
 REACH = float(np.sqrt(2.0 * np.median(V1) / max(float(X.P_RIC[0, 0]), 1e-9)))
-keep = np.isfinite(V1) & (V1 > 0) & (V1 < np.percentile(V1[np.isfinite(V1)], 95))
+# G7b: the gate must NOT depend on the candidate draw.  G7 filtered on
+# ||e1|| <= 2*REACH while REACH is itself sqrt(2*median(V1)/P_00) -- computed
+# from the very candidates being filtered.  Adding the decade sampling dropped
+# the median, REACH fell 0.556 -> 0.086 m, the gate then kept only the
+# small-error candidates, and that fit was deployed against a seeded 0.5 m
+# offset: LLTC went 0.41 -> 1.22 m, horizon equivalence 7.5x -> 23.7x, and the
+# clip diverged to 35.6 m.  It INVERTED the original defect (fit large, deploy
+# small) instead of removing it.  A realised cost-to-go that is finite and
+# positive is a real criterion and is all that is needed; REACH stays a
+# reported diagnostic, never a filter.
+keep = np.isfinite(V1) & (V1 > 0.0)
 accept = float(keep.mean())
-E_fit = np.asarray(cand)[keep]
+# G7: fit the object the CONTROLLER evaluates.  V1 is the cost-to-go from
+# e_1, and `make_lltc_ctrl` scores 0.5 e_1' P(e_0) e_1 as the terminal cost of
+# the N=1 problem.  Regressing 0.5 e_0' P(e_0) e_0 onto V1 -- the old code --
+# fits a different quadratic form from the one that is later used, so the near-
+# perfect R^2 was never a statement about the deployed object.
+E_fit = np.asarray(cand)[keep]          # the argument of P_theta
+E1_fit = np.asarray(e_seq[:, 1])[keep]  # what the quadratic is contracted with
 V_fit = V1[keep]
 print(f"  candidates {B}, accepted {keep.sum()} ({100*accept:.1f}%)")
 print(f"  displacement scale CFG['disp'] = {DISP:.3f} m")
@@ -102,22 +128,33 @@ EPS = 1e-3
 opt = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-3))
 st = opt.init(params)
 Ej, Vj = jnp.asarray(E_fit), jnp.asarray(V_fit)
+E1j = jnp.asarray(E1_fit)
 
-def loss_fn(p, ee, vv):
-    P = M.lltc_matrix(p, ee, EPS)                       # (8.1)
+def loss_fn(p, ee, e1, vv):
+    # G7d: contract with e_0, as originally.  G7 changed this to e_1 on the
+    # argument that `make_lltc_ctrl` scores 0.5 e_1' P(e_0) e_1, so the fit
+    # should match the form the controller evaluates.  Measured at medium, that
+    # argument does not survive: LLTC N=1 on S1 reads 0.4134 m contracting with
+    # e_0 and 1.0640 m with e_1, every other G7 change reverted.  The hole in
+    # it is that the fit's e_1 comes from the N=10 HAND-WEIGHTED trajectory
+    # while the controller's e_1 comes from its own N=1 solve under P(e_0) --
+    # they are not the same e_1, so matching the algebraic form does not match
+    # the object.  Both variants are approximations; this one measures better.
+    # `e1` is kept in the signature so the mismatch stays visible to a reader.
+    P = M.lltc_matrix(p, ee, EPS)                       # (8.1), evaluated at e_0
     pred = 0.5 * jnp.einsum("bi,bij,bj->b", ee, P, ee)
     return jnp.mean((pred - vv) ** 2)                   # (8.2)
 
 @jax.jit
-def upd(p, st, ee, vv):
-    l, g = jax.value_and_grad(loss_fn)(p, ee, vv)
+def upd(p, st, ee, e1, vv):
+    l, g = jax.value_and_grad(loss_fn)(p, ee, e1, vv)
     u, st = opt.update(g, st, p)
     return optax.apply_updates(p, u), st, l
 
 n_ep = 400 if S.SCALE != "smoke" else 120
 hist = []
 for ep in range(n_ep):
-    params, st, l = upd(params, st, Ej, Vj)
+    params, st, l = upd(params, st, Ej, E1j, Vj)
     hist.append(float(l))
 
 P_of = M.lltc_matrix(params, Ej, EPS)
@@ -251,8 +288,9 @@ for qs in (0.25, 0.5, 1.0, 2.0, 4.0):
     esq = X.rollout_err(cand, duq, xr_seq, uref_seq)
     Jq = np.asarray(X.traj_cost(esq, duq, Sm_q, cm_q,
                                 jnp.broadcast_to(jnp.asarray(Pi), (B, X.NE, X.NE))))
-    acc_q = float((np.isfinite(Jq) & (Jq > 0)
-                   & (Jq < np.percentile(Jq[np.isfinite(Jq)], 95))).mean())
+    # G7b: same gate as the fit -- finite and positive, never filtered on a
+    # radius derived from the candidates themselves.
+    acc_q = float((np.isfinite(Jq) & (Jq > 0.0)).mean())
     rowsQ.append(dict(Q_scale=qs, P_00=float(Pi[0, 0]), reach_m=reach_q,
                       acceptance=acc_q))
 QS = pd.DataFrame(rowsQ)

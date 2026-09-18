@@ -646,16 +646,30 @@ class AdaptEnv(X.Env):
             self.E0 = self.scen.energy(self.pend)
         else:
             self.pend = None
+        self._dr_wrench = jnp.zeros((self.n, 6))
         if self.wrench_dr:
             self._sample_wrench_dr()
         self._buf = np.zeros((self.H, self.n, FRAME_DIM))
-        self._buf_fill = 0
+        #: per-vehicle fill count (G4).  A scalar cannot describe a batch whose
+        #: vehicles respawn independently.
+        self._buf_fill = np.zeros(self.n, dtype=np.int64)
+        self._pred = None
+        self._buf_ver, self._pred_ver = 0, -1
         self._apply_scenario_wrench()
         return out
 
-    def _sample_wrench_dr(self):
+    def _sample_wrench_dr(self, mask=None):
         """Training-time wrench randomisation (§6.3).  Start at 0.10, not 0.32:
-        0.32 is 32 % of vehicle weight and saturates training (§5.13 gate)."""
+        0.32 is 32 % of vehicle weight and saturates training (§5.13 gate).
+
+        ``mask`` (B,) bool restricts the resample to the vehicles that just
+        respawned (G4).  Without it -- the previous behaviour -- ANY vehicle
+        respawning redrew the wrench for ALL of them, so at n_env = 128 and a
+        1.5 % per-step reset rate the wrench was redrawn on ~85 % of steps.  The
+        "constant per-episode wrench" the RDP is asked to estimate from a 64-step
+        window was then white noise at the 50 Hz control rate, which is not
+        estimable from any window.
+        """
         self.key, k1, k2 = jax.random.split(self.key, 3)
         F, T = wrench_dr_magnitudes(self.wrench_dr if isinstance(self.wrench_dr, float)
                                     else WRENCH_DR_START)
@@ -663,7 +677,10 @@ class AdaptEnv(X.Env):
         d = d / jnp.linalg.norm(d, axis=-1, keepdims=True)
         t = jax.random.normal(k2, (self.n, 3))
         t = t / jnp.linalg.norm(t, axis=-1, keepdims=True)
-        self._dr_wrench = jnp.concatenate([F * d, T * t], -1)
+        w = jnp.concatenate([F * d, T * t], -1)
+        self._dr_wrench = (w if mask is None
+                           else jnp.where(jnp.asarray(mask)[:, None], w,
+                                          self._dr_wrench))
 
     def _apply_scenario_wrench(self):
         w = jnp.zeros((self.n, 6))
@@ -678,14 +695,31 @@ class AdaptEnv(X.Env):
         """Append the current 26-D frame (6.2) to the ring buffer."""
         f = np.asarray(self.frame26())
         self._buf = np.concatenate([self._buf[1:], f[None]], 0)
-        self._buf_fill = min(self._buf_fill + 1, self.H)
+        self._buf_fill = np.minimum(self._buf_fill + 1, self.H)
+        self._buf_ver += 1
+
+    def _clear_windows(self, mask):
+        """Drop the history of the vehicles that just respawned (G4).
+
+        ``make_windows`` refuses any TRAINING window that straddles an episode
+        boundary (§9.6), but the deployment buffer kept feeding the predictor
+        64-step windows that spanned a respawn -- half one flight, half another.
+        Train and test then disagree about what a window is.
+        """
+        m = np.asarray(mask, dtype=bool)
+        if not m.any():
+            return
+        self._buf[:, m, :] = 0.0
+        self._buf_fill[m] = 0
+        self._buf_ver += 1
 
     def window(self):
         """(B,H,26).  Warm-up frames are the zero-padded buffer; ``ready()``
-        says whether H real frames are present."""
+        says, per vehicle, whether H real frames are present."""
         return self._buf.transpose(1, 0, 2)
 
     def ready(self):
+        """(B,) bool -- per vehicle, not one scalar for the whole batch (G4)."""
         return self._buf_fill >= self.H
 
     SMOOTH_N = 32          # arXiv:2605.16015: "a rolling buffer of length 32"
@@ -720,8 +754,17 @@ class AdaptEnv(X.Env):
             return buf, jnp.sum(jnp.where(keep, buf, 0.0), 0) / k
 
         def est(env):
+            # G5: cache per buffer version.  ``d_channel()`` is reached twice in
+            # one control step whenever a variant routes the estimate to BOTH the
+            # observation and the model (variant C): once through
+            # ``ctrl_from_actor``'s dmod_fn and once through ``Env.obs()``.  Each
+            # call used to push a fresh entry into the 32-frame rolling mean, so
+            # the smoothing window was half as long as the paper's for C and full
+            # length for A/B -- an unintended difference between the arms.
+            if env._pred is not None and env._pred_ver == env._buf_ver:
+                return env._pred
             y = f(jnp.asarray(env.window()))
-            y = jnp.where(env.ready(), y, 0.0)
+            y = jnp.where(jnp.asarray(env.ready())[:, None], y, 0.0)
             if n_s > 1:
                 if st["buf"] is None:
                     st["buf"] = jnp.zeros((n_s,) + y.shape, y.dtype)
@@ -730,6 +773,7 @@ class AdaptEnv(X.Env):
             if filt > 0.0 and st["y"] is not None:
                 y = filt * st["y"] + (1 - filt) * y
             st["y"] = y
+            env._pred, env._pred_ver = y, env._buf_ver
             return y
 
         self.estimator = est
@@ -754,6 +798,9 @@ class AdaptEnv(X.Env):
                 self.E0 = jnp.where(rs, self.scen.energy(new), self.E0)
             info["tether_drift"] = jnp.abs(
                 self.scen.energy(self.pend) - self.E0) / jnp.abs(self.E0)
-        if self.wrench_dr and bool(jnp.any(info["reset"])):
-            self._sample_wrench_dr()
+        rs = info["reset"]
+        if bool(jnp.any(rs)):
+            if self.wrench_dr:
+                self._sample_wrench_dr(mask=rs)      # G4: only the respawned
+            self._clear_windows(rs)                  # G4: and only their history
         return r, done, info

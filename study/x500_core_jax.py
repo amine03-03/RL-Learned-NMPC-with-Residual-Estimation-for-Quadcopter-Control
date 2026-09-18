@@ -1304,12 +1304,21 @@ def make_pid_ctrl(gains=None):
                            qzaxis(qexp_tilt(jnp.cross(jnp.broadcast_to(jnp.asarray(E3),
                                             zb_des.shape), zb_des), jnp.full((B,), tmax))),
                            zb_des)
-        q_des = ref_attitude(a_des)
+        # G8: the tilt limit used to be dead code -- `zb_des` was clamped and
+        # then never read, because q_des came straight from the UNCLAMPED a_des
+        # and the collective from the unclamped norm.  Rebuild the acceleration
+        # from the limited axis so both use it.
+        a_lim = n * zb_des - P.g * jnp.asarray(E3)
+        q_des = ref_attitude(a_lim)
         x = e_to_state(e, xr)
         qe = qmul(qconj(x[:, 6:10]), q_des)
         sgn = jnp.where(qe[:, :1] >= 0.0, 1.0, -1.0)
         om_cmd = katt * 2.0 * sgn * qe[:, 1:4]
-        c = jnp.sqrt(jnp.clip(M_TOT * n[:, 0] / T_MAX, 0.0, 1.0))[:, None]
+        # G8: invert (2.10) INCLUDING the idle floor, as (4.8), hover_u and
+        # uref_from_traj all do.  The bare square root is 5.6 % high at hover.
+        r_idle = P.Om_min / P.Om_max
+        root = jnp.sqrt(jnp.clip(M_TOT * n[:, 0] / T_MAX, 0.0, 1.0))[:, None]
+        c = jnp.clip((root - r_idle) / (1.0 - r_idle), 0.0, 1.0)
         return jnp.clip(jnp.concatenate([c, om_cmd / jnp.asarray(OM_MAX)], -1),
                         jnp.asarray(U_LO), jnp.asarray(U_HI)), {}
     f.reset = lambda: st.__setitem__("I", None)
@@ -1464,9 +1473,24 @@ def costmap_apply(theta, obs, rep, N):
 def costmap_init(key, obs_dim, hid, rep, N, n_layer=2, normalise=True):
     """Cost map: trunk -> head producing the Q and p blocks for all N stages."""
     k1, k2 = jax.random.split(key, 2)
+    # G15: the head scale must go as 1/sqrt(fan_in).  With a flat 0.1 on a
+    # 256-wide trunk, z = sum_i h_i W_ij has std = 0.1*sqrt(hid)*rms(h) ~ 1.0,
+    # and under the FIVE-DECADE log map of C-7 that is not a small
+    # perturbation: sigmoid(+-3) sends S_ii to 0.017 and 590, a spread of
+    # 3.5e4 BEFORE any learning.  Measured: costmap_init('diag') flown as a
+    # controller reads 0.856 m at sat 0.276, while a fixed uniform S = 3.16 --
+    # the value the initialisation is *described* as having, and its median
+    # (3.39) -- reads 0.069 m at sat 0.000, indistinguishable from the
+    # hand-tuned NMPC baseline's 0.068 m.  The spread is the entire gap.
+    # It also worsens with width (hid=1024 at `full` gives std(z) ~ 2), which
+    # is why more capacity never helped.  The same std(z) ~ 1 put the linear
+    # term at |c| ~ 1.25 against P_HI = 2.0, i.e. 62 % of its bound at init,
+    # which dominates any channel whose weight landed near Q_LO.
+    # C-7 fixed the linear map's location and left its variance unexamined.
     th = {"trunk": mlp_init(k1, [obs_dim] + [hid] * n_layer,
                             scale_last=np.sqrt(2.0 / hid)),
-          "head": mlp_init(k2, [hid, N * REP_DIM[rep]], scale_last=0.1)}
+          "head": mlp_init(k2, [hid, N * REP_DIM[rep]],
+                           scale_last=0.1 / np.sqrt(hid))}
     if normalise:
         th["obs_norm"] = obs_norm_init(obs_dim)
     return th
@@ -1561,6 +1585,20 @@ class EnvCfg:
     mixer: str = "nominal"         # 'nominal' | 'true'
     reward: str = "quad"           # 'quad' | 'prog'
     dmod_mode: str = "first_order"
+    #: How a terminated vehicle is priced by the value function (G2).
+    #:
+    #: ``'bootstrap'`` -- the respawn is treated as a TRUNCATION: the value
+    #: target keeps its ``gamma V(s')`` term across the boundary.  ``'cut'`` is
+    #: the textbook absorbing-state treatment and is **wrong here**, because
+    #: every reward of (5.4) is strictly negative: cutting the bootstrap makes
+    #: the return of a terminated episode ``r_k`` instead of
+    #: ``r_k + gamma V ~= -300``, so PPO is told the action that left the 3 m
+    #: ball was ~+300 better than flying on -- against a crash penalty of 5.
+    #: Measured on the shipped reward: advantage +297.0 for the escape, i.e. the
+    #: policy is trained to diverge.  The episode boundary is an artefact of the
+    #: batched environment, not part of the task, so ``'bootstrap'`` is the
+    #: default and ``'cut'`` exists only to reproduce the old numbers.
+    term: str = "bootstrap"        # 'bootstrap' | 'cut'
 
 
 def nominal_spec(**kw):
@@ -1621,11 +1659,11 @@ class Env:
     def __init__(self, n, seed, ep_len, dist, paths, ep_kind=None, noise="off",
                  oracle=False, mixer="nominal", fixed=None, task="track",
                  reward="quad", oracle_target="wrench", scen=None, level=0,
-                 dmod_mode="first_order"):
+                 dmod_mode="first_order", term="bootstrap"):
         self.cfg = EnvCfg(n=n, ep_len=ep_len, paths=tuple(paths),
                           ep_kind=ep_kind or "sample", task=task, noise=noise,
                           oracle=oracle, oracle_target=oracle_target, mixer=mixer,
-                          reward=reward, dmod_mode=dmod_mode)
+                          reward=reward, dmod_mode=dmod_mode, term=term)
         self.n, self.dist = n, dict(dist)
         self.fixed = dict(fixed or {})
         self.key = jax.random.PRNGKey(int(seed))
@@ -1856,10 +1894,16 @@ def _step_jit(cfg, no_respawn, state, par, ep, prev, t, n_step, u,
     spin = jnp.linalg.norm(s_next[:, SW], axis=-1) > MAX_RATE
     crash = (bad | spin).astype(jnp.float64)
     done = bad | far | spin
+    # G2: leaving the 3 m ball is a FAILURE and is priced like one.  Previously
+    # only `bad | spin` carried the -5, so the cheapest way out of a strictly
+    # negative reward stream was to fly out of the ball, where the episode ended
+    # for free.  `crash` stays the physical-crash metric the tables report;
+    # `fail` is what the reward sees.
+    fail = (bad | spin | far).astype(jnp.float64)
     om = s_next[:, SW]
     r = (reward_prog(jnp.linalg.norm(e[:, 0:3], axis=-1),
-                     jnp.linalg.norm(e_n[:, 0:3], axis=-1), om, d_u, crash)
-         if cfg.reward == "prog" else reward_quad(e_n, du, om, d_u, crash))
+                     jnp.linalg.norm(e_n[:, 0:3], axis=-1), om, d_u, fail)
+         if cfg.reward == "prog" else reward_quad(e_n, du, om, d_u, fail))
 
     a = float(np.exp(-P.dt_c / EMA_TAU))
     prev_next = dict(
@@ -1873,10 +1917,16 @@ def _step_jit(cfg, no_respawn, state, par, ep, prev, t, n_step, u,
                 sat_v=((u[:, 0] <= U_LO[0] + 1e-9) | sat_hi).astype(jnp.float64),
                 crash=crash, pos_err=jnp.linalg.norm(e_n[:, 0:3], axis=-1),
                 tilt=jnp.linalg.norm(e_n[:, 6:9], axis=-1), u=u, du=du, om=om,
-                done=done)
+                done=done, fail=fail, far=far.astype(jnp.float64))
 
     reset = (done | (n_step >= cfg.ep_len)) & (not no_respawn)
     info["reset"] = reset
+    # G2: the mask GAE must use.  Under 'bootstrap' it is all-zero: the value
+    # target keeps gamma V(s') across the respawn, which is the standard
+    # partial-episode-bootstrapping treatment of a truncation and is what makes
+    # the failure penalty -- rather than the missing bootstrap -- the signal.
+    info["done_value"] = (done.astype(jnp.float64) if cfg.term == "cut"
+                          else jnp.zeros_like(fail))
     m = reset[:, None]
     return (jnp.where(m, s_new, s_next), _ep_where(reset, par_new, par),
             _ep_where(reset, ep_new, ep), _ep_where(reset, prev_new, prev_next),
@@ -2025,11 +2075,21 @@ def stats(r):
     pe = r["pos_err"]
     per_veh = np.sqrt((pe ** 2).mean(0))
     q1, q3 = np.percentile(per_veh, [25, 75])
+    # §5.10, made explicit.  With respawn ON -- which every evaluator in the
+    # study uses -- |e_p| can never exceed MAX_POS_ERR, so a DIVERGING
+    # controller cannot report an RMSE above roughly MAX_POS_ERR/sqrt(3).
+    # Measured: an untrained cost map reads 0.89 m at T=150 and 0.90 m at T=300
+    # with respawn on, and 11.4 m then 41.4 m with it off.  `rmse` is then a
+    # property of the bound, not of the controller, and `bound_frac` is how you
+    # tell: anything above a few per cent means read `rmse` as "diverged".
+    n_steps = max(int(pe.shape[0]), 1) * max(int(r.get("n", 1)), 1)
     return dict(rmse=float(np.sqrt((pe ** 2).mean())), rmse_iqr=float(q3 - q1),
                 maxerr=float(pe.max()), tilt=float(r["tilt"].mean()),
                 effort=float(r["effort"].mean()), smooth=float(r["smooth"].mean()),
                 sat=float(r["sat"].mean()), crash=float(r["crash"].mean()),
-                ms_per_step=float(r["ms_per_step"]), respawns=int(r["respawns"]))
+                ms_per_step=float(r["ms_per_step"]), respawns=int(r["respawns"]),
+                bound_frac=float(r["respawns"]) / n_steps,
+                bounded=bool(r["respawns"] > 0))
 
 
 def solve_latency_ms(ctrl, env1, T=40):
@@ -2067,7 +2127,19 @@ PPO_DEFAULTS = dict(gamma=0.99, lam=0.95, clip=0.2, ent_coef=0.0, vf_coef=0.5,
                     max_grad_norm=0.5, lr=3e-4, epochs=10, minib=32, sigma=0.05,
                     algo="ppo", mpve=False, mpve_coef=0.5, kl_target=0.01,
                     lr_decay=0.5, lr_grow=1.2, lr_min=1e-7, rep="diag", N=1,
-                    n_iter=5, n_diff=2, hid=256, sat_gate=0.05)
+                    n_iter=5, n_diff=2, hid=256, sat_gate=0.05,
+                    # G1: how many times ONE minibatch may halve its step before
+                    # it is skipped.  The trust region is a backtracking line
+                    # search *inside* the minibatch, not a one-way ratchet on
+                    # the iteration: with backtracks=0 (the old behaviour) the
+                    # first over-large step aborts every remaining minibatch and
+                    # epoch, so an iteration lands at most one update -- and
+                    # because that update is also reverted, it lands none.
+                    kl_backtracks=8,
+                    # G1: how many minibatches may trip before the iteration is
+                    # abandoned.  A finite cap keeps a pathological iteration
+                    # bounded without making the FIRST trip fatal.
+                    kl_give_up=4)
 
 
 def gae(rew, val, val_last, done, gamma, lam):
@@ -2106,6 +2178,18 @@ def mpve_value_loss(critic, obs_n, e_seq, du_seq, om, d_u, gamma):
     and holding the preview/integral/history blocks at their current values.
     Over a 20-200 ms horizon those move very little, but this is an
     approximation, not an identity.
+
+    **Second documented approximation (G10).**  ``om`` and ``d_u`` are passed as
+    ZEROS by the caller, because the 10-state control model has no body-rate
+    state and predicts no command increment -- ``e[6:9]`` is the tilt error
+    delta, not omega.  So ``r_hat`` drops the ``-0.02|om|^2`` and
+    ``-0.05|du_u|^2`` terms of (5.4) and is systematically LESS negative than
+    the reward the TD target in ``l_v`` is built from.  Equation (9)'s
+    consistency term therefore regresses V onto targets from a slightly
+    different reward than the one it is being fit to, which biases the critic
+    optimistic in proportion to how hard the policy is working the rates.  Read
+    the MPVE columns of §8.3 with that in mind; the size of the bias is
+    0.02*|om|^2 + 0.05*|du_u|^2 per predicted stage.
     """
     B, N = obs_n.shape[0], du_seq.shape[1]
     sub = lambda e: jnp.concatenate([e, obs_n[:, NE:]], -1)
@@ -2199,6 +2283,63 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
     def rollout_mean(actor_p, o, e, xr_seq, uref_seq, d):
         return mpc_mean(actor_p, o, e, xr_seq, uref_seq, d)[0]
 
+    # G11: defined ONCE, outside the iteration loop.  `jax.jit` keys its
+    # cache on the function object, so re-creating `loss_fn` every iteration
+    # made every iteration a cache MISS and fully recompiled the
+    # differentiated MPC -- a value_and_grad through a 10-iteration iLQR with
+    # a 6-alpha line search and a vmapped jacfwd.  Measured at the medium
+    # scale table: 32.8 s per iteration of which the rollout is 0.8 s, and the
+    # cost did not move when the number of optimiser trials went 46 -> 10 or
+    # when epochs*minib went 96 -> 16, because none of that was the cost.
+    # loss_fn closes only over mpc_mean, use_d and c, all loop-invariant.
+    def loss_fn(p, ob, ee, xrs, urs, dd, aa, lp_old, adv, ret):
+        mu, du = mpc_mean(p["actor"], ob, ee, xrs, urs, dd if use_d else None)
+        lp = _logp(aa, mu, p["log_sigma"])
+        # guard the ratio: a diverged actor can otherwise produce inf here
+        # and take the whole update to NaN before the KL trip can fire
+        ratio = jnp.exp(jnp.clip(lp - lp_old, -20.0, 20.0))
+        l_pi = -jnp.mean(jnp.minimum(
+            ratio * adv, jnp.clip(ratio, 1 - c["clip"], 1 + c["clip"]) * adv))
+        von = normalise_obs(p["actor"], ob)
+        l_v = jnp.mean((mlp_apply(p["critic"], von)[:, 0] - ret) ** 2)
+        if c["mpve"]:                                    # B3: actually used
+            e_seq = rollout_err(ee, du, xrs, urs, dd if use_d else None)
+            zb3 = jnp.zeros((ob.shape[0], 3))
+            l_v = l_v + c["mpve_coef"] * mpve_value_loss(
+                p["critic"], von, e_seq, du, zb3,
+                jnp.zeros((ob.shape[0], NU)), c["gamma"])
+        ent = jnp.sum(p["log_sigma"] + 0.5 * np.log(2 * np.pi * np.e))
+        loss = l_pi + c["vf_coef"] * l_v - c["ent_coef"] * ent
+        kl = jnp.mean(lp_old - lp)
+        cf = jnp.mean((jnp.abs(ratio - 1.0) > c["clip"]).astype(jnp.float64))
+        return loss, (l_pi, l_v, ent, kl, cf)
+
+    def _freeze_norm(g):
+        """G3: the running observation statistics are NOT parameters.
+
+        They sit inside ``params['actor']`` so that they travel with the
+        checkpoint, and ``normalise_obs`` reads them differentiably -- so
+        Adam was updating ``mu`` and ``var`` as if they were weights, and
+        ``obs_norm_update`` then folded the corrupted values into the next
+        Welford step.  They also consumed part of the global-norm clip
+        budget.  Zeroing their gradient leaves the pytree shape (and hence
+        ``opt_state``) untouched.
+        """
+        if "obs_norm" not in g["actor"]:
+            return g
+        gn = dict(g["actor"])
+        gn["obs_norm"] = jax.tree_util.tree_map(jnp.zeros_like, gn["obs_norm"])
+        return dict(g, actor=gn)
+
+    _grad_raw = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
+    # the backtracking search evaluates the KL once per trial, and each
+    # evaluation re-solves the MPC, so it is jitted rather than traced anew
+    _kl_only = jax.jit(lambda p, *a: loss_fn(p, *a)[1][3])
+
+    def grad_fn(p, *a):
+        (l, aux), g = _grad_raw(p, *a)
+        return (l, aux), _freeze_norm(g)
+
     rows = []
     for it in range(iters):
         keys = ("o", "e", "xr", "ur", "d", "a", "lp", "rw", "vl", "dn")
@@ -2215,8 +2356,12 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
             lp = _logp(a, mu, params["log_sigma"])                       # (7)
             v = mlp_apply(params["critic"], normalise_obs(params["actor"], o))[:, 0]
             r, done, info = env.step(a)          # the env clips into the box
+            # G2: `done_value`, not `done`.  Under the default term='bootstrap'
+            # it is zero, so the value target keeps gamma V(s') across the
+            # respawn; `done` would cut it and make divergence profitable.
+            dn = info.get("done_value", done.astype(jnp.float64))
             for kk, vv in zip(keys, (o, e, xr_seq, uref_seq, d, a, lp, r, v,
-                                     done.astype(jnp.float64))):
+                                     dn)):
                 BUF[kk].append(vv)
             sat_acc.append(float(info["sat"]))
             crash_acc.append(float(jnp.mean(info["crash"])))
@@ -2230,32 +2375,10 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
         ADVf, RETf = flat(ADV), flat(RET)
         ADVf = (ADVf - ADVf.mean()) / (ADVf.std() + 1e-8)
 
-        def loss_fn(p, ob, ee, xrs, urs, dd, aa, lp_old, adv, ret):
-            mu, du = mpc_mean(p["actor"], ob, ee, xrs, urs, dd if use_d else None)
-            lp = _logp(aa, mu, p["log_sigma"])
-            # guard the ratio: a diverged actor can otherwise produce inf here
-            # and take the whole update to NaN before the KL trip can fire
-            ratio = jnp.exp(jnp.clip(lp - lp_old, -20.0, 20.0))
-            l_pi = -jnp.mean(jnp.minimum(
-                ratio * adv, jnp.clip(ratio, 1 - c["clip"], 1 + c["clip"]) * adv))
-            von = normalise_obs(p["actor"], ob)
-            l_v = jnp.mean((mlp_apply(p["critic"], von)[:, 0] - ret) ** 2)
-            if c["mpve"]:                                    # B3: actually used
-                e_seq = rollout_err(ee, du, xrs, urs, dd if use_d else None)
-                zb3 = jnp.zeros((ob.shape[0], 3))
-                l_v = l_v + c["mpve_coef"] * mpve_value_loss(
-                    p["critic"], von, e_seq, du, zb3,
-                    jnp.zeros((ob.shape[0], NU)), c["gamma"])
-            ent = jnp.sum(p["log_sigma"] + 0.5 * np.log(2 * np.pi * np.e))
-            loss = l_pi + c["vf_coef"] * l_v - c["ent_coef"] * ent
-            kl = jnp.mean(lp_old - lp)
-            cf = jnp.mean((jnp.abs(ratio - 1.0) > c["clip"]).astype(jnp.float64))
-            return loss, (l_pi, l_v, ent, kl, cf)
-
-        grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
         n = F["o"].shape[0]
         mb = max(n // c["minib"], 1)
         aux_last, gnorm, kl_seen = None, 0.0, 0.0
+        n_land, kl_rej = 0, 0.0
         args_all = (F["o"], F["e"], F["xr"], F["ur"], F["d"], F["a"], F["lp"],
                     ADVf, RETf)
         if c["algo"] == "trpo":
@@ -2274,13 +2397,45 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
             aux_last = (aux_last[0], aux_last[1], aux_last[2],
                         jnp.asarray(kl_a), aux_last[4])
         else:
-            stop = False
+            # ------------------------------------------------------------- G1
+            # Trust region as a BACKTRACKING LINE SEARCH inside the minibatch.
+            #
+            # The mechanism is still B1's: the MPC mean is far more sensitive to
+            # its cost map than an MLP's output is to its weights (one clipped
+            # Adam step moves mu by 0.32 for a 0.5 % change in S, which at
+            # sigma = 0.05 is KL 4.8), so a step has to be applied, measured and
+            # undone if it left the region.  What was wrong was the bookkeeping
+            # around it:
+            #
+            #   * a trip set ``stop = True``, abandoning every remaining
+            #     minibatch AND epoch, so an iteration landed at most one step;
+            #   * that one step was itself reverted, so it landed none -- the
+            #     actor, the critic and log_sigma were all rolled back together,
+            #     which is why `sigma` and `entropy` are byte-identical down
+            #     every column of every training log in artifacts/;
+            #   * ``lr`` was halved on every trip and grown only under
+            #     ``if kl_seen and kl_seen < ...`` -- and ``kl_seen`` is still
+            #     0.0 when the FIRST minibatch trips, which is falsy, so the
+            #     growth branch was dead and lr was a one-way ratchet: measured,
+            #     3e-4 -> 1e-7 (the floor) in 12 iterations, monotonically.
+            #
+            # Net effect: the AC-MPC actor never left its initialisation, at any
+            # scale.  `full` does not fix it -- 400 iterations ratchet lr to the
+            # floor just as 80 do.
+            #
+            # Now: halve the step for THIS minibatch until it satisfies the KL
+            # bound (up to kl_backtracks times), keep the critic step even when
+            # the actor step is rejected, and move on to the next minibatch
+            # instead of abandoning the iteration.
+            trips = n_land = 0
             for _ in range(c["epochs"]):
-                if stop:
+                if trips >= c["kl_give_up"]:
                     break
                 key, k = jax.random.split(key)
                 perm = jax.random.permutation(k, n)
                 for i in range(c["minib"]):
+                    if trips >= c["kl_give_up"]:
+                        break
                     idx = perm[i * mb:(i + 1) * mb]
                     if idx.size == 0:
                         continue
@@ -2288,30 +2443,46 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
                     (loss, aux_last), g = grad_fn(params, *mbargs)
                     gnorm = float(optax.global_norm(g))
                     if not np.isfinite(gnorm):      # never apply a NaN update
-                        stop = True
+                        trips = c["kl_give_up"]
                         break
-                    # Trust region, enforced by REVERTING (B1 consequence).
-                    # The MPC mean is far more sensitive to the cost map than an
-                    # MLP's output is to its weights: measured, one clipped Adam
-                    # step moves mu by 0.32 for a 0.5 % change in S, which at
-                    # sigma = 0.05 is already KL 4.8.  Checking KL only after
-                    # the step -- the usual PPO early stop -- lets that step
-                    # land, and the next iteration goes NaN.  So the step is
-                    # applied, measured, and undone if it left the region.
-                    prev = jax.tree_util.tree_map(lambda z: z, params)
-                    prev_opt = opt_state
-                    upd, opt_state = opt.update(g, opt_state, params)
-                    params = optax.apply_updates(params, upd)
-                    kl_new = float(loss_fn(params, *mbargs)[1][3])
-                    if not np.isfinite(kl_new) or kl_new > 4 * c["kl_target"]:
-                        params, opt_state = prev, prev_opt
+                    # every trial restarts from the SAME point with a smaller
+                    # step, so the gradient is used once however many times the
+                    # region is missed.  (Shrinking in place would let the
+                    # critic take one step per backtrack off a single gradient.)
+                    base, base_opt = jax.tree_util.tree_map(
+                        lambda z: z, params), opt_state
+                    accepted, kl_new, trial, trial_opt = False, np.inf, None, opt_state
+                    for _bt in range(int(c["kl_backtracks"]) + 1):
+                        upd, trial_opt = opt.update(g, base_opt, base)
+                        trial = optax.apply_updates(base, upd)
+                        kl_new = float(_kl_only(trial, *mbargs))
+                        if np.isfinite(kl_new) and kl_new <= 4 * c["kl_target"]:
+                            params, opt_state, accepted = trial, trial_opt, True
+                            break
+                        lr_cur = max(lr_cur * c["lr_decay"], c["lr_min"])
+                        base_opt.hyperparams["lr"] = jnp.asarray(lr_cur)
+                    if not accepted:
+                        # the ACTOR step is rejected; the critic step is kept.
+                        # The critic is a supervised regression on the returns
+                        # and has nothing to do with the policy trust region --
+                        # rolling it back with the actor is why value_loss sat at
+                        # 2e3-1.2e4 for entire runs.
+                        params = dict(base, critic=trial["critic"])
+                        opt_state = trial_opt
+                        trips += 1
+                        kl_rej = max(kl_rej, kl_new) if np.isfinite(kl_new) else kl_rej
+                    else:
+                        n_land += 1
+                        kl_seen = max(kl_seen, kl_new)
+                        # G12: report the KL of the step that was KEPT.  Writing
+                        # the last TRIAL's KL here -- accepted or not -- put
+                        # rejected trials in the `kl` column, so nb3's headline
+                        # PPO/TRPO table read "PPO mean_kl 1278, max 15578"
+                        # against TRPO's 0.0141 when every ACCEPTED PPO step is
+                        # <= 4*kl_target = 0.04 by construction.  The rejected
+                        # maximum is still logged, as `kl_rejected`.
                         aux_last = (aux_last[0], aux_last[1], aux_last[2],
                                     jnp.asarray(kl_new), aux_last[4])
-                        lr_cur = max(lr_cur * c["lr_decay"], c["lr_min"])
-                        opt_state.hyperparams["lr"] = jnp.asarray(lr_cur)
-                        stop = True
-                        break
-                    kl_seen = max(kl_seen, kl_new)
         # B4: the observation statistics are refreshed at the END of the
         # iteration, never between the rollout and the update.  Updating them in
         # between makes mpc_mean in the loss normalise differently from the
@@ -2322,7 +2493,11 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
             params["actor"] = dict(
                 params["actor"],
                 obs_norm=obs_norm_update(params["actor"]["obs_norm"], F["o"]))
-        if kl_seen and kl_seen < 0.5 * c["kl_target"]:     # slack -> step up
+        # G1: gate on whether a step LANDED, not on ``kl_seen`` being truthy.
+        # kl_seen == 0.0 is both "no step landed" and "a step landed with zero
+        # KL", and Python reads both as False -- which is what made the decay a
+        # one-way ratchet.
+        if n_land and kl_seen < 0.5 * c["kl_target"]:      # slack -> step up
             lr_cur = min(lr_cur * c["lr_grow"], c["lr"])
             opt_state.hyperparams["lr"] = jnp.asarray(lr_cur)
         rows.append(dict(iter=it, reward=float(ST["rw"].mean()), ep_len=float(T_rollout),
@@ -2331,7 +2506,16 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
                          clipfrac=float(aux_last[4]), grad_norm=gnorm,
                          sigma=float(jnp.exp(params["log_sigma"]).mean()),
                          lr=lr_cur, sat=float(np.mean(sat_acc)),
-                         crash_rate=float(np.mean(crash_acc)), wall_s=time.time()))
+                         crash_rate=float(np.mean(crash_acc)),
+                         # G1: the column that makes the failure visible.  If
+                         # `landed` is 0 for every iteration the policy is its
+                         # initialisation and no downstream row is a result.
+                         landed=int(n_land if c["algo"] != "trpo" else c["epochs"]),
+                         # G12: the largest KL among REJECTED trials.  A
+                         # diagnostic of how ill-conditioned the cost-map ->
+                         # command map is; it is not a KL the policy ever took.
+                         kl_rejected=float(kl_rej),
+                         wall_s=time.time()))
         if verbose and (it % max(iters // 10, 1) == 0 or it == iters - 1):
             r_ = rows[-1]
             print(f"  it {it:4d}  R {r_['reward']:+8.3f}  vloss {r_['value_loss']:8.3f} "
@@ -2340,6 +2524,15 @@ def train_ppo(env_fn, cfg, seed=0, actor=None, critic=None, log_path=None,
     df = pd.DataFrame(rows)
     df["wall_s"] = df["wall_s"] - df["wall_s"].iloc[0]
     tail = df.iloc[int(0.8 * len(df)):]
+    if "landed" in df and int(df["landed"].sum()) == 0:
+        print("!" * 78)
+        print("!! NO-UPDATE GATE FAILED: not one policy step was accepted in "
+              f"{len(df)} iterations.")
+        print("!! The returned actor IS its initialisation.  Every row built on "
+              "it measures the initialiser, not the algorithm, and no amount of "
+              "extra iterations changes that.  Check kl_target / kl_backtracks "
+              "against the printed kl column.")
+        print("!" * 78)
     if len(tail) and tail["sat"].mean() > c["sat_gate"]:
         print("!" * 78)
         print(f"!! SATURATION GATE FAILED: collective saturated "
@@ -2403,36 +2596,47 @@ def trpo_step(actor, log_sigma, act_mu, ob, zz, lp_old, adv, max_kl=0.01,
     estimated, which removes the usual source of TRPO flakiness.
     """
     inv_var = jnp.exp(-2.0 * log_sigma)
+    # G3: ``actor`` carries the running observation statistics so that they
+    # travel with the checkpoint, and ``normalise_obs`` reads them
+    # differentiably.  Flattening the whole dict therefore put ``obs_norm['mu']``
+    # and ``['var']`` into the natural-gradient direction, and the TRPO step
+    # OVERWROTE the normaliser -- after which ``obs_norm_update`` folded the
+    # corrupted values into the next Welford step.  Optimise over the weights
+    # only; ``frozen`` is carried through unchanged.
+    W_KEYS = tuple(k for k in actor if k != "obs_norm")
+    frozen = {k: v for k, v in actor.items() if k not in W_KEYS}
+    w0 = {k: actor[k] for k in W_KEYS}
+    whole = lambda w: {**frozen, **w}
 
-    def surrogate(p):
-        mu = act_mu(p, ob)
+    def surrogate(w):
+        mu = act_mu(whole(w), ob)
         lp = _logp(zz, mu, log_sigma)
         return jnp.mean(jnp.exp(lp - lp_old) * adv)
 
-    def kl(p):
-        mu = act_mu(p, ob)
+    def kl(w):
+        mu = act_mu(whole(w), ob)
         mu_old = jax.lax.stop_gradient(act_mu(actor, ob))
         return 0.5 * jnp.mean(jnp.sum((mu - mu_old) ** 2 * inv_var, -1))
 
-    g = _flat(jax.grad(surrogate)(actor))
+    g = _flat(jax.grad(surrogate)(w0))
     if float(jnp.linalg.norm(g)) < 1e-10:
         return actor, 0.0, 0.0
 
     def Avp(v):
-        hv = jax.jvp(lambda p: _flat(jax.grad(kl)(p)), (actor,),
-                     (_unflat(actor, v),))[1]
+        hv = jax.jvp(lambda w: _flat(jax.grad(kl)(w)), (w0,),
+                     (_unflat(w0, v),))[1]
         return hv + damping * v
 
     step_dir = _cg(Avp, g)
     shs = 0.5 * step_dir @ Avp(step_dir)
     step = step_dir * jnp.sqrt(max_kl / jnp.maximum(shs, 1e-20))
-    old_s = float(surrogate(actor))
+    old_s = float(surrogate(w0))
     for i in range(backtracks):
         frac = 0.5 ** i
-        cand = _unflat(actor, _flat(actor) + frac * step)
+        cand = _unflat(w0, _flat(w0) + frac * step)
         new_s, new_kl = float(surrogate(cand)), float(kl(cand))
         if new_kl <= 1.5 * max_kl and new_s > old_s:
-            return cand, new_kl, new_s - old_s
+            return whole(cand), new_kl, new_s - old_s
     return actor, 0.0, 0.0
 
 

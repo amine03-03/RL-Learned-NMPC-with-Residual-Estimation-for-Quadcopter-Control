@@ -331,7 +331,7 @@ Run against the final tree, on an otherwise idle machine:
 
 | check | result |
 |---|---|
-| `pytest study/tests/` | **83 passed** (23 of them pin audit findings) |
+| `pytest study/tests/` | **101 passed** (23 pin the A–F findings, 15 the G series) |
 | `study/check_consistency.py` | **all consistency checks passed** |
 | `acmpc_controller.check_glue` | **PASSED** |
 | notebooks 1–7 | all seven run to completion in one chain |
@@ -342,3 +342,429 @@ deployment NumPy path — CNN 0.78, TCN 1.95, GRU 5.24, LSTM/selected 5.94 ms
 p95. Note that this is a different measurement from the ledger's `ms_p95`
 column, which times the JAX study path via `solve_latency_ms`; F1 above is what
 happens when that distinction is not held carefully.
+
+---
+
+# G. The medium-run debug — why no learned controller converged
+
+A third pass, prompted by the `X500_SCALE=medium` run. The symptom that started
+it is a contradiction inside that run's own output: Notebook 6 reports
+`AC-MPC N=1` at 1.07 m RMSE on **every** suite, **every** path and — in
+Notebook 5 — every disturbance scenario and level, a spread of 0.01 m across
+conditions that move LQR by 0.28 → 0.95 m; while Notebook 7 films the *same
+checkpoints* at 45–50 m, flying 0.09 rad of a 6.28 rad lap. Both numbers are
+correct. They measure different things.
+
+`study/tests/test_g_training_regressions.py` pins all of it.
+
+## G1 — the PPO trust region never let a single step land
+
+`train_ppo`'s trust region applies a step, measures the KL, and reverts if the
+region was left (B1). The mechanism is right. The bookkeeping around it was not:
+
+1. a trip set `stop = True`, which broke out of the minibatch loop **and** the
+   epoch loop, so an iteration attempted at most one update;
+2. that one update was reverted — and the revert restored the whole parameter
+   tree, so the **critic** and `log_sigma` were rolled back with the actor;
+3. `lr` was halved on every trip and grown only under
+   `if kl_seen and kl_seen < 0.5 * kl_target`. `kl_seen` is still the float
+   `0.0` when the *first* minibatch trips, and Python reads that as falsy, so
+   the growth branch was unreachable and the decay was a one-way ratchet.
+
+Measured, on the shipped code at `n_env=32, epochs=4, minib=8`:
+
+| | |
+|---|---|
+| `optax.apply_updates` calls, 8 iterations | **8** (256 intended) |
+| of which reverted | **8** |
+| net policy steps landed | **0** |
+| `lr` over those 8 iterations | 1.5e-4 → 4.7e-6, halving every iteration, never growing |
+| `sigma`, `entropy` | **byte-identical down every column** |
+
+`sigma` is a trained parameter with a non-zero gradient, so a frozen `sigma`
+column is proof that nothing was applied. The same signature is in every
+training log committed under `artifacts/` — `log_nominal.csv`,
+`log_DR-all.csv`, `log_DR-all+noise.csv` all show `lr` halving monotonically and
+`entropy` constant at `-1.9127258067248345`.
+
+From `lr = 3e-4`, twelve halvings reach `lr_min = 1e-7`. **`X500_SCALE=full`
+does not fix this**: 400 iterations ratchet the learning rate to the floor
+exactly as 80 do. The AC-MPC and Adaptive AC-MPC rows of every scale table are
+the *initialiser*, which is also why Notebook 3's representation sweep ranks
+`chol` (which starts at `S ≈ Q_LO·I`, i.e. with the quadratic term absent, so
+the solve is driven by the terminal matrix) above `diag` (which starts at the
+sigmoid mid-point, a uniform 3.16 on all 13 channels): that sweep compares three
+*initialisations*, not three learned representations.
+
+**Fixed** by making the region a backtracking line search *inside* the
+minibatch: halve the step for that minibatch until it satisfies the bound (up to
+`kl_backtracks`), keep the critic step when the actor step is rejected, gate the
+`lr` growth on whether a step landed rather than on a float being truthy, and
+carry on to the next minibatch instead of abandoning the iteration. `train_ppo`
+now reports a `landed` column and prints a **NO-UPDATE GATE** banner when it
+sums to zero.
+
+## G2 — the reward paid the policy to fly out of the ball
+
+`_step_jit` terminates a vehicle on `bad | far | spin` but charged the −5 crash
+penalty only for `bad | spin`. Leaving the 3 m position ball was a **free**
+termination, and every term of (5.4) is strictly negative, so cutting the value
+bootstrap at that termination makes the return of a terminated episode `r_k`
+instead of `r_k + γV`.
+
+Measured with the shipped `gae`, a consistent critic, `r = −3`/step, `γ = 0.99`:
+
+| | advantage at the escape step |
+|---|---|
+| no termination | +0.00 |
+| termination | **+297.00** |
+| crash penalty available to oppose it | −5.0 (1.7 % of it) |
+
+PPO was being trained to diverge. That is precisely what Notebook 7 films, and
+it is why the TRPO arm — which *does* update (it never had the G1 revert) —
+still lands at 1.07 m: it is optimising the reward it was given.
+
+**Fixed** two ways, both needed. `far` now reaches the reward like any other
+failure, and `EnvCfg.term` defaults to `'bootstrap'`: the respawn is treated as
+a **truncation**, so the value target keeps its `γV(s')` term across the
+boundary. The episode boundary is an artefact of the batched environment, not
+part of the task. `term='cut'` reproduces the old behaviour.
+
+## G3 — the running observation normaliser was being optimised
+
+`obs_norm` lives inside `params['actor']` so that it travels with the
+checkpoint, and `normalise_obs` reads it differentiably. Nothing excluded it
+from the optimised tree, so Adam updated `mu` and `var` as if they were weights
+— and `obs_norm_update` then folded the corrupted values into the next Welford
+step. It also consumed part of the `clip_by_global_norm` budget. `trpo_step` was
+worse: `_flat(actor)` put the statistics straight into the natural-gradient
+direction, so the TRPO step **overwrote the normaliser**.
+
+**Fixed**: the gradient of `obs_norm` is zeroed before the optimiser sees it
+(keeping the pytree shape, so `opt_state` is untouched), and `trpo_step`
+optimises over the weight subtree only.
+
+## G4 — the training disturbance was white noise, not a per-episode wrench
+
+`AdaptEnv.step` called `_sample_wrench_dr()` whenever **any** vehicle respawned,
+and that method redrew the wrench for the **whole batch**. At `n_env = 128` with
+a ~1.5 %/step reset rate, at least one vehicle resets on ~85 % of steps, so the
+"constant per-episode wrench" the RDP is asked to infer from a 64-step window
+was redrawn at close to the 50 Hz control rate. No window can estimate that.
+
+The window buffer had the mirror-image problem: `_buf_fill` was a single scalar
+for the batch and nothing cleared a respawned vehicle's history, so deployment
+windows spanned episode boundaries — while `make_windows` refuses exactly that
+for the *training* windows (§9.6). Train and test disagreed about what a window
+is.
+
+**Fixed**: `_sample_wrench_dr(mask=...)` redraws only the vehicles that
+respawned; `_buf_fill` is per-vehicle; `_clear_windows(mask)` drops a respawned
+vehicle's history and `ready()` returns a per-vehicle mask.
+
+## G5 — the estimator ran twice per control step for variant C
+
+A variant that routes the estimate to **both** the observation and the model
+(C) reaches `d_channel()` twice in one control step: once through
+`ctrl_from_actor`'s `dmod_fn` and once through `Env.obs()`. Each call pushed a
+fresh entry into the 32-frame rolling mean, so C's smoothing window was half the
+paper's length while A's and B's were full length — an unintended difference
+between the arms being compared. **Fixed** by caching the prediction per buffer
+version.
+
+## G6 — the model-correction variants were never trained with the correction
+
+`train_ppo` reads the residual into the prediction dynamics only when
+`cfg['use_d']` is set. Notebook 5's `CFG` never set it. Variants **B** and **C**
+— the two whose entire definition is "the residual goes into the model" — were
+therefore trained on nominal prediction dynamics and evaluated with `dmod_fn`
+feeding the residual into `fc()`. The same mismatch applied to the **Oracle**
+arm, which was evaluated with `to_model=True` although it trained without it;
+Oracle is the reference the whole "value of information / cost of estimation"
+decomposition is measured against.
+
+**Fixed**: variants train with `use_d` matching their `to_model` flag and with
+the estimator attached to the *training* environment, so the policy learns
+against the prediction it will be deployed with; Oracle evaluates with
+`to_model=False`, its privilege being the observation channel.
+
+## G7 — the LLTC fit scored a different object from the controller
+
+Two independent problems in Notebook 2, both consistent with `R² = 0.9999`
+sitting next to an LLTC row 7.5× worse than plain NMPC N=1 at 26 % saturation:
+
+- **wrong argument.** `V1 = J − ℓ₀` is the cost-to-go from `e₁`, and
+  `make_lltc_ctrl` scores `½ e₁ᵀ P(e₀) e₁` as the terminal cost of the N=1
+  problem. The fit regressed `½ e₀ᵀ P(e₀) e₀` onto `V1`. The form that was
+  validated is not the form that is used.
+- **the acceptance gate was a tautology.** `keep = V1 > 0 & V1 < percentile(V1,
+  95)` accepts 95 % of any input, which is why `acceptance` reads `0.9492` in
+  *every* row of the terminal-weight sensitivity table, unchanged while `reach_m`
+  moves 1.07 → 0.29 m. It was printed as a diagnostic beside the quantity it
+  does not respond to.
+
+A third, not a bug but worth stating: `P_θ(e) = L(e)L(e)ᵀ + εI` with `L` an MLP
+of `e` makes `½eᵀP_θ(e)e` an arbitrary non-negative function of `e`, so a high
+R² is a statement about MLP capacity on 243 points, not about a *quadratic*
+terminal cost. And candidates were drawn on one shell at `‖e‖ ≈ 0.8 m` while the
+closed loop lives at `‖e‖ ≈ 0.05 m`, so the controller queries the network a
+factor ~15 outside its fit support.
+
+**Fixed**: the fit contracts with `e₁`, the gate is `finite ∧ V1 > 0 ∧ ‖e₁‖ ≤
+2·reach`, and candidates are sampled over decades of magnitude rather than one
+shell.
+
+## G8 — the PID tilt limit was dead code
+
+`make_pid_ctrl` clamped `zb_des` to `tilt_max` and then never read it: `q_des`
+came from the unclamped `a_des` and the collective from the unclamped norm. The
+collective also used the bare square root, ignoring the idle floor that (4.8),
+`hover_u` and `uref_from_traj` all invert (A2) — 5.6 % high at hover. PID is
+excluded from the study comparison (§5.12) and is only the ROS incumbent of
+§9.8, so nothing in the tables moves. **Fixed** anyway.
+
+## G9 — RMSE under respawn is a property of the bound
+
+The `Env` docstring already names this ("The 3 m bound is a measurement trap,
+§5.10"), and `study_moderate.py` opens with the symptom. It is worth converting
+into a number, because the medium-run tables were still read as tracking errors.
+
+A cost map that was **never trained** — a fresh `costmap_init`, which after G1
+is what every AC-MPC checkpoint contains — measures:
+
+| respawn | T | rmse | maxerr | sat |
+|---|---|---|---|---|
+| on | 150 | 0.892 | 2.898 | 0.286 |
+| on | 300 | 0.904 | 3.135 | 0.332 |
+| **off** | 150 | **11.39** | 36.60 | 0.177 |
+| **off** | 300 | **41.36** | 117.89 | 0.244 |
+
+(`hid=256`, `ilqr=10`, seed 0. Whether a *particular* random draw diverges is a
+property of that draw — a smaller net sometimes holds — but the medium run's own
+checkpoints plainly did, which is what Notebook 7 films.)
+
+With the bound on, RMSE does not grow with the rollout length, because `|e_p|`
+is truncated at 3 m; without it, it grows without limit. 0.89–0.90 m against the
+medium run's 1.07 m, and 41 m against Notebook 7's 45–50 m. Notebook 7 is the
+only place `no_respawn` is set, which is the entire explanation for the
+Notebook 6 / Notebook 7 contradiction.
+
+**Fixed** by making it visible rather than by changing it: `stats()` now returns
+`bound_frac` and `bounded`, and Notebook 6 names the cells where `bound_frac`
+exceeds 0.5 % and says their `rmse` is not comparable with the rows that never
+respawned.
+
+## G10 — MPVE prices its predicted trajectory with a different reward
+
+Not a bug, but it was undocumented and it biases the critic. `mpve_value_loss`
+builds `r_hat` with `om` and `d_u` passed as **zeros**, because the 10-state
+control model has no body-rate state and predicts no command increment
+(`e[6:9]` is the tilt error `delta`, not `omega`). So the predicted reward drops
+the `-0.02|om|²` and `-0.05|Δu|²` terms of (5.4) and is systematically less
+negative than the reward the ordinary TD target in `l_v` is built from.
+Equation (9)'s consistency term is therefore regressing `V` onto targets from a
+different reward than the one it is being fitted to, optimistic in proportion to
+how hard the policy is working the rates. Documented in the docstring; no code
+change, because the quantities genuinely are not available in the prediction.
+
+## What the G-series fixes were verified against
+
+`pytest study/tests/` — **101 passed**, 15 of them the G series.
+`study/check_consistency.py` — all checks passed.
+
+G1 measured end to end, same harness before and after
+(`n_env=16, T_rollout=12, epochs=3, minib=4, hid=32`, 8 iterations):
+
+| | before | after |
+|---|---|---|
+| policy steps landed | **0** of 256 | **85** of 96 |
+| `lr` | 1.5e-4 → 4.7e-6, monotone **down** | 1.2e-7 → 3.6e-7, **growing** |
+| `sigma` | frozen, byte-identical | 0.049993 → 0.049992 |
+| ‖Δθ‖₂ (actor) | 0 | 1.5e-2 |
+| `kl` | 4.96, 2214, 519, 600, 45, 1.3 … | ≤ 0.006, inside the region |
+
+Iteration 0 lands one step — it backtracks ~11 times to find the admissible step
+size, which is the work the old ratchet spread over twelve wasted iterations —
+and every iteration after it lands all 12.
+
+**G2 is not yet verified end to end, and the distinction matters.** It rests on
+the code reading and on the direct `gae` measurement (+297.00 for the escape
+against −5 for a crash), both of which are solid. But no closed-loop run has yet
+shown `term='cut'` and `term='bootstrap'` producing *different policies*: at the
+probe size above, zero vehicles terminate over 96 steps × 16 vehicles
+(`done = 0`, `far = 0`), so `done_value` is all-zero under both modes and the two
+arms come out bit-identical. Exercising G2 needs rollouts long enough to reach
+the 3 m bound — `T_rollout = 32` at `medium`, not 12 — i.e. one medium-scale
+Notebook 3 run per `term` mode. Until that exists, treat G2 as a diagnosed
+mechanism rather than a measured policy change.
+
+The `sat` gate stays a real precondition, and G1's fix does not clear it. With
+a policy that trains, `sat` still sits at 0.14–0.32 in the probe above. That is
+**not** an artefact of the exploration noise: with `U_HOVER = 0.7287` and a
+collective box of [0, 1], the probability that `u_hover + sigma*z` leaves the box
+is
+
+| σ | upper | lower | total |
+|---|---|---|---|
+| 0.05 | 2.9e-8 | 2.0e-48 | **2.9e-8** |
+| 0.15 | 0.0353 | 5.9e-7 | 0.0353 |
+| 0.30 | 0.1829 | 0.0076 | 0.1905 |
+
+against B1's measured 10.9 % / 15.6 % / 29.7 %. At σ = 0.05 noise around the trim
+cannot produce 10.9 %, let alone 35 %, by ten orders of magnitude. So the
+saturation is the policy **mean** sitting at or outside the box — the cost map is
+commanding near-maximum collective — which is precisely the condition the gate
+exists to catch. Keep the 5 % limit; a run that fails it has a policy pinned
+against its input box regardless of how many steps landed, and its rows are still
+void. Only σ = 0.30 has a noise contribution (0.19) comparable to its reading.
+
+One behavioural consequence of the G6 fix worth watching: Notebook 5 now trains
+variants B and C against the RDP trained earlier in the same notebook. That is
+the correct causal order, but it couples those two arms to the estimator's
+quality — a weak RDP is inherited by the policies that consume it.
+
+## G12 — the `kl` column reported rejected trials *(regression introduced by G1)*
+
+The backtracking search of G1 wrote the last *trial's* KL into `aux_last`
+whether or not that trial was accepted, so the training log's `kl` column
+carried **rejected** trials. At `medium` this made nb3's headline table read
+"PPO mean_kl 1278, max_kl 15578" against TRPO's 0.0141, inviting the conclusion
+that TRPO's trust region is better behaved — when every *accepted* PPO step is
+`<= 4*kl_target = 0.04` by construction. Fixed: `kl` records the step that was
+kept; the largest rejected KL is logged separately as `kl_rejected`, which is a
+useful diagnostic of how ill-conditioned the cost-map → command map is but is
+not a KL the policy ever took. **The PPO/TRPO KL comparison in any run before
+this fix should be discarded.**
+
+## G7 revisited — the nb2 changes made LLTC worse, and the gate is circular
+
+Measured at `medium` after G7: LLTC N=1 went **0.41 → 1.22 m** and horizon
+equivalence **7.5× → 23.7×**. The G7 change was wrong in a way the original was
+not, and the cause is circularity that G7 introduced into the gate:
+
+`REACH` is computed from the **median of the candidates**
+(`sqrt(2*median(V1)/P_RIC[0,0])`), and G7 then used `||e1|| <= 2*REACH` to
+**filter those same candidates**. Adding the decade-spread sampling dropped the
+median `V1`, so `REACH` fell 0.556 → 0.086 m, and the gate then kept only the
+small-error candidates: acceptance 0.695, fit support `||e|| ~ 0.09 m`, deployed
+against a seeded 0.5 m offset. The original code fitted large errors and
+deployed at small ones; G7 inverted it rather than fixing it.
+
+What the gate needs is a radius that does **not** depend on the candidate draw —
+a terminal-set radius derived from `P_RIC` and a fixed cost threshold — plus
+candidate sampling that spans the closed-loop *and* the recovery scale. The
+acceptance column itself is now honest (0.695, and it moves 0.867 → 0.512 with
+`Q_scale` instead of sitting at 0.9492 in every row), so that half of G7 stands.
+
+## G13 — the saturation gate measures something the reward does not penalise
+
+With the trainer fixed, `landed` at `medium` runs 303–1851 per training and the
+closed loop **does not move**: `full/circle` reads 0.9251 m at zero landed
+updates and 0.9252 m at 1538. Reward improves ~4 % at best. Meanwhile `sat` is
+0.14–0.46 across every arm.
+
+**Two mechanisms were proposed here and measurement REFUTED both.** They are
+kept, because the refutation is what located G15:
+
+| case | rmse | sat |
+|---|---|---|
+| hand Q, hand R (the NMPC baseline) | 0.0676 | 0.0000 |
+| hand Q, collective cost -> `Q_LO` (0.01) | 0.0779 | 0.0143 |
+| uniform S = 3.16, hand `P_term` | **0.0685** | **0.0000** |
+| uniform S = 3.16, collective cost -> `Q_LO` | 0.1398 | 0.0883 |
+| hand Q/R, `P_term` x 0.1 | 0.1143 | 0.0000 |
+| uniform S = 3.16, `P_term` x 0.1 | 0.0772 | 0.0000 |
+
+A control weight at the `Q_LO` floor reaches `sat` 0.088, not 0.40; and scaling
+`P_term` down gives `sat` 0.0000, so the terminal matrix is not forcing deadbeat
+control at N = 1. What the table *does* show is its third row: a uniform
+S = 3.16 tracks at 0.0685 m with zero saturation, indistinguishable from the
+hand-tuned baseline -- so the cost map at its nominal initialisation is a good
+controller, while AC-MPC carrying that initialisation reads 0.9-1.1 m at `sat`
+0.3-0.4. That gap is G15.
+
+One design inconsistency stands on its own, independent of the cause: **(5.4)
+never prices saturation.** It carries `du'Rdu` (deviation from the feed-forward)
+and `|u - u_prev|^2` (rate), but nothing for sitting on the box, so the gate
+fails a policy for a behaviour the objective is indifferent to.
+
+## G15 -- the cost-map head initialisation did not scale with fan-in
+
+`costmap_init` used a flat `scale_last=0.1` for the head. On a 256-wide trunk
+`z_j = sum_i h_i W_ij` then has `std(z) = 0.1*sqrt(hid)*rms(h) ~ 1.0`, and under
+the **five-decade** log map of C-7 that is not a small perturbation:
+`sigmoid(+-3)` sends `S_ii` to 0.017 and 590. Measured on real observations:
+
+| rep | std(z) | `S_ii` min -> max | spread | init flown as a controller |
+|---|---|---|---|---|
+| `diag` | 1.013 | 0.017 -> 589.7 | **3.5e4** | 0.8556 m, sat 0.276 |
+| `chol` | 1.044 | 0.019 -> 30.7 | 1.6e3 | 0.6887 m, sat 0.129 |
+| `full` | 1.011 | 2.09 -> 40.6 | 19x | 0.8617 m, sat 0.209 |
+| -- | -- | fixed uniform 3.16 | 1x | **0.0686 m, sat 0.000** |
+
+`diag`'s median weight is 3.386 against the uniform 3.16 -- the same operating
+point -- yet 12x the RMSE. The spread is the whole gap, and it is there before a
+single gradient step. It worsens with width (`hid=1024` at `full` gives
+`std(z) ~ 2`), which is why more capacity never helped. The same `std(z) ~ 1`
+left the linear term at `|c| ~ 1.245` against `P_HI = 2.0` -- 62 % of its bound
+at init -- dominating any channel whose weight landed near `Q_LO` (`p/S ~ 73`).
+
+C-7 corrected the log map's *location* (a linear map put a zero-initialised head
+at ~5e4) and left its *variance* unexamined.
+
+**Fixed** with `scale_last = 0.1/sqrt(hid)`, giving `std(z) ~ 0.063` and the
+initialisation every docstring already claimed:
+
+| rep | std(z) | `S_ii` min -> max | spread | median `|c|` |
+|---|---|---|---|---|
+| `diag` | 0.063 | 1.84 -> 5.45 | 2.97x (median **3.176**) | 0.091 |
+| `chol` | 0.065 | 0.385 -> 0.701 | 1.82x | 0.078 |
+| `full` | 0.063 | 0.018 -> 0.169 | 9.3x | 0.101 |
+
+This is also the candidate explanation for G14: `chol`/`full` start where
+`dS/dA ~ 2A ~ 0`, so both their spread and their step sizes are small, which is
+why they landed 5-6x more steps than `diag`.
+
+## G14 -- `landed` tracks the quality of the starting controller
+
+*Originally written as a claim about the log map's slope. The first medium run
+after G15 inverted the ordering, so that claim is withdrawn; what follows is
+what the two runs together show.*
+
+`landed` per training, same budgets, before and after G15:
+
+| rep | before G15 | after G15 | `sat` after | `rmse` after |
+|---|---|---|---|---|
+| `diag` | 315-385 | **2789** | 0.0015 | **0.0778** |
+| `chol` | 1672-1851 | 1502-1561 | 0.22-0.25 | 0.4555 |
+| `full` | 1509-1798 | **155-187** | 0.55-0.58 | 0.7691 |
+
+The original explanation -- that `diag`'s five-decade log map has slope ~9.1 at
+init so its steps leave the KL region, while `chol`/`full` sit where
+`dS/dA ~ 2A ~ 0` -- accounted for the *before* column and fails on the *after*
+one: G15 does not change either map's slope, yet `diag` went up 9x and `full`
+down 8x.
+
+What the two columns do track is the **closed-loop quality of the initial
+policy**. After G15 `diag` starts at 0.072 m with `sat` 0.000 and lands 2789
+steps; `full` starts at 0.694 m with `sat` 0.533 and lands 187. A policy pinned
+against its input box produces advantages that carry little usable signal, so
+its steps miss the trust region -- which is the saturation gate's own premise,
+now visible in the step count. `landed` is therefore a *symptom* of the gate,
+not an independent axis, and the representation sweep is confounded by the
+starting controller rather than by the parameterisation.
+
+Comparing the three forms on their merits still needs their initialisations
+matched -- `chol` and `full` biased so that `A A' ~ 3.16 I` (a diagonal bias of
+about 1.60 and 1.78 respectively), which their own docstring argues for.
+Until then `diag` wins 3/3 partly because it is the only one that starts from a
+working controller.
+
+## Does `X500_SCALE=full` fix any of this?
+
+No. G1 makes the iteration budget irrelevant — the learning rate reaches its
+floor in twelve iterations at any scale — and G2 means that once G1 is fixed,
+more iterations buy a *better* escape policy, not a better tracker. G9 means the
+tables cannot show either outcome. The undertrained-policy banner that fires in
+Notebooks 3 and 6 correctly identifies that the split falls along the training
+axis; it attributes it to the scale table, and the scale table is not the cause.

@@ -80,11 +80,34 @@ for sd in SEEDS:
                              verbose=False)
     st = evaluate(a, base_cfg(), "circle")
     rows.append(dict(seed=sd, final_reward=float(log.reward.tail(3).mean()),
-                     rmse=st["rmse"], sat=st["sat"], crash=st["crash"]))
+                     rmse=st["rmse"], sat=st["sat"], crash=st["crash"],
+                     # G1: how many policy steps the trust region accepted.  If
+                     # this is 0 the actor is its initialisation and the "seed
+                     # spread" below is the spread of three random inits under
+                     # rollout noise, not a training variance.
+                     landed=int(log.landed.sum()) if "landed" in log else -1,
+                     # G9: the fraction of vehicle-steps that hit the 3 m
+                     # respawn.  Above a few per cent, rmse is the bound.
+                     bound_frac=st["bound_frac"]))
     LOGS[f"seed{sd}"] = log
     if sd == SEEDS[0]:
         X.save_ckpt(dict(actor=a, critic=c_, cfg=base_cfg()), "acmpc", "model.pkl")
 SEED_DF = pd.DataFrame(rows)
+if "landed" in SEED_DF and (SEED_DF.landed == 0).all():
+    print("!" * 78)
+    print("!! G1: the trust region accepted ZERO policy steps in every seed.")
+    print("!! Every AC-MPC row in this notebook is the INITIALISER.  The seed")
+    print("!! spread below is rollout noise over three random inits, and the")
+    print("!! representation sweep compares three initialisations, not three")
+    print("!! learned representations.  Read docs/AUDIT.md G1 before anything")
+    print("!! below.")
+    print("!" * 78)
+if (SEED_DF.bound_frac > 0.005).any():
+    print(f"  !! G9: up to {100*SEED_DF.bound_frac.max():.1f}% of vehicle-steps "
+          f"hit the {X.MAX_POS_ERR:g} m respawn bound, which TRUNCATES |e_p| "
+          f"and caps rmse near {X.MAX_POS_ERR/np.sqrt(3):.2f} m.  Read these "
+          f"rmse values as 'diverged', not as tracking errors; Notebook 7 flies "
+          f"the same checkpoint with no_respawn=True for the unclipped number.")
 SEED_SPREAD = float(SEED_DF.rmse.max() - SEED_DF.rmse.min())
 SEED_STD = float(SEED_DF.rmse.std())
 S.table(SEED_DF, "Seed study (3 seeds, identical configuration)",
@@ -127,7 +150,9 @@ for rep in X.REPS:
         st = evaluate(a, cfg, task)
         rows.append(dict(rep=rep, task=task, free_params=X.REP_DIM[rep],
                          final_reward=float(log.reward.tail(3).mean()),
-                         rmse=st["rmse"], sat=st["sat"], crash=st["crash"]))
+                         rmse=st["rmse"], sat=st["sat"], crash=st["crash"],
+                         landed=int(log.landed.sum()) if "landed" in log else -1,
+                         bound_frac=st["bound_frac"]))
         CURVES[(rep, task)] = log.reward.values
         if rep == "diag" and task == "circle":
             ACTOR_DIAG = a
