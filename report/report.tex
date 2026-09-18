@@ -745,6 +745,70 @@ skipabove=9pt, skipbelow=9pt
 	\Cref{ch:results} reports and analyses the results, including the negative ones.
 	\Cref{ch:conclusion} concludes.
 
+	\subsection{The argument, in one page}
+	\label{sec:argument}
+
+	The increments of \cref{ch:method} are not a menu of things that were tried.
+	They are a chain, and each link exists because the previous one failed in a
+	specific, measurable way. Stated once here so that every later chapter can be
+	read against it:
+
+	\begin{enumerate}[leftmargin=*]
+		\item \textbf{The problem.} A quadrotor must track an aggressive reference on
+		an embedded computer, under a plant that is never exactly the one it plans
+		with. Three things are therefore being asked at once: accuracy, robustness and
+		a solve that fits inside \SI{20}{\milli\second}.
+
+		\item \textbf{The classical answer works, and pays for it three times.}
+		LQR and NMPC solve the nominal problem well (\cref{sec:baselines}). But the
+		online solve is (i) \emph{sensitive to model mismatch} --- it plans several
+		steps against a model that is wrong, so the error compounds where a fixed gain
+		merely reacts; (ii) \emph{expensive}, with latency growing steeply in the
+		horizon $N$; and (iii) \emph{sensitive to its cost weights}, which nothing in
+		the theory determines and a human must choose. \Cref{sec:res-sensitivity}
+		measures all three.
+
+		\item \textbf{So: shorten the horizon without losing what it bought.} A
+		long horizon buys optimality and a margin against mismatch. Shortening it to
+		$N{=}1$ removes the latency problem outright; the question is whether the
+		lost optimality can be put back into the \emph{cost} rather than the
+		\emph{horizon}.
+
+		\item \textbf{Increment~1 --- put it in the terminal cost. Not enough.}
+		A learned local terminal cost (\cref{sec:lltc}) is the minimal version of that
+		idea: one matrix at the end of a one-step problem. \Cref{sec:res-lltc} reports
+		whether it recovers long-horizon behaviour.
+
+		\item \textbf{Increment~2 --- put it in the whole cost map.} AC-MPC
+		(\cref{sec:acmpc}) learns the stage cost at every stage, which subsumes the
+		terminal cost and, in doing so, removes the hand-chosen weights that
+		point~2(iii) identified as a liability.
+
+		\item \textbf{Increment~3 --- generalisation by randomisation, at a price.}
+		A cost map learned on one plant is a cost map for that plant. Domain
+		randomisation (\cref{sec:dr}) buys robustness across a family, but a policy
+		that cannot \emph{observe} which member of the family it is flying can only
+		find one compromise acceptable everywhere. Generality is bought with
+		specificity.
+
+		\item \textbf{Increment~4 --- give it the missing observation.} If the
+		conservatism of Increment~3 is the price of not knowing the plant, then
+		estimating the disturbance online (\cref{sec:adaptive}) should recover the
+		specificity without giving up the generality.
+
+		\item \textbf{The endpoint: an enhanced cost and an enhanced model.} The two
+		learned objects in \cref{fig:architecture} are exactly these. The cost map
+		$\theta$ is the enhanced \emph{cost}, carrying what the horizon used to
+		provide; the residual predictor $\psi$ is the enhanced \emph{model}, carrying
+		what domain randomisation had to average over. Everything between them ---
+		the dynamics, the iLQR, the actuator map --- is unchanged, which is what makes
+		each contribution attributable.
+	\end{enumerate}
+
+	Whether each link holds is an empirical question, and \cref{ch:results} answers
+	the ones the campaign has reached. Where it does not hold, the chain is reported
+	as broken rather than repaired in prose.
+
 	%=======================================================================
 	\chapter{Host organisation and problem context}
 	\label{ch:context}
@@ -1996,6 +2060,14 @@ skipabove=9pt, skipbelow=9pt
 	\label{sec:lltc}
 	%-----------------------------------------------------------------------
 
+	\paragraph{What Increment~0 left unsolved.} The horizon sweep shows accuracy
+	improving with $N$ and p95 latency growing with it, so the horizon is a
+	straight trade of compute for optimality. Shortening it to $N{=}1$ settles the
+	compute side by construction. The question this increment asks is the narrow
+	one: can the \emph{terminal} cost alone carry what the removed stages were
+	providing? It is the minimal form of the idea --- a single matrix at the end of
+	a one-step problem --- and if it works, nothing more elaborate is needed.
+
 	\subsection{Construction}
 
 	The terminal cost is parametrised so that it is positive definite by
@@ -2049,6 +2121,16 @@ skipabove=9pt, skipbelow=9pt
 	\section{Increment 2: learned cost map (AC-MPC)}
 	\label{sec:acmpc}
 	%-----------------------------------------------------------------------
+
+	\paragraph{What Increment~1 left unsolved.} A terminal cost acts at one point of
+	the horizon and is fitted offline against a cost-to-go that was itself produced
+	by the hand-chosen weights. It therefore inherits those weights rather than
+	replacing them, and leaves untouched the third liability of
+	\cref{sec:argument}: that a human still picks $\mat Q$ and $\mat R$, and that
+	choice moves closed-loop accuracy by a factor \BL{} over the admissible grid
+	(\cref{tab:res-qr}). Learning the cost at \emph{every} stage subsumes the
+	terminal case and removes the hand-chosen weights entirely --- the
+	\texttt{tuned} column of the ledger goes to zero, which is the point.
 
 	\subsection{Construction}
 
@@ -2128,6 +2210,17 @@ skipabove=9pt, skipbelow=9pt
 	\label{sec:dr}\label{sec:noise}
 	%-----------------------------------------------------------------------
 
+	\paragraph{What Increment~2 left unsolved.} A cost map trained on one plant is a
+	cost map \emph{for} that plant. Increment~2 removes the hand-chosen weights but
+	says nothing about the first liability of \cref{sec:argument} --- mismatch
+	between the plant that is flown and the model that is planned with. Domain
+	randomisation is the standard answer, and it comes with a structural cost that
+	this increment is built to measure rather than assume: a policy that cannot
+	\emph{observe} which member of the randomised family it is flying cannot
+	specialise to it. It can only find one compromise acceptable everywhere.
+	Generality is bought with specificity, and the currency is the conservatism
+	premium of question~2 below.
+
 	Training is repeated over the parameter bands of \cref{tab:dist}, and four
 	questions are asked, each with its own experiment.
 
@@ -2161,6 +2254,16 @@ skipabove=9pt, skipbelow=9pt
 	\section{Increment 4: adaptive AC-MPC with a residual predictor}
 	\label{sec:adaptive}
 	%-----------------------------------------------------------------------
+
+	\paragraph{What Increment~3 left unsolved.} If the conservatism premium is the
+	price of \emph{not knowing} the plant, then the remedy is not more
+	randomisation but an observation. Estimating the disturbance online should
+	recover the specificity that Increment~3 averaged away, while keeping the
+	generality it bought --- and it closes the chain of \cref{sec:argument}, because
+	the residual predictor is the \emph{enhanced model} standing beside the cost map
+	as the \emph{enhanced cost}. Whether it actually pays is the question
+	\cref{sec:res-adaptive} answers, and the decomposition below is what makes the
+	answer attributable rather than a single aggregate number.
 
 	\subsection{Decoupled construction}
 
@@ -2828,6 +2931,7 @@ skipabove=9pt, skipbelow=9pt
 	{fig:lqrff}
 
 	\subsection{Horizon: accuracy against computation}
+	\label{sec:res-horizon}
 
 	\begin{table}[htbp]
 		\centering
@@ -2900,6 +3004,7 @@ skipabove=9pt, skipbelow=9pt
 	{fig:noise}
 
 	\subsection{Sensitivity to the cost weights}
+	\label{sec:res-cost}
 
 	\begin{table}[htbp]
 		\centering
@@ -2935,6 +3040,93 @@ skipabove=9pt, skipbelow=9pt
 		right weights'' is controller dependent, which is exactly what learning the
 		cost is meant to remove.
 	\end{remark}
+
+	\subsection{Sensitivity to model mismatch, and to the direction of it}
+	\label{sec:res-sensitivity}
+
+	\Cref{sec:argument} claims the classical answer pays three times. The cost-weight
+	sweep above measures the third. This subsection measures the first: what happens
+	when the plant is not the one the controller plans with. Mass and inertia are
+	swept on \texttt{fig8}, which is the path that is \emph{partly} at the
+	feasibility cap (\SI{6.2}{\percent} of radii, against the superellipse's
+	\SI{100}{\percent} and the circle's none), so the sweep stresses the controller
+	without the collective already being pinned against its box.
+
+	\begin{table}[htbp]
+		\centering
+		\caption[Where the hand-built controllers give way]{Where each hand-built
+			controller gives way under plant mismatch. \textbf{Break} is
+			\emph{relative} --- the first factor at which RMSE exceeds three times that
+			controller's \emph{own} nominal --- and must not be read alone: a controller
+			that starts more accurate trips it sooner while still leading.
+			\textbf{Crossover} is \emph{absolute}: the factor at which NMPC $N{=}1$
+			stops beating LQR, computed separately on each side of nominal, because
+			mismatch has two directions. Source:
+			\texttt{artifacts/sensitivity/model\_hand\_breakpoints.csv}.}
+		\label{tab:res-mismatch-hand}
+		\small
+		\begin{tabularx}{\linewidth}{@{}X r r r r@{}}
+			\toprule
+			& \multicolumn{2}{c}{\textbf{Break ($3\times$ own nominal)}}
+			& \multicolumn{2}{c}{\textbf{NMPC loses to LQR}} \\
+			\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+			\textbf{Axis} & LQR & NMPC $N{=}1$ & below nominal & above nominal \\
+			\midrule
+			$\lambda_m$ (mass)    & \BL$\times$ & \BL$\times$ & \BL & \BL \\
+			$\lambda_J$ (inertia) & \BL$\times$ & \BL$\times$ & \BL & \BL \\
+			\bottomrule
+		\end{tabularx}
+	\end{table}
+
+	\realfig{58mm}{F27_model_mismatch_hand.png}
+	{Hand-built controllers against a plant they did not plan with: mass and inertia
+		scaled about nominal, on \texttt{fig8}. The vertical line is the nominal
+		plant. The shape to read is not the height but the \emph{slope} either side of
+		it, and whether the two curves cross.}
+	{fig:mismatch-hand}
+
+	\begin{keybox}
+		\keyhead{Expected reading, and the trap in it}
+		The online solve plans several steps against the model, so a wrong model
+		compounds where a fixed gain merely reacts; NMPC $N{=}1$ should therefore
+		degrade \emph{faster} than LQR. But it also starts from a lower error, so a
+		threshold defined relative to each controller's own nominal flatters the worse
+		controller automatically --- measured here, by roughly a factor of four. The
+		two columns of \cref{tab:res-mismatch-hand} answer different questions and are
+		expected to disagree; the absolute crossover is the one that says which
+		controller to fly.
+	\end{keybox}
+
+	\realfig{62mm}{F28_cost_mismatch_hand.png}
+	{Cost-weight stress on a grid deliberately wider than the admissible region, for
+		both hand-built controllers on all three paths. This is the quantity
+		\cref{sec:acmpc} removes, measured where it is worst rather than where it is
+		comfortable.}
+	{fig:mismatch-cost}
+
+	\begin{table}[htbp]
+		\centering
+		\caption[Cost-weight spread, wide grid]{Spread of closed-loop RMSE over the
+			wide $(Q_\mathrm{pos}, R_\mathrm{rate})$ grid. The ratio is the fraction of
+			apparent ``controller performance'' that is really the human's choice of
+			weights. Source: \texttt{artifacts/sensitivity/cost\_hand\_spread.csv}.}
+		\label{tab:res-cost-spread}
+		\small
+		\begin{tabularx}{\linewidth}{@{}l X r r r@{}}
+			\toprule
+			\textbf{Path} & \textbf{Controller} & \textbf{Best} & \textbf{Worst}
+			& \textbf{Ratio} \\
+			\midrule
+			circle & LQR / NMPC $N{=}1$ & \BL & \BL & \BL$\times$ \\
+			fig8   & LQR / NMPC $N{=}1$ & \BL & \BL & \BL$\times$ \\
+			square & LQR / NMPC $N{=}1$ & \BL & \BL & \BL$\times$ \\
+			\bottomrule
+		\end{tabularx}
+	\end{table}
+
+	The same two axes are swept for the learned controllers in
+	\cref{sec:res-acmpc-mismatch}, on the same path and the same grid, so the two
+	families are directly comparable.
 
 	%-----------------------------------------------------------------------
 	\section{Increment 1: learned terminal cost}
@@ -3082,6 +3274,63 @@ skipabove=9pt, skipbelow=9pt
 		on the critic; the critic's own loss must be read beside the reward, because
 		MPVE changes the target and therefore the loss scale.}
 	{fig:mpve}
+
+	\subsection{Mismatch, with no weights left to blame}
+	\label{sec:res-acmpc-mismatch}
+
+	The two axes of \cref{sec:res-sensitivity} are now swept for the learned arms,
+	on the same path, the same grid and the same seed, so the two families are read
+	off one picture. The cost-weight axis has no counterpart here, which is the
+	point of this increment: there is no hand-chosen stage weight left to stress.
+	What remains is the axis the cost map cannot touch --- inside the layer, the
+	dynamics are still the nominal model, so a learned cost can reshape \emph{what}
+	the solver wants but not \emph{what it believes the vehicle will do}.
+
+	\begin{table}[htbp]
+		\centering
+		\caption[Where the learned controllers give way]{Where each learned controller
+			gives way under plant mismatch, on \texttt{fig8}. Columns are read exactly as
+			in \cref{tab:res-mismatch-hand}: \textbf{Break} is relative to that
+			controller's own nominal and therefore flatters whichever arm starts worse,
+			\textbf{Crossover} is the absolute factor at which the adaptive arm stops
+			beating \ACMPC{}, computed separately below and above nominal. Source:
+			\texttt{artifacts/sensitivity/model\_learned\_breakpoints.csv}.}
+		\label{tab:res-mismatch-learned}
+		\small
+		\begin{tabularx}{\linewidth}{@{}X r r r r@{}}
+			\toprule
+			& \multicolumn{2}{c}{\textbf{Break ($3\times$ own nominal)}}
+			& \multicolumn{2}{c}{\textbf{Adaptive loses to \ACMPC{}}} \\
+			\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+			\textbf{Axis} & \ACMPC{} $N{=}1$ & Adaptive $N{=}1$ & below nominal & above nominal \\
+			\midrule
+			$\lambda_m$ (mass)    & \BL$\times$ & \BL$\times$ & \BL & \BL \\
+			$\lambda_J$ (inertia) & \BL$\times$ & \BL$\times$ & \BL & \BL \\
+			\bottomrule
+		\end{tabularx}
+	\end{table}
+
+	\realfig{58mm}{F29_model_mismatch_learned.png}
+	{The learned arms against a plant they did not plan with, on the same mass and
+		inertia grid as \cref{fig:mismatch-hand}. The adaptive arm carries its residual
+		predictor, so a parameter error is exactly the condition the estimator is
+		supposed to notice: this is the sharpest available test of whether estimating
+		beats averaging.}
+	{fig:mismatch-learned}
+
+	\begin{keybox}
+		\keyhead{What this figure can and cannot settle}
+		A scaled mass or inertia is a \emph{structured} error --- constant in the body
+		frame and, for mass, exactly the standing force the predictor of
+		\cref{sec:adaptive} is trained to reconstruct. If the adaptive arm does not
+		separate from \ACMPC{} \emph{here}, the estimator is not adding information
+		anywhere, and \cref{sec:res-adaptive} should be read with that in mind. If it
+		does, the separation still has to clear the seed spread of
+		\cref{tab:res-seeds} before it counts. Note also that the mass axis moves the
+		hover thrust and therefore the distance to the collective box: the saturation
+		column of the source CSV must be read beside the RMSE, or a cell that has run
+		out of actuator will be reported as a cell that has run out of controller.
+	\end{keybox}
 
 	\subsection{Analysis}
 
@@ -3260,6 +3509,72 @@ skipabove=9pt, skipbelow=9pt
 		the break-even gate at zero.}
 	{fig:rdp}
 
+	\subsection{How much history the predictor needs}
+	\label{sec:res-rdp-window}
+
+	The window length $H$ was fixed at $64$ frames for the comparison above. It is
+	not a free parameter: $H$ sets the deployment ring-buffer length, the warm-up
+	after every respawn during which the estimate is unusable
+	(\SI{320}{\milli\second} at $H{=}16$ to \SI{2.56}{\second} at $H{=}128$), and
+	the inference latency that has to fit inside the \SI{20}{\milli\second} period.
+	It also sizes two of the four architectures, since \texttt{tcn\_blocks\_for} and
+	\texttt{cnn\_layers\_for} pick the smallest depth whose receptive field covers
+	the whole window --- a TCN at $H{=}128$ is a deeper network, not the same one fed
+	more input. The sweep generates the flights \emph{once} at the largest $H$ and
+	re-windows them, so a window-length comparison is not also a different-data
+	comparison.
+
+	\begin{table}[htbp]
+		\centering
+		\caption[Predictor accuracy against window length]{Predictor accuracy against
+			window length, every encoder on identical flights. The question is whether a
+			longer window buys accuracy or the residual is essentially memoryless; the
+			answer is a \emph{pair} of columns, because $H$ is paid twice --- once per
+			inference and once per respawn. Source:
+			\texttt{artifacts/sensitivity/rdp\_window.csv}.}
+		\label{tab:res-rdp-window}
+		\small
+		\begin{tabularx}{\linewidth}{@{}l X r r r r@{}}
+			\toprule
+			\textbf{$H$} & \textbf{Warm-up} & \textbf{GRU} & \textbf{LSTM} & \textbf{TCN} & \textbf{CNN} \\
+			\midrule
+			\multicolumn{6}{@{}l}{\itshape overall $R^2$} \\
+			\quad 16  & \SI{320}{\milli\second}  & \BL & \BL & \BL & \BL \\
+			\quad 32  & \SI{640}{\milli\second}  & \BL & \BL & \BL & \BL \\
+			\quad 64  & \SI{1.28}{\second}       & \BL & \BL & \BL & \BL \\
+			\quad 128 & \SI{2.56}{\second}       & \BL & \BL & \BL & \BL \\
+			\midrule
+			\multicolumn{6}{@{}l}{\itshape p95 inference latency, one window [\si{\milli\second}]} \\
+			\quad 16  & ---                      & \BL & \BL & \BL & \BL \\
+			\quad 128 & ---                      & \BL & \BL & \BL & \BL \\
+			\midrule
+			\multicolumn{2}{@{}l}{Shortest window within \SI{5}{\percent} of the best cell}
+			& \multicolumn{4}{r}{\BL} \\
+			\bottomrule
+		\end{tabularx}
+	\end{table}
+
+	\realfig{50mm}{F30_rdp_window.png}
+	{Window length against accuracy, against the force/moment split, and against
+		inference latency. Force and moment are shown separately in the middle panel
+		because \cref{sec:rdp-theory} predicts they are not equally observable: a
+		standing moment survives only in the motor commands once the rate integrator
+		has absorbed it, so the moment channels are the ones that should need history.}
+	{fig:rdp-window}
+
+	\begin{keybox}
+		\keyhead{Why the shortest adequate window wins}
+		The deployment cost of $H$ is not the inference time --- all four encoders are
+		far inside the period at every $H$ swept. It is the warm-up: for the first $H$
+		frames after a respawn, arm or estimator reset, variants B and C are feeding a
+		prediction made from a partly empty buffer into the dynamics the solver plans
+		with. The right choice is therefore the \emph{shortest} window that is within
+		noise of the best one, not the most accurate window; the last row of
+		\cref{tab:res-rdp-window} reports that cell explicitly. If accuracy is flat in
+		$H$, the honest conclusion is that the residual is close to memoryless at this
+		sampling rate and the recurrent encoder is not earning its state.
+	\end{keybox}
+
 	\subsection{Validity of the moment conversion}
 
 	\begin{table}[htbp]
@@ -3432,6 +3747,15 @@ skipabove=9pt, skipbelow=9pt
 		Saturation is reported beside RMSE throughout, because a cell with high
 		saturation is reporting the disturbance rather than the controller.}
 	{fig:bycondition}
+
+	\realfig{48mm}{F31_fragility.png}
+	{One bar per controller per plant axis: worst RMSE over the swept range divided
+		by that controller's RMSE at nominal, so $1.0$ means the sweep never moved it.
+		This is the ledger's missing column --- \cref{tab:ledger} reports accuracy under
+		three disturbance suites on the \emph{nominal} plant, and says nothing about
+		what happens when the plant itself is wrong. Read with
+		\cref{fig:mismatch-hand,fig:mismatch-learned}, from which it is computed.}
+	{fig:fragility}
 
 	\subsection{Three questions the ledger is built to answer}
 
@@ -3607,6 +3931,80 @@ skipabove=9pt, skipbelow=9pt
 		\cref{ch:results} is filled at \texttt{full} scale. State plainly which
 		increments delivered on their claim and which did not, and resist the
 		temptation to describe a trade as a win.}
+
+	%-----------------------------------------------------------------------
+	\section{The endpoint: an enhanced cost and an enhanced model}
+	\label{sec:endpoint}
+	%-----------------------------------------------------------------------
+
+	The four increments are easiest to see backwards, from where they end up.
+
+	The starting point is a controller that already works. NMPC with a long horizon,
+	and the LQR that anchors it, track this vehicle accurately on every path in
+	\cref{sec:res-baselines} --- and they charge for it three times. They charge in
+	computation, because the horizon that buys the accuracy is the horizon that buys
+	the latency (\cref{sec:res-horizon}). They charge in \emph{model}, because the
+	solve plans several steps against a model and therefore compounds whatever is
+	wrong with it, where a fixed gain merely reacts (\cref{sec:res-sensitivity}).
+	And they charge in \emph{cost}, because the thirteen weights that decide how
+	they behave are not determined by any part of predictive control theory ---
+	someone chooses them, and \cref{sec:res-cost} measures how much of the reported
+	performance is really that choice.
+
+	Everything after that is an attempt to stop paying, without giving up the
+	structure --- the constraints, the preview, the explicit optimisation --- that
+	made the classical answer worth having in the first place. The strategy
+	throughout is the same: \emph{shorten the horizon to one step, and put what the
+	long horizon was doing into a learned object instead}.
+
+	\begin{description}[leftmargin=*,style=nextline]
+		\item[Increment 1 put it in the terminal cost, and that was not enough.] A
+		positive-definite terminal cost fitted to the long-horizon value function is
+		the textbook route, and it is the one the horizon-equivalence test of
+		\cref{sec:res-lltc} rejects. The fit itself is good; what it cannot survive is
+		the distance between the small neighbourhood where a local quadratic is valid
+		and the displacements a one-step controller actually has to cover. The
+		terminal cost is the right idea in the wrong place --- the last stage is not
+		where a one-step horizon spends its authority.
+		\item[Increment 2 put it in the whole cost map.] \ACMPC{} makes the cost a
+		\emph{function of the state} produced by a network, learned by reinforcement
+		against the task rather than fitted to a value function, and emitting the
+		linear term as well as the quadratic one so that it can shift the optimum and
+		not merely re-weight it. The claim this increment answers is not ``more
+		accurate than NMPC'': it is \emph{comparable accuracy at one-step latency with
+			thirteen fewer human choices}, and \cref{tab:ledger} is where that trade is
+		settled in both columns at once.
+		\item[Increment 3 bought generality, and paid for it in specificity.] A cost
+		map learned on one plant is a cost map for that plant. Randomising mass,
+		inertia, thrust and drag during training is the standard remedy and it works
+		in the direction advertised --- but the same averaging that makes the policy
+		indifferent to which plant it is on makes it indifferent to the plant it is
+		\emph{actually} on. That is the conservatism premium of
+		\cref{sec:res-dr}, evaluated deliberately on the nominal plant and reported
+		signed. Robustness by randomisation is insurance, and insurance has a premium.
+		\item[Increment 4 gave it the missing observation.] The premium exists because
+		the policy cannot tell the plants apart --- so the answer is not to randomise
+		less but to \emph{observe more}. A recurrent predictor reconstructs the
+		six-dimensional external wrench from a window of states and actuator commands,
+		and the estimate is handed to the policy, to the dynamics the solver plans
+		with, or to both. The construction is deliberately decoupled into an oracle
+		stage and an estimation stage, so that the value of the information and the
+		cost of estimating it are two separate numbers (\cref{tab:res-gaps}) rather
+		than one ambiguous one.
+	\end{description}
+
+	What is left at the end is a one-step optimisation with two things replaced. The
+	cost is no longer a matrix a human chose but a map $\theta$ learned against the
+	task: an \textbf{enhanced cost}. The dynamics are no longer the nominal model
+	alone but that model plus an online estimate $\psi$ of the wrench acting on the
+	vehicle: an \textbf{enhanced model}. The optimiser between them is unchanged,
+	and that is the design's whole point --- the constraints are still hard, the
+	preview is still explicit, and the horizon is one step.
+
+	Whether each replacement paid for itself is a question for the numbers, and
+	\cref{ch:results} answers it increment by increment rather than in aggregate.
+	The architecture in \cref{fig:architecture} is the same diagram read in this
+	order.
 
 	%-----------------------------------------------------------------------
 	\section{What was learned beyond the numbers}
