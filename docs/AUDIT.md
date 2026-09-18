@@ -663,14 +663,67 @@ closed loop **does not move**: `full/circle` reads 0.9251 m at zero landed
 updates and 0.9252 m at 1538. Reward improves ~4 % at best. Meanwhile `sat` is
 0.14–0.46 across every arm.
 
-The likely mechanism is that a clipped input flattens the map from cost-map
-parameters to realised trajectory, so the gradient has little to act on. Behind
-that sits a design inconsistency: **(5.4) never prices saturation.** It carries
-`du'Rdu` (deviation from the feed-forward) and `|u - u_prev|^2` (rate), but
-nothing for sitting on the box — so the gate fails a policy for a behaviour the
-objective is indifferent to. A learned control-cost weight is also free to fall
-to `Q_LO = 0.01` while `P_term = P_RIC` carries `P_00 = 399.8`, which at `N = 1`
-asks for one-step deadbeat control.
+**Two mechanisms were proposed here and measurement REFUTED both.** They are
+kept, because the refutation is what located G15:
+
+| case | rmse | sat |
+|---|---|---|
+| hand Q, hand R (the NMPC baseline) | 0.0676 | 0.0000 |
+| hand Q, collective cost -> `Q_LO` (0.01) | 0.0779 | 0.0143 |
+| uniform S = 3.16, hand `P_term` | **0.0685** | **0.0000** |
+| uniform S = 3.16, collective cost -> `Q_LO` | 0.1398 | 0.0883 |
+| hand Q/R, `P_term` x 0.1 | 0.1143 | 0.0000 |
+| uniform S = 3.16, `P_term` x 0.1 | 0.0772 | 0.0000 |
+
+A control weight at the `Q_LO` floor reaches `sat` 0.088, not 0.40; and scaling
+`P_term` down gives `sat` 0.0000, so the terminal matrix is not forcing deadbeat
+control at N = 1. What the table *does* show is its third row: a uniform
+S = 3.16 tracks at 0.0685 m with zero saturation, indistinguishable from the
+hand-tuned baseline -- so the cost map at its nominal initialisation is a good
+controller, while AC-MPC carrying that initialisation reads 0.9-1.1 m at `sat`
+0.3-0.4. That gap is G15.
+
+One design inconsistency stands on its own, independent of the cause: **(5.4)
+never prices saturation.** It carries `du'Rdu` (deviation from the feed-forward)
+and `|u - u_prev|^2` (rate), but nothing for sitting on the box, so the gate
+fails a policy for a behaviour the objective is indifferent to.
+
+## G15 -- the cost-map head initialisation did not scale with fan-in
+
+`costmap_init` used a flat `scale_last=0.1` for the head. On a 256-wide trunk
+`z_j = sum_i h_i W_ij` then has `std(z) = 0.1*sqrt(hid)*rms(h) ~ 1.0`, and under
+the **five-decade** log map of C-7 that is not a small perturbation:
+`sigmoid(+-3)` sends `S_ii` to 0.017 and 590. Measured on real observations:
+
+| rep | std(z) | `S_ii` min -> max | spread | init flown as a controller |
+|---|---|---|---|---|
+| `diag` | 1.013 | 0.017 -> 589.7 | **3.5e4** | 0.8556 m, sat 0.276 |
+| `chol` | 1.044 | 0.019 -> 30.7 | 1.6e3 | 0.6887 m, sat 0.129 |
+| `full` | 1.011 | 2.09 -> 40.6 | 19x | 0.8617 m, sat 0.209 |
+| -- | -- | fixed uniform 3.16 | 1x | **0.0686 m, sat 0.000** |
+
+`diag`'s median weight is 3.386 against the uniform 3.16 -- the same operating
+point -- yet 12x the RMSE. The spread is the whole gap, and it is there before a
+single gradient step. It worsens with width (`hid=1024` at `full` gives
+`std(z) ~ 2`), which is why more capacity never helped. The same `std(z) ~ 1`
+left the linear term at `|c| ~ 1.245` against `P_HI = 2.0` -- 62 % of its bound
+at init -- dominating any channel whose weight landed near `Q_LO` (`p/S ~ 73`).
+
+C-7 corrected the log map's *location* (a linear map put a zero-initialised head
+at ~5e4) and left its *variance* unexamined.
+
+**Fixed** with `scale_last = 0.1/sqrt(hid)`, giving `std(z) ~ 0.063` and the
+initialisation every docstring already claimed:
+
+| rep | std(z) | `S_ii` min -> max | spread | median `|c|` |
+|---|---|---|---|---|
+| `diag` | 0.063 | 1.84 -> 5.45 | 2.97x (median **3.176**) | 0.091 |
+| `chol` | 0.065 | 0.385 -> 0.701 | 1.82x | 0.078 |
+| `full` | 0.063 | 0.018 -> 0.169 | 9.3x | 0.101 |
+
+This is also the candidate explanation for G14: `chol`/`full` start where
+`dS/dA ~ 2A ~ 0`, so both their spread and their step sizes are small, which is
+why they landed 5-6x more steps than `diag`.
 
 ## G14 — `landed` differs 5-6x by representation, which inverts the §8.3 finding
 
