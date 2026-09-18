@@ -131,8 +131,18 @@ Ej, Vj = jnp.asarray(E_fit), jnp.asarray(V_fit)
 E1j = jnp.asarray(E1_fit)
 
 def loss_fn(p, ee, e1, vv):
+    # G7d: contract with e_0, as originally.  G7 changed this to e_1 on the
+    # argument that `make_lltc_ctrl` scores 0.5 e_1' P(e_0) e_1, so the fit
+    # should match the form the controller evaluates.  Measured at medium, that
+    # argument does not survive: LLTC N=1 on S1 reads 0.4134 m contracting with
+    # e_0 and 1.0640 m with e_1, every other G7 change reverted.  The hole in
+    # it is that the fit's e_1 comes from the N=10 HAND-WEIGHTED trajectory
+    # while the controller's e_1 comes from its own N=1 solve under P(e_0) --
+    # they are not the same e_1, so matching the algebraic form does not match
+    # the object.  Both variants are approximations; this one measures better.
+    # `e1` is kept in the signature so the mismatch stays visible to a reader.
     P = M.lltc_matrix(p, ee, EPS)                       # (8.1), evaluated at e_0
-    pred = 0.5 * jnp.einsum("bi,bij,bj->b", e1, P, e1)  # contracted with e_1
+    pred = 0.5 * jnp.einsum("bi,bij,bj->b", ee, P, ee)
     return jnp.mean((pred - vv) ** 2)                   # (8.2)
 
 @jax.jit
@@ -148,7 +158,7 @@ for ep in range(n_ep):
     hist.append(float(l))
 
 P_of = M.lltc_matrix(params, Ej, EPS)
-pred = np.asarray(0.5 * jnp.einsum("bi,bij,bj->b", E1j, P_of, E1j))
+pred = np.asarray(0.5 * jnp.einsum("bi,bij,bj->b", Ej, P_of, Ej))
 ss_res = float(((V_fit - pred) ** 2).sum())
 ss_tot = float(((V_fit - V_fit.mean()) ** 2).sum())
 R2 = 1.0 - ss_res / max(ss_tot, 1e-30)
