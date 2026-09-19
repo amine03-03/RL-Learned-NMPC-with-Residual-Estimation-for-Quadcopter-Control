@@ -601,3 +601,112 @@ def test_O7_study_directory_is_found_by_search_not_by_counting_dots():
     d = PT.add_study_to_path()
     assert os.path.isfile(os.path.join(d, "rdp_infer.py"))
     assert os.path.isfile(os.path.join(d, "x500_core_jax.py"))
+
+
+# --------------------------------------------------------------------------- #
+#  H1..H3  the horizon is baked into the checkpoint
+# --------------------------------------------------------------------------- #
+def test_H1_horizon_comes_from_the_checkpoint_not_the_caller():
+    """The cost-map head emits one parameter block per stage from a single
+    dense layer, so its output width is N_train * REP_DIM and N is fixed at
+    training time.  Asking an N=1 head to fill ten stages fails inside the cost
+    map as 'cannot reshape (1, 40) into (1, 10, 40)' -- nowhere near the
+    horizon parameter that caused it."""
+    from acmpc_controller.controller import ACMPCController
+    ck = _ckpt()
+    n_train = int(ck["cfg"]["N"])
+    c = ACMPCController(mode="acmpc", horizon=n_train + 9, n_iter=5, ckpt=ck)
+    assert c.N == n_train
+    assert c.cfg["N"] == n_train
+
+
+def test_H2_the_head_width_is_what_forces_it():
+    """Pin the arithmetic, so a future representation change cannot quietly
+    make the override look safe again."""
+    ck = _ckpt()
+    W, _ = ck["actor"]["head"][0]
+    assert W.shape[1] == int(ck["cfg"]["N"]) * X.REP_DIM[ck["cfg"]["rep"]]
+
+
+def test_H3_a_checkpoint_horizon_still_solves_end_to_end():
+    from acmpc_controller.controller import ACMPCController
+    ck = _ckpt()
+    c = ACMPCController(mode="acmpc", horizon=10, n_iter=5, use_d=True, ckpt=ck)
+    from acmpc_controller import refgen as RG
+    xr, ur = RG.ref_traj(lambda t: (np.array([0.0, 0.0, 1.5]), np.zeros(3),
+                                    np.zeros(3)), 0.0, c.N, 0.02)
+    assert xr.shape[0] == c.N + 1          # the reference must match the solver
+    x13 = np.concatenate([[0.1, 0.0, 1.4], np.zeros(3), [1, 0, 0, 0], np.zeros(3)])
+    prev = np.tile(np.concatenate([np.array([0.0, 0.0, 1.5]) - x13[0:3],
+                                   np.zeros(3)]), (3, 1))
+    u, _ = c.step(x13, xr, ur, d_hat=np.zeros(6), preview=prev)
+    assert np.isfinite(u).all()
+
+
+def test_H4_the_controller_table_fixes_nmpc1_at_one_stage():
+    """'nmpc1' is a name with a number in it; the ledger reports N=1 for it."""
+    assert CN.CONTROLLERS["nmpc1"]["horizon"] == 1
+    # the learned ones defer to their checkpoint
+    for n in ("acmpc", "acmpc_adaptive"):
+        assert CN.CONTROLLERS[n]["horizon"] is None
+
+
+# --------------------------------------------------------------------------- #
+#  A1  ROS arguments must reach rclpy, not argparse
+# --------------------------------------------------------------------------- #
+def test_A1_replay_is_detected_with_ros_args_present():
+    """live_zx stripped the '--ros-args' marker and handed the remainder to
+    rclpy.init, which could then not parse '--params-file' -- so every ROS
+    parameter silently fell back to its declared default and the node wrote to
+    runs/demo_s7 instead of the session it was launched with.  Nothing raised:
+    a default is a legal value.  This pins the split."""
+    src = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..",
+        "rdp_acmpc_ws", "src", "visualization", "visualization",
+        "live_zx.py")).read()
+    # argparse must be fed remove_ros_args(), and rclpy.init the original argv
+    assert "remove_ros_args(args=argv)" in src
+    assert "rclpy.init(args=argv)" in src
+    assert "if a != \"--ros-args\"" not in src        # the old, wrong filter
+
+
+
+# --------------------------------------------------------------------------- #
+#  W1..W2  the JIT must be compiled before the control loop, not inside it
+# --------------------------------------------------------------------------- #
+def test_W1_warmup_makes_the_first_real_tick_fit_the_control_period():
+    """JAX compiles on the first call: measured 13.5 s on a CPU-only jaxlib
+    against a steady 7.4 ms.  Paying that inside the first timer callback
+    blocks the executor, so no OffboardControlMode is published for 13 s --
+    and PX4 refuses offboard, or drops out of it, after 0.5 s of silence.  The
+    vehicle would never arm and the log would show a healthy controller."""
+    import time as _t
+    from acmpc_controller.controller import ACMPCController
+    from acmpc_controller import refgen as RG
+    c = ACMPCController(mode="acmpc", horizon=1, n_iter=10, use_d=True,
+                        ckpt=_ckpt())
+    c.warmup()
+    xr, ur = RG.ref_traj(lambda t: (np.array([0.0, 0.0, 1.5]), np.zeros(3),
+                                    np.zeros(3)), 0.0, c.N, 0.02)
+    x13 = np.concatenate([[0.05, 0.0, 1.47], np.zeros(3), [1, 0, 0, 0],
+                          np.zeros(3)])
+    t0 = _t.perf_counter()
+    c.step(x13, xr, ur, d_hat=np.zeros(6), preview=np.zeros((3, 6)))
+    first = _t.perf_counter() - t0
+    assert first < 0.020, (f"first tick after warm-up took {first*1e3:.0f} ms, "
+                           f"which does not fit the 20 ms control period")
+
+
+def test_W2_warmup_leaves_no_state_behind():
+    """Warm-up flies a synthetic hover.  If it seeded the rotor observer or
+    (5.3)'s memory, the first real tick would start from a fiction."""
+    from acmpc_controller.controller import ACMPCController
+    c = ACMPCController(mode="acmpc", horizon=1, n_iter=5, use_d=True,
+                        ckpt=_ckpt())
+    c.warmup()
+    assert np.abs(c.int_ep).max() == 0.0
+    assert np.abs(c.du_bar).max() == 0.0
+    assert np.abs(c.ev_bar).max() == 0.0
+    assert np.abs(c.om_bar).max() == 0.0
+    assert c.Om_hat == pytest.approx(np.full(4, float(X.OM_HOVER)))
+    assert c.solve_ms == []

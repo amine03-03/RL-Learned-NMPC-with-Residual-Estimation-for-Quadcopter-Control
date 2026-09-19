@@ -109,9 +109,12 @@ def main(args=None):                                       # pragma: no cover
     node = ManagerNode()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:          # launch sends SIGINT; that is not a fault
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
     return 0
 
 

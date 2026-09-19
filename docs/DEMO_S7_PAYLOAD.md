@@ -230,12 +230,38 @@ builds to match, appending the estimate as the raw wrench or as the converted
 residual according to the training config's `oracle_target` — the two have the
 same width, so choosing wrongly would be silent too.
 
+**The horizon is not yours to choose either.** The cost map's head emits one
+parameter block per stage from a single dense layer, so its output width is
+`N_train x REP_DIM` and `N` is fixed at training time. The `horizon` launch
+argument is therefore a *request*: `nmpc1` flies at `N = 1` because that is what
+its name means, and the learned controllers fly at whatever their checkpoint was
+trained at, logging the fact when the two differ. Asking an `N = 1` head to fill
+ten stages fails as `cannot reshape (1, 40) into (1, 10, 40)`, a long way from
+the parameter that caused it.
+
 The checkpoint preference is **B, then C, then the plain Notebook-3 model**, and
 the node logs which it loaded. B routes the residual into the model only and
 wins the scenario sweep; C routes it into both; the plain model is not adaptive
 at all and is the last resort.
 
-## 7. Known limits
+## 7. The first solve is compiled before the loop starts
+
+JAX traces and compiles on the first call. Measured on a CPU-only `jaxlib`
+that is **13.5 s**, against a steady-state **7.4 ms**. Paying it inside the
+first timer callback blocks the executor, so no `OffboardControlMode` is
+published while it happens — and PX4 refuses to enter offboard, or drops
+straight out of it, if that stream stops for more than 0.5 s. The vehicle would
+never arm, and the log would show a controller that looked perfectly healthy.
+
+So `ACMPCController.warmup()` compiles against a synthetic hover during node
+construction, where 13 s costs nothing, and discards the state it produces —
+warm-up must not seed the rotor observer or (5.3)'s memory with a fiction. The
+node logs the compile time. After it, the first real tick is 8.5 ms.
+
+If you have a CUDA `jaxlib`, this is much faster; the warm-up is cheap either
+way and the ordering is what matters.
+
+## 8. Known limits
 
 * **`actuator_motors` is not optional for the moment channels.** Per §6.2 the
   PWM block is the only observable channel for a *standing* moment: an

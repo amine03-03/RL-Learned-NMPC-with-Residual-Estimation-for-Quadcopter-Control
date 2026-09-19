@@ -417,10 +417,13 @@ def main(args=None):                                       # pragma: no cover
     ap.add_argument("--payload", nargs=4, type=float, default=None,
                     metavar=("M", "RX", "RY", "RZ"))
     ap.add_argument("--setpoint", nargs=3, type=float, default=[0.0, 0.0, 1.5])
-    known, ros_args = ap.parse_known_args(
-        [a for a in (args if args is not None else sys.argv[1:])
-         if a != "--ros-args"])
-    if known.replay:
+    argv = list(sys.argv[1:] if args is None else args)
+
+    #  --replay is a pure-Python path that never touches ROS, so it is decided
+    #  before rclpy is imported.
+    if "--replay" in argv:
+        cut = argv.index("--ros-args") if "--ros-args" in argv else len(argv)
+        known, _ = ap.parse_known_args(argv[:cut])
         return _replay(known.replay, known.out, known.setpoint,
                        known.payload and (known.payload[0], known.payload[1:]))
 
@@ -442,8 +445,18 @@ def main(args=None):                                       # pragma: no cover
                            ReliabilityPolicy)
     from geometry_msgs.msg import WrenchStamped
     from std_msgs.msg import String
+    from rclpy.utilities import remove_ros_args
     from acmpc_controller import frames as F
     from acmpc_controller import px4_topics as PT
+
+    #  Split the arguments the RIGHT way round.  The previous code stripped the
+    #  "--ros-args" marker and handed the remainder to rclpy.init, which then
+    #  could not parse "--params-file" -- so EVERY ROS parameter fell back to
+    #  its declared default and the node wrote to runs/demo_s7 instead of the
+    #  session it was launched with.  Nothing raised: defaults are legal values.
+    #  remove_ros_args gives argparse only what is not ROS's; rclpy.init gets
+    #  the original, untouched.
+    known, _ = ap.parse_known_args(remove_ros_args(args=argv))
 
     class LiveZX(Node):
         def __init__(self):
@@ -573,15 +586,29 @@ def main(args=None):                                       # pragma: no cover
                 render_to(self.rec, os.path.join(self.session, "R-F13_zx_demo.png"))
 
         def finish(self):
-            self.save()
-            out = render_to(self.rec, os.path.join(self.session,
-                                                   "R-F13_zx_demo.png"))
-            import json
-            with open(os.path.join(self.session, "zx_metrics.json"), "w") as f:
-                json.dump(self.rec.metrics(), f, indent=2)
-            self.get_logger().info(f"live_zx: wrote {out} and zx_metrics.json")
+            """Persist everything.  Runs during shutdown, so nothing here may
+            depend on the ROS context still being alive -- by this point launch
+            has usually torn it down, and a logger call raises rather than
+            prints.  Print instead, and never let a reporting failure lose the
+            data the whole flight was for."""
+            try:
+                self.save()
+                out = render_to(self.rec, os.path.join(self.session,
+                                                       "R-F13_zx_demo.png"))
+                import json
+                with open(os.path.join(self.session, "zx_metrics.json"), "w") as f:
+                    json.dump(self.rec.metrics(), f, indent=2)
+                print(f"live_zx: wrote {out} and zx_metrics.json", file=sys.stderr)
+                for name, m in self.rec.metrics().items():
+                    print(f"live_zx:   {name:<16} n={m['n']:5d}  "
+                          f"e_z={m['z_bias']:+.4f}  e_x={m['x_bias']:+.4f}  "
+                          f"|e|_rms={m['p_rms']:.4f} m", file=sys.stderr)
+            except Exception as ex:                       # noqa: BLE001
+                print(f"live_zx: FAILED to write the session outputs to "
+                      f"{self.session}: {type(ex).__name__}: {ex}",
+                      file=sys.stderr)
 
-    rclpy.init(args=ros_args or None)
+    rclpy.init(args=argv)
     node = LiveZX()
     try:
         rclpy.spin(node)
@@ -590,7 +617,8 @@ def main(args=None):                                       # pragma: no cover
     finally:
         node.finish()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
     return 0
 
 

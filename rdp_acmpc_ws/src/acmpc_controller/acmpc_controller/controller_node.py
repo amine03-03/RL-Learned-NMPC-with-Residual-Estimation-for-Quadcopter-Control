@@ -36,10 +36,15 @@ from .controller import ACMPCController
 #: launch file and the demo driver, so the label on the plot cannot disagree
 #: with the wiring behind it.
 CONTROLLERS = {
-    "nmpc1": dict(mode="nmpc1", use_d=False),
-    "acmpc": dict(mode="acmpc", use_d=False),
-    "acmpc_adaptive": dict(mode="acmpc", use_d=True),
-    "pid": dict(mode="pid", use_d=False),
+    #  `horizon` is the N this controller flies.  It is 1 for nmpc1 because
+    #  that is what the name means and what the ledger reports.  It is None for
+    #  the learned ones because their horizon is NOT a free parameter: the cost
+    #  map's head emits one block per stage, so N is fixed at training time and
+    #  the checkpoint decides.
+    "nmpc1": dict(mode="nmpc1", use_d=False, horizon=1),
+    "acmpc": dict(mode="acmpc", use_d=False, horizon=None),
+    "acmpc_adaptive": dict(mode="acmpc", use_d=True, horizon=None),
+    "pid": dict(mode="pid", use_d=False, horizon=1),
 }
 
 #: PX4 MAVLink command ids used for the offboard handshake.
@@ -112,6 +117,11 @@ def main(args=None):                                       # pragma: no cover
             if g("mode"):                      # explicit override, for sweeps
                 spec["mode"] = g("mode")
             spec["use_d"] = bool(g("use_d")) and spec["use_d"]
+            #  horizon: 0 means "whatever this controller flies", which for a
+            #  learned cost map is whatever its checkpoint was trained at.
+            want_N = int(g("horizon"))
+            spec_N = spec.pop("horizon")
+            n_req = want_N if want_N > 0 else (spec_N if spec_N else 1)
             self.cname = name
 
             # -- reference, checked BEFORE anything is flown ---------------- #
@@ -134,8 +144,13 @@ def main(args=None):                                       # pragma: no cover
                 f"reference {self.ref_mode} "
                 + (f"at {self.p_hold.tolist()}" if self.ref_mode == "hold"
                    else f"feasible: peak_a {pa:.3f} <= {budget:.4f} m/s^2"))
-            self.ctrl = ACMPCController(horizon=int(g("horizon")),
+            self.ctrl = ACMPCController(horizon=n_req,
                                         n_iter=int(g("n_iter")), **spec)
+            #  The controller is the authority on N from here on: a learned
+            #  cost map silently overrides the request, and a reference built
+            #  to a different length than the solver expects is the next
+            #  shape error along.
+            self.N = int(self.ctrl.N)
             #  Taken from the study, not retyped: the preview geometry is part
             #  of the observation the cost map was trained on, and a local copy
             #  that drifted would be silent.
@@ -207,6 +222,13 @@ def main(args=None):                                       # pragma: no cover
             m = String(); m.data = name
             self.pub_name.publish(m)
 
+            #  Compile before the loop, not inside it -- see warmup().
+            warm = self.ctrl.warmup()
+            if warm > 0.05:
+                self.get_logger().info(
+                    f"solver compiled in {warm:.1f} s (before the loop, so the "
+                    f"offboard heartbeat is never interrupted by it)")
+
             self.t0 = None
             self.armed = False
             self.n_tick = 0
@@ -275,7 +297,7 @@ def main(args=None):                                       # pragma: no cover
             self.t0 = self.t0 if self.t0 is not None else now
             t = now - self.t0
             g = lambda k: self.get_parameter(k).value
-            N = int(g("horizon"))
+            N = self.N
             dt = 1.0 / float(g("rate_hz"))
 
             # (p, v, a) of the flown path at an arbitrary time -- refgen takes
@@ -350,7 +372,8 @@ def main(args=None):                                       # pragma: no cover
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
     return 0
 
 

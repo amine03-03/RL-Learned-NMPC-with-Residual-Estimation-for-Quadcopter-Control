@@ -79,6 +79,22 @@ class ACMPCController:
                     "no AC-MPC checkpoint found; run Notebooks 3 and 5, or pass "
                     "mode='nmpc1' to fly the incumbent")
             self.actor = ck["actor"]
+
+            #  The horizon of a learned cost map is NOT a free parameter.  The
+            #  head emits one parameter block per stage in a single dense
+            #  layer, so its output width is N_train * REP_DIM[rep] and is
+            #  fixed at training time.  Overriding N here asked a head trained
+            #  for one stage to fill ten, which fails inside the cost map as
+            #  "cannot reshape array of shape (1, 40) into (1, 10, 40)" -- a
+            #  long way from the horizon parameter that caused it.
+            #  n_iter IS free: it only says how long to iterate the solve.
+            n_train = int(ck["cfg"].get("N", 1))
+            if int(horizon) != n_train:
+                print(f"ACMPCController: this checkpoint was trained at "
+                      f"N = {n_train}; flying it at N = {horizon} is not "
+                      f"possible because the cost-map head has one output "
+                      f"block per stage. Using N = {n_train}.", file=sys.stderr)
+            self.N = n_train
             self.cfg = dict(ck["cfg"], N=self.N, n_iter=self.n_iter, n_diff=1)
 
             #  What observation width was this actor TRAINED with?  Read it off
@@ -205,6 +221,38 @@ class ACMPCController:
             self._solvers[key] = (jax.jit(lambda e, xs, us, d, o: f(e, xs, us, None, o))
                                   if no_d else jax.jit(f))
         return self._solvers[key]
+
+    def warmup(self):
+        """Compile the solve BEFORE the control loop starts.  -> seconds taken.
+
+        JAX traces and compiles on the first call.  Measured on a CPU-only
+        jaxlib that is **13.5 s**, against a steady-state 7.4 ms.  Paying it
+        inside the first timer callback blocks the executor for those 13.5 s,
+        so no ``OffboardControlMode`` is published while it happens -- and PX4
+        refuses to enter offboard, or drops straight out of it, if that stream
+        stops for more than \SI{0.5}{\second}.  The vehicle would never arm,
+        and the log would show a controller that looked healthy.
+
+        So compile against a synthetic hover, here, where taking 13 s costs
+        nothing.  The state this leaves behind is discarded: warm-up must not
+        seed the rotor observer or (5.3)'s memory with a fictitious step.
+        """
+        X, np_ = self.X, np
+        if self.mode == "pid":
+            return 0.0
+        t0 = time.perf_counter()
+        xr0 = np_.concatenate([np_.zeros(3), np_.zeros(3), [1.0, 0.0, 0.0, 0.0],
+                               np_.zeros(3), np_.full(4, float(X.OM_HOVER))])
+        xr = np_.tile(xr0, (self.N + 1, 1))
+        ur = np_.tile([float(X.U_HOVER), 0.0, 0.0, 0.0], (self.N, 1))
+        x13 = np_.concatenate([np_.zeros(3), np_.zeros(3),
+                               [1.0, 0.0, 0.0, 0.0], np_.zeros(3)])
+        self.step(x13, xr, ur,
+                  d_hat=(np_.zeros(6) if self.use_d else None),
+                  preview=np_.zeros((3, 6)))
+        self.reset()
+        self.solve_ms.clear()
+        return time.perf_counter() - t0
 
     def _with_omega(self, x13):
         """[p, v, q, om] (13,) -> the full 17-state control state.
