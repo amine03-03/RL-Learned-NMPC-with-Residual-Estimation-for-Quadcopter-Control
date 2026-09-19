@@ -5,11 +5,39 @@ LaTeX source for the final-year project report.
 ```
 report/
 ├── report.tex        the whole document, single file
+├── report_mockup.tex GENERATED mockup -- see below
 ├── presentation.tex  the defence deck (beamer, focus theme)
 ├── figures/          >>> DROP YOUR OWN PLOTS HERE <<<  (see figures/README.md)
 ├── logos/            institution.jpeg (left) and school.jpeg (right)
 └── README.md
 ```
+
+## The mockup
+
+`report_mockup.tex` is a **mockup**: the same document with the numbers the
+study would report if every increment delivered on its claim, and every figure
+**drawn** in TikZ/pgfplots instead of included from a file.
+
+```bash
+cd report && latexmk -pdf report_mockup.tex     # 102 pages
+```
+
+It compiles on a machine with nothing but TeX Live — no `artifacts/`, no CSVs,
+no notebook run, no images (verified by compiling it alone in an empty
+directory). The word MOCKUP appears once, beside the title.
+
+**The numbers in its results chapter are not measurements.** Do not quote them.
+The real report is `report.tex`.
+
+It is generated, not hand-edited:
+
+```bash
+python3 study/make_mockup.py            # regenerate
+python3 study/make_mockup.py --check    # verify the anchors still match report.tex
+```
+
+`--check` fails loudly if an anchor no longer matches `report.tex`, so the
+mockup cannot silently drift into being built from a stale template.
 
 ## Using your own plots
 
