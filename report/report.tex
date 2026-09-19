@@ -3090,14 +3090,14 @@ skipabove=9pt, skipbelow=9pt
 			\toprule
 			\textbf{Path} & \textbf{Controller} & \textbf{RMSE} & \textbf{IQR} & \textbf{$e_{\max}$} & \textbf{effort} & \textbf{smooth} & \textbf{sat} \\
 			\midrule
-			hover  & LQR                 & \BL & \BL & \BL & \BL & \BL & \BL \\
-			hover  & LQR (no feed-fwd)   & \BL & \BL & \BL & \BL & \BL & \BL \\
-			circle & LQR                 & \BL & \BL & \BL & \BL & \BL & \BL \\
-			circle & LQR (no feed-fwd)   & \BL & \BL & \BL & \BL & \BL & \BL \\
-			fig8   & LQR                 & \BL & \BL & \BL & \BL & \BL & \BL \\
-			fig8   & LQR (no feed-fwd)   & \BL & \BL & \BL & \BL & \BL & \BL \\
-			square & LQR                 & \BL & \BL & \BL & \BL & \BL & \BL \\
-			square & LQR (no feed-fwd)   & \BL & \BL & \BL & \BL & \BL & \BL \\
+			hover  & LQR                 & 0.0281 & 0.0099 & 0.2246 & 0.5311 & $3.113\times10^{-9}$ & 0.000 \\
+			hover  & LQR (no feed-fwd)   & 0.0281 & 0.0099 & 0.2246 & 0.5311 & $3.113\times10^{-9}$ & 0.000 \\
+			circle & LQR                 & 0.0626 & 0.0116 & 0.2666 & 0.5393 & $1.659\times10^{-6}$ & 0.000 \\
+			circle & LQR (no feed-fwd)   & 0.0548 & 0.0146 & 0.2584 & 0.5398 & $1.832\times10^{-6}$ & 0.000 \\
+			fig8   & LQR                 & 0.0945 & 0.0122 & 3.0172 & 0.5494 & $9.819\times10^{-5}$ & 0.002 \\
+			fig8   & LQR (no feed-fwd)   & 0.0964 & 0.0151 & 2.6243 & 0.5519 & $8.498\times10^{-5}$ & 0.002 \\
+			square & LQR                 & 0.1250 & 0.0940 & 0.6880 & 0.5670 & 0.004 & 0.000 \\
+			square & LQR (no feed-fwd)   & 0.0599 & 0.0154 & 0.2840 & 0.5545 & 0.002 & 0.000 \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3125,12 +3125,12 @@ skipabove=9pt, skipbelow=9pt
 			\cmidrule(lr){2-4}\cmidrule(lr){5-7}
 			$N$ & circle & fig8 & square & circle & fig8 & square & $t_\mathrm{solve}$ [\si{\milli\second}] \\
 			\midrule
-			1  & \BL & \BL & \BL & \BL & \BL & \BL & \BL \\
-			2  & \BL & \BL & \BL & \BL & \BL & \BL & \BL \\
-			3  & \BL & \BL & \BL & \BL & \BL & \BL & \BL \\
-			5  & \BL & \BL & \BL & \BL & \BL & \BL & \BL \\
-			10 & \BL & \BL & \BL & \BL & \BL & \BL & \BL \\
-			20 & \BL & \BL & \BL & \BL & \BL & \BL & \BL \\
+			1  & 0.0658 & 0.0676 & 0.0701 & 0.0758 & 0.0784 & 0.0889 & 12.20 \\
+			2  & 0.0664 & 0.0664 & 0.0660 & 0.0990 & 0.0952 & 0.1045 & 28.58 \\
+			3  & 0.0656 & 0.0647 & 0.0660 & 0.1218 & 0.1165 & 0.1234 & 39.78 \\
+			5  & 0.0649 & 0.0638 & 0.0666 & 0.1681 & 0.1637 & 0.1700 & 61.88 \\
+			10 & 0.0645 & 0.0626 & 0.0664 & 0.2787 & 0.2713 & 0.2761 & 121.54 \\
+			20 & 0.0644 & 0.0625 & 0.0655 & 0.4606 & 0.4326 & 0.4538 & 257.61 \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3166,11 +3166,19 @@ skipabove=9pt, skipbelow=9pt
 			\toprule
 			\textbf{Noise} & \textbf{Controller} & \textbf{RMSE} & \textbf{$e_{\max}$} & \textbf{smooth} & \textbf{sat} \\
 			\midrule
-			off  & LQR / NMPC $N{=}1$ / NMPC $N{=}10$ & \BL & \BL & \BL & \BL \\
-			low  & LQR / NMPC $N{=}1$ / NMPC $N{=}10$ & \BL & \BL & \BL & \BL \\
-			high & LQR / NMPC $N{=}1$ / NMPC $N{=}10$ & \BL & \BL & \BL & \BL \\
+			off  & LQR & 0.0678 & 0.256 & $1.177\times10^{-6}$ & 0.000 \\
+			     & NMPC $N{=}1$ & 0.0692 & 0.304 & $3.820\times10^{-6}$ & 0.000 \\
+			     & NMPC $N{=}10$ & 0.0679 & 0.265 & $1.722\times10^{-5}$ & 0.000 \\
+			\addlinespace[2pt]
+			low  & LQR & 0.0679 & 0.254 & 0.009 & 0.000 \\
+			     & NMPC $N{=}1$ & 0.0695 & 0.304 & 0.018 & 0.000 \\
+			     & NMPC $N{=}10$ & 0.0681 & 0.262 & 0.011 & 0.000 \\
+			\addlinespace[2pt]
+			high & LQR & 0.0704 & 0.254 & 0.127 & 0.056 \\
+			     & NMPC $N{=}1$ & 0.0716 & 0.302 & 0.201 & 0.002 \\
+			     & NMPC $N{=}10$ & 0.0690 & 0.256 & 0.170 & 0.001 \\
 			\midrule
-			\multicolumn{2}{@{}l}{\textbf{Degradation factor high/off}} & \BL & \BL & \BL & --- \\
+			\multicolumn{2}{@{}l}{\textbf{Degradation high/off}} & 1.04 / 1.03 / 1.02 & --- & --- & --- \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3195,12 +3203,12 @@ skipabove=9pt, skipbelow=9pt
 			\toprule
 			\textbf{Weighting} & \textbf{RMSE} & \textbf{effort} & \textbf{smooth} & \textbf{sat} \\
 			\midrule
-			Best admissible & \BL & \BL & \BL & \BL \\
-			Median admissible & \BL & \BL & \BL & \BL \\
-			Worst admissible & \BL & \BL & \BL & \BL \\
+			Best admissible & 0.0858 & \BL & \BL & \BL \\
+			Median admissible & 0.1250 & \BL & \BL & \BL \\
+			Worst admissible & 0.2014 & \BL & \BL & \BL \\
 			Hand-chosen operating point & \BL & \BL & \BL & \BL \\
 			\midrule
-			\textbf{Best-to-worst ratio} & \textbf{\BL$\times$} & \BL & \BL & --- \\
+			\textbf{Best-to-worst ratio} & \textbf{2.3$\times$} & \BL & \BL & --- \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3250,7 +3258,7 @@ skipabove=9pt, skipbelow=9pt
 			\cmidrule(lr){2-3}\cmidrule(lr){4-5}
 			\textbf{Axis} & LQR & NMPC $N{=}1$ & below nominal & above nominal \\
 			\midrule
-			$\lambda_m$ (mass)    & \BL$\times$ & \BL$\times$ & \BL & \BL \\
+			$\lambda_m$ (mass)    & 1.75$\times$ & 1.75$\times$ & 1.75 & \BL \\
 			$\lambda_J$ (inertia) & \BL$\times$ & \BL$\times$ & \BL & \BL \\
 			\bottomrule
 		\end{tabularx}
@@ -3295,9 +3303,9 @@ skipabove=9pt, skipbelow=9pt
 			\textbf{Path} & \textbf{Controller} & \textbf{Best} & \textbf{Worst}
 			& \textbf{Ratio} \\
 			\midrule
-			circle & LQR / NMPC $N{=}1$ & \BL & \BL & \BL$\times$ \\
-			fig8   & LQR / NMPC $N{=}1$ & \BL & \BL & \BL$\times$ \\
-			square & LQR / NMPC $N{=}1$ & \BL & \BL & \BL$\times$ \\
+			circle & LQR / NMPC $N{=}1$ & 0.0622 / 0.1054 & 0.3700 / 0.1211 & 5.9 / 1.1$\times$ \\
+			fig8   & LQR / NMPC $N{=}1$ & 0.0621 / 0.1048 & 0.3570 / 0.1337 & 5.7 / 1.3$\times$ \\
+			square & LQR / NMPC $N{=}1$ & 0.1385 / 0.1094 & 0.4576 / 0.1350 & 3.3 / 1.2$\times$ \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3325,7 +3333,7 @@ skipabove=9pt, skipbelow=9pt
 			\toprule
 			\textbf{Configuration} & \textbf{$R^2$} & \textbf{NRMSE} & \textbf{acceptance} & $n$ & \textbf{$X_T$ reach [\si{\metre}]} \\
 			\midrule
-			Baseline & \BL & \BL & \BL & \BL & \BL \\
+			Baseline & 0.999998 & 0.001 & 100\% & 256 & 0.5649 \\
 			Reduced terminal weighting & \BL & \BL & \BL & \BL & \BL \\
 			Matched displacement & \BL & \BL & \BL & \BL & \BL \\
 			Increased candidate budget & \BL & \BL & \BL & \BL & \BL \\
@@ -3354,12 +3362,12 @@ skipabove=9pt, skipbelow=9pt
 			\toprule
 			\textbf{Controller} & \textbf{circle} & \textbf{fig8} & \textbf{square} & \textbf{effort} & $t_\mathrm{solve}$ \\
 			\midrule
-			NMPC $N{=}1$ & \BL & \BL & \BL & \BL & \BL \\
-			NMPC $N{=}3$ & \BL & \BL & \BL & \BL & \BL \\
-			NMPC $N{=}10$ & \BL & \BL & \BL & \BL & \BL \\
-			\LLTC{} $N{=}1$ & \BL & \BL & \BL & \BL & \BL \\
+			NMPC $N{=}1$ & 0.0712 & 0.0683 & 0.0723 & \BL & \BL \\
+			NMPC $N{=}3$ & 0.0709 & 0.0639 & 0.0702 & \BL & \BL \\
+			NMPC $N{=}10$ & 0.0697 & 0.0620 & 0.0704 & \BL & \BL \\
+			\LLTC{} $N{=}1$ & 1.2615 & 1.2551 & 1.2934 & \BL & \BL \\
 			\midrule
-			\textbf{Ratio \LLTC/NMPC $N{=}1$} & \BL & \BL & \BL & --- & --- \\
+			\textbf{Ratio \LLTC/NMPC $N{=}1$} & 17.7$\times$ & 18.4$\times$ & 17.9$\times$ & --- & --- \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3401,11 +3409,11 @@ skipabove=9pt, skipbelow=9pt
 			\toprule
 			\textbf{Task} & \texttt{diag} & \texttt{chol} & \texttt{full} & \textbf{Winner} \\
 			\midrule
-			circle & \BL & \BL & \BL & \BL \\
-			fig8 & \BL & \BL & \BL & \BL \\
-			stabilize & \BL & \BL & \BL & \BL \\
+			circle & 0.1042 & 0.0872 & 0.1012 & \texttt{chol} \\
+			fig8 & 0.1113 & 0.0863 & 0.0954 & \texttt{chol} \\
+			stabilize & 0.0723 & 0.0779 & 0.0864 & \texttt{diag} \\
 			\midrule
-			\textbf{Margin over seed spread} & \BL & \BL & \BL & --- \\
+			\textbf{Margin over seed spread} & 0.0170 & 0.0251 & 0.0141 & --- \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3482,7 +3490,7 @@ skipabove=9pt, skipbelow=9pt
 			\cmidrule(lr){2-3}\cmidrule(lr){4-5}
 			\textbf{Axis} & \ACMPC{} $N{=}1$ & Adaptive $N{=}1$ & below nominal & above nominal \\
 			\midrule
-			$\lambda_m$ (mass)    & \BL$\times$ & \BL$\times$ & \BL & \BL \\
+			$\lambda_m$ (mass)    & 0.55$\times$ & 0.55$\times$ & \BL & \BL \\
 			$\lambda_J$ (inertia) & \BL$\times$ & \BL$\times$ & \BL & \BL \\
 			\bottomrule
 		\end{tabularx}
@@ -3541,13 +3549,13 @@ skipabove=9pt, skipbelow=9pt
 			\toprule
 			\textbf{Policy} & \textbf{RMSE, nominal} & \textbf{RMSE, randomised} & \textbf{IQR, randomised} & \textbf{tilt} \\
 			\midrule
-			Nominal-only & \BL & \BL & \BL & \BL \\
-			DR, all axes & \BL & \BL & \BL & \BL \\
+			Nominal-only & 0.1027 & 0.1674 & \BL & \BL \\
+			DR, all axes & 0.1034 & 0.1558 & \BL & \BL \\
 			DR + measurement noise & \BL & \BL & \BL & \BL \\
 			NMPC $N{=}1$ (no learning) & \BL & \BL & \BL & \BL \\
 			\midrule
-			\textbf{Conservatism premium (signed)} & \textbf{\BL\,\%} & --- & --- & \BL\,\% \\
-			\textbf{Robustness gain on S2 (signed)} & --- & \textbf{\BL\,\%} & --- & --- \\
+			\textbf{Conservatism premium (signed)} & \textbf{0.70\,\%} & --- & --- & \BL\,\% \\
+			\textbf{Robustness gain on S2 (signed)} & --- & \textbf{6.90\,\%} & --- & --- \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3563,11 +3571,11 @@ skipabove=9pt, skipbelow=9pt
 			\toprule
 			\textbf{Policy} & \textbf{Seed variance} & \textbf{Episode IQR} \\
 			\midrule
-			Nominal-only & \BL & \BL \\
-			DR, all axes & \BL & \BL \\
-			\ACMPC{} (three seeds) & \BL & \BL \\
+			Nominal-only & 0.0004 & 0.0314 \\
+			DR, all axes & 0.0064 & 0.0330 \\
+			\ACMPC{} (three seeds) & 0.0061 & \BL \\
 			\midrule
-			\textbf{Seed spread used as the comparison floor} & \textbf{\BL\,\si{\metre}} & --- \\
+			\textbf{Seed spread used as the comparison floor} & \textbf{0.0064\,\si{\metre}} & --- \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3639,9 +3647,9 @@ skipabove=9pt, skipbelow=9pt
 			\toprule
 			\textbf{Policy} & \textbf{Final reward} & \textbf{Collective saturation} & \textbf{Crash rate} & \textbf{Gate ($<5\%$)} \\
 			\midrule
-			Base & \BL & \BL & \BL & \BL \\
-			Robust & \BL & \BL & \BL & \BL \\
-			Oracle & \BL & \BL & \BL & \BL \\
+			Base & -0.0877 & 0.11\% & 0.00\% & yes \\
+			Robust & -0.1627 & 0.12\% & 0.00\% & yes \\
+			Oracle & -0.1628 & 0.13\% & 0.00\% & yes \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3669,12 +3677,12 @@ skipabove=9pt, skipbelow=9pt
 			\toprule
 			\textbf{Encoder} & \textbf{$R^2$ all} & \textbf{$R^2$ force} & \textbf{$R^2$ moment} & \textbf{params} & \textbf{p95 [\si{\milli\second}]} & \textbf{Admissible?} \\
 			\midrule
-			GRU~\cite{cho2014gru}  & \BL & \BL & \BL & \BL & \BL & \BL \\
-			LSTM~\cite{hochreiter1997lstm} & \BL & \BL & \BL & \BL & \BL & \BL \\
-			TCN~\cite{bai2018tcn}  & \BL & \BL & \BL & \BL & \BL & \BL \\
-			CNN                    & \BL & \BL & \BL & \BL & \BL & \BL \\
+			GRU~\cite{cho2014gru} & 0.9988 & 0.9985 & 0.9992 & 97542 & 1.24 & yes \\
+			LSTM~\cite{hochreiter1997lstm} & 0.9962 & 0.9945 & 0.9980 & 129926 & 1.44 & yes \\
+			TCN~\cite{bai2018tcn} & 0.9951 & 0.9943 & 0.9959 & 134982 & 0.91 & yes \\
+			CNN & 0.9856 & 0.9795 & 0.9917 & 90950 & 0.31 & yes \\
 			\midrule
-			\textbf{Shipped} & \multicolumn{6}{l}{\BL\ \ (chosen among the admissible encoders by $R^2$)} \\
+			\textbf{Shipped} & \multicolumn{6}{l}{GRU\ \ (chosen among the admissible encoders by $R^2$)} \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3717,17 +3725,17 @@ skipabove=9pt, skipbelow=9pt
 			\textbf{$H$} & \textbf{Warm-up} & \textbf{GRU} & \textbf{LSTM} & \textbf{TCN} & \textbf{CNN} \\
 			\midrule
 			\multicolumn{6}{@{}l}{\itshape overall $R^2$} \\
-			\quad 16  & \SI{320}{\milli\second}  & \BL & \BL & \BL & \BL \\
-			\quad 32  & \SI{640}{\milli\second}  & \BL & \BL & \BL & \BL \\
-			\quad 64  & \SI{1.28}{\second}       & \BL & \BL & \BL & \BL \\
-			\quad 128 & \SI{2.56}{\second}       & \BL & \BL & \BL & \BL \\
+			\quad 16  & \SI{320}{\milli\second}  & 0.9917 & 0.9420 & 0.9890 & 0.9862 \\
+			\quad 32  & \SI{640}{\milli\second}  & 0.9924 & 0.9400 & 0.9848 & 0.9785 \\
+			\quad 64  & \SI{1.28}{\second}       & 0.9932 & 0.9438 & 0.9818 & 0.9531 \\
+			\quad 128 & \SI{2.56}{\second}       & 0.9945 & 0.9693 & 0.9817 & 0.9568 \\
 			\midrule
 			\multicolumn{6}{@{}l}{\itshape p95 inference latency, one window [\si{\milli\second}]} \\
-			\quad 16  & ---                      & \BL & \BL & \BL & \BL \\
-			\quad 128 & ---                      & \BL & \BL & \BL & \BL \\
+			\quad 16  & ---                      & 0.35 & 0.41 & 0.37 & 0.13 \\
+			\quad 128 & ---                      & 2.46 & 2.67 & 1.20 & 0.35 \\
 			\midrule
 			\multicolumn{2}{@{}l}{Shortest window within \SI{5}{\percent} of the best cell}
-			& \multicolumn{4}{r}{\BL} \\
+			& \multicolumn{4}{r}{$H=16$} \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3841,23 +3849,23 @@ skipabove=9pt, skipbelow=9pt
 			\textbf{Scenario / level} & \textbf{Base} & \textbf{Robust} & \textbf{Oracle} & \textbf{RDP-A} & \textbf{RDP-B} & \textbf{RDP-C} \\
 			\midrule
 			\multicolumn{7}{@{}l}{\itshape central payload (fraction of weight)} \\
-			\quad 0.000 & \BL & \BL & \BL & \BL & \BL & \BL \\
-			\quad 0.030 & \BL & \BL & \BL & \BL & \BL & \BL \\
-			\quad 0.060 & \BL & \BL & \BL & \BL & \BL & \BL \\
-			\quad 0.100 & \BL & \BL & \BL & \BL & \BL & \BL \\
+			\quad 0.000 & 0.1892 & 0.1918 & 0.1919 & 0.1934 & 0.1829 & 0.1839 \\
+			\quad 0.030 & 0.1922 & 0.1983 & 0.2012 & 0.1997 & 0.1898 & 0.1902 \\
+			\quad 0.060 & 0.1973 & 0.2061 & 0.2119 & 0.2083 & 0.1970 & 0.1976 \\
+			\quad 0.100 & 0.2038 & 0.2169 & 0.2251 & 0.2192 & 0.2072 & 0.2090 \\
 			\midrule
 			\multicolumn{7}{@{}l}{\itshape arm-tip payload, offset CG} \\
-			\quad 0.000 & \BL & \BL & \BL & \BL & \BL & \BL \\
-			\quad 0.004 & \BL & \BL & \BL & \BL & \BL & \BL \\
-			\quad 0.028 & \BL & \BL & \BL & \BL & \BL & \BL \\
-			\quad 0.044 & \BL & \BL & \BL & \BL & \BL & \BL \\
+			\quad 0.000 & 0.1892 & 0.1918 & 0.1919 & 0.1934 & 0.1829 & 0.1839 \\
+			\quad 0.004 & 0.1907 & 0.1936 & 0.1933 & 0.1946 & 0.1848 & 0.1859 \\
+			\quad 0.028 & 0.2062 & 0.2098 & 0.2059 & 0.2123 & 0.2008 & 0.2040 \\
+			\quad 0.044 & 0.2220 & 0.2265 & 0.2198 & 0.2286 & 0.2170 & 0.2212 \\
 			\midrule
 			\multicolumn{7}{@{}l}{\itshape slung load (excitation period, \si{\second})} \\
-			\quad 0.0 & \BL & \BL & \BL & \BL & \BL & \BL \\
-			\quad 1.2 & \BL & \BL & \BL & \BL & \BL & \BL \\
-			\quad 2.0 & \BL & \BL & \BL & \BL & \BL & \BL \\
-			\quad 4.0 & \BL & \BL & \BL & \BL & \BL & \BL \\
-			\quad 6.0 & \BL & \BL & \BL & \BL & \BL & \BL \\
+			\quad 0.0 & 0.1892 & 0.1918 & 0.1919 & 0.1934 & 0.1829 & 0.1839 \\
+			\quad 1.2 & 0.3153 & 0.3273 & 0.3434 & 0.3350 & 0.3191 & 0.3255 \\
+			\quad 2.0 & 0.3142 & 0.3268 & 0.3311 & 0.3289 & 0.3185 & 0.3201 \\
+			\quad 4.0 & 0.3141 & 0.3292 & 0.3451 & 0.3333 & 0.3186 & 0.3223 \\
+			\quad 6.0 & 0.3158 & 0.3293 & 0.3463 & 0.3343 & 0.3201 & 0.3234 \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3872,9 +3880,9 @@ skipabove=9pt, skipbelow=9pt
 			\toprule
 			\textbf{Scenario} & \textbf{Value of information} (Robust $-$ Oracle) & \textbf{Cost of estimation} (best RDP $-$ Oracle) \\
 			\midrule
-			central & \BL & \BL \\
-			asym & \BL & \BL \\
-			slung & \BL & \BL \\
+			central & -0.0044 & -0.0132 \\
+			asym & +0.0021 & -0.0068 \\
+			slung & -0.0158 & -0.0243 \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3918,12 +3926,12 @@ skipabove=9pt, skipbelow=9pt
 			\toprule
 			\textbf{Controller} & \textbf{S1} & \textbf{S2} & \textbf{S3} & \textbf{p95 [\si{\milli\second}]} & \textbf{admissible} & \textbf{tuned} \\
 			\midrule
-			LQR + feed-forward & \BL & \BL & \BL & \BL & \BL & 13 \\
-			NMPC $N{=}1$ & \BL & \BL & \BL & \BL & \BL & 13 \\
-			NMPC $N{=}10$ & \BL & \BL & \BL & \BL & \BL & 13 \\
-			\LLTC{} $N{=}1$ & \BL & \BL & \BL & \BL & \BL & 13 \\
-			\ACMPC{} $N{=}1$ & \BL & \BL & \BL & \BL & \BL & \textbf{0} \\
-			Adaptive \ACMPC{} $N{=}1$ & \BL & \BL & \BL & \BL & \BL & \textbf{0} \\
+			LQR + feed-forward & 0.0945 & 0.1882 & 0.3079 & 0.42 & yes & 13 \\
+			NMPC $N{=}1$ & 0.0739 & 0.1275 & 0.2368 & 12.04 & yes & 13 \\
+			NMPC $N{=}10$ & 0.0699 & 0.0993 & 0.1986 & 126.69 & no & 13 \\
+			\LLTC{} $N{=}1$ & 1.2547 & 1.2921 & 1.3202 & 12.20 & yes & 13 \\
+			\ACMPC{} $N{=}1$ & 0.1040 & 0.1657 & 0.2712 & 12.17 & yes & \textbf{0} \\
+			Adaptive \ACMPC{} $N{=}1$ & 0.1022 & 0.1561 & 0.2534 & 12.56 & yes & \textbf{0} \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3940,12 +3948,12 @@ skipabove=9pt, skipbelow=9pt
 			\toprule
 			\textbf{Controller} & \textbf{S2/S1} & \textbf{S3/S1} & \textbf{rank S1 $\to$ S3} & \textbf{change} \\
 			\midrule
-			LQR + feed-forward & \BL & \BL & \BL & \BL \\
-			NMPC $N{=}1$ & \BL & \BL & \BL & \BL \\
-			NMPC $N{=}10$ & \BL & \BL & \BL & \BL \\
-			\LLTC{} $N{=}1$ & \BL & \BL & \BL & \BL \\
-			\ACMPC{} $N{=}1$ & \BL & \BL & \BL & \BL \\
-			Adaptive \ACMPC{} $N{=}1$ & \BL & \BL & \BL & \BL \\
+			LQR + feed-forward & 1.99$\times$ & 3.26$\times$ & 3 $\to$ 5 & $-2$ \\
+			NMPC $N{=}1$ & 1.73$\times$ & 3.21$\times$ & 2 $\to$ 2 & 0 \\
+			NMPC $N{=}10$ & 1.42$\times$ & 2.84$\times$ & 1 $\to$ 1 & 0 \\
+			\LLTC{} $N{=}1$ & 1.03$\times$ & 1.05$\times$ & 6 $\to$ 6 & 0 \\
+			\ACMPC{} $N{=}1$ & 1.59$\times$ & 2.61$\times$ & 5 $\to$ 4 & $+1$ \\
+			Adaptive \ACMPC{} $N{=}1$ & 1.53$\times$ & 2.48$\times$ & 4 $\to$ 3 & $+1$ \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
