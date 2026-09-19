@@ -5,9 +5,38 @@ LaTeX source for the final-year project report.
 ```
 report/
 ├── report.tex        the whole document, single file
-├── logos/            institution.png (left) and school.png (right)
+├── presentation.tex  the defence deck (beamer, focus theme)
+├── figures/          >>> DROP YOUR OWN PLOTS HERE <<<  (see figures/README.md)
+├── logos/            institution.jpeg (left) and school.jpeg (right)
 └── README.md
 ```
+
+## Using your own plots
+
+Every figure is named once, in the **`FIGURE FILES`** block near the top of
+`report.tex`. Two ways to swap one:
+
+1. **Same name, no edit.** Put a file in `report/figures/` named as the
+   generated one (`F21_headline.png`, …). That directory is first on the
+   search path, so it wins.
+2. **Your own name, one edit.** Put `my_plot.pdf` in `report/figures/` and
+   change one line:
+
+   ```latex
+   \renewcommand{\figHeadline}{my_plot.pdf}
+   ```
+
+PDF, PNG, JPG and EPS all work; PDF is best for plots. A macro pointing at a
+file that does not exist renders as a labelled grey frame, so the document
+always compiles and the gap is visible in the PDF. `report/figures/README.md`
+has the details.
+
+## TeXstudio
+
+Open `report.tex`, set the default compiler to **pdflatex**, and build twice
+(or use `latexmk -pdf`). Nothing here needs shell-escape, biber, or any
+external tool. `report/figures/` is not touched by any script, so images you
+put there are safe.
 
 ## Build
 
@@ -32,8 +61,10 @@ apt-get install --no-install-recommends latexmk texlive-latex-base \
     texlive-science texlive-fonts-recommended texlive-lang-french
 ```
 
-Last verified: 94 pages, no errors, no undefined references, no overfull
-boxes.
+Last verified: **104 pages, no errors, no undefined references, no overfull
+boxes, no blank cells and no TODO markers.** Every quantitative cell is a
+measured number written in from `artifacts/` by `study/fill_report.py`; run
+that script after a fresh campaign to update them all in place.
 
 The document degrades gracefully: it compiles with no logos, with no figures,
 and without `french.ldf` or `lmodern` (only the résumé's hyphenation and the

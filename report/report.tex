@@ -10,9 +10,12 @@
 %  ---------------------------------------------------------------------
 %  HOW THIS FILE RELATES TO THE REPOSITORY
 %
-%   * Every figure is pulled from artifacts/figures/ by \realfig, which
-%     falls back to a labelled placeholder when the file is absent, so the
-%     document always compiles. Run the notebooks to populate them:
+%   * Every figure is named ONCE, in the FIGURE FILES block below, and is
+%     looked for in report/figures/ first and artifacts/figures/ second.
+%     To use your own plot: drop it in report/figures/ under the same name,
+%     or point the macro at your own file name. A macro pointing at nothing
+%     renders as a labelled frame, so the document always compiles.
+%     To regenerate the shipped figures:
 %         cd study/notebooks && for n in nb?_*.py; do python "$n"; done
 %
 %   * Every physical constant is defined ONCE in the macro block below and
@@ -22,8 +25,8 @@
 %
 %   * Results obtained at X500_SCALE=smoke are typeset with \SM{} and carry
 %     a dagger. They are pipeline diagnostics, NOT results, per the
-%     repository's own scale discipline. \BL marks a cell awaiting the
-%     full-scale campaign.
+%     repository's own scale discipline. Every other quantitative cell is a
+%     measured number written in by study/fill_report.py; no cell is blank.
 %
 %   * Two logos go in report/logos/ as institution.png (left) and
 %     school.png (right). Absent, they render as labelled frames.
@@ -60,7 +63,7 @@ headheight=22pt]{geometry}
 
 %----------------------------------------------------------- floats
 \usepackage{graphicx}
-\graphicspath{{figures/}{../artifacts/figures/}{artifacts/figures/}{report/../artifacts/figures/}{logos/}{report/logos/}}
+%  The graphics search path is set ONCE, in the FIGURE FILES block below.
 \usepackage{booktabs}
 \usepackage{tabularx}
 \usepackage{longtable}
@@ -230,6 +233,86 @@ skipabove=9pt, skipbelow=9pt
 \DeclareRobustCommand{\nbd}{\mbox{-}}
 
 \newcommand{\keyhead}[1]{\textbf{\sffamily\small\textcolor{NavyDeep}{#1}}\par\vspace{2pt}}
+
+
+%=======================================================================
+%  >>>>>  FIGURE FILES -- EDIT THIS BLOCK TO USE YOUR OWN PLOTS  <<<<<
+%
+%  Every figure in the document is referred to through ONE macro defined
+%  here.  To swap a plot for your own, change the file name on the right
+%  of the matching line -- nothing else in the document needs touching.
+%
+%      \renewcommand{\figHeadline}{my_headline_plot.pdf}
+%
+%  WHERE THE FILE IS LOOKED FOR, in this order (see \graphicspath below):
+%
+%      report/figures/          <- put YOUR OWN images here
+%      artifacts/figures/       <- what the notebooks generate
+%      the directory of report.tex, and the compile directory
+%
+%  So the simplest workflow in TeXstudio is: drop your image into
+%  report/figures/ and either name it as below, or point the macro at it.
+%  PDF, PNG, JPG and EPS all work; PDF gives the best result for plots.
+%
+%  A name that resolves to no file on disk renders as a labelled frame
+%  rather than breaking the build, so the document always compiles and a
+%  missing plot is visible in the PDF.
+%=======================================================================
+
+% -- Chapter 3: model, references, feasibility -------------------------
+\newcommand{\figFeasibility}     {F1_feasibility.png}
+\newcommand{\figSaturationGuard} {F24_saturation_guard.png}
+
+% -- Chapter 5: implementation, flight visualisation -------------------
+\newcommand{\figContactSheet}    {F25_contact_sheet.png}
+\newcommand{\figGroundTracks}    {F26_ground_tracks.png}
+\newcommand{\figWrenchSeries}    {F19_wrench_timeseries.png}
+
+% -- Chapter 6, Increment 0: baselines ---------------------------------
+\newcommand{\figLqrFeedforward}  {F2_lqr_feedforward.png}
+\newcommand{\figHorizon}         {F3_horizon.png}
+\newcommand{\figCorner}          {F4_corner.png}
+\newcommand{\figNoise}           {F3b_noise.png}
+\newcommand{\figQrHeatmap}       {F5_qr_heatmap.png}
+\newcommand{\figMismatchHand}    {F27_model_mismatch_hand.png}
+\newcommand{\figMismatchCost}    {F28_cost_mismatch_hand.png}
+
+% -- Chapter 6, Increment 1: learned terminal cost ---------------------
+\newcommand{\figLltcFit}         {F6_lltc_fit.png}
+\newcommand{\figLltcSpectrum}    {F8_lltc_spectrum.png}
+\newcommand{\figLltcLocality}    {F7_lltc_locality.png}
+
+% -- Chapter 6, Increment 2: learned cost map --------------------------
+\newcommand{\figRepresentations} {F9_representations.png}
+\newcommand{\figExploration}     {F10_exploration.png}
+\newcommand{\figMismatchLearned} {F29_model_mismatch_learned.png}
+
+% -- Chapter 6, Increment 3: domain randomisation ----------------------
+\newcommand{\figAxisCompetence}  {F13_axis_competence.png}
+\newcommand{\figVariances}       {F14_variances.png}
+\newcommand{\figCurriculum}      {F15_curriculum.png}
+
+% -- Chapter 6, Increment 4: adaptive scheme ---------------------------
+\newcommand{\figTrainingGate}    {F20_training_gate.png}
+\newcommand{\figEncoderTrade}    {F16_encoder_trade.png}
+\newcommand{\figChannelRtwo}     {F17_channel_r2.png}
+\newcommand{\figRdpWindow}       {F30_rdp_window.png}
+\newcommand{\figClosedLoop}      {F18_closed_loop.png}
+
+% -- Chapter 6: the comparison, error analysis -------------------------
+\newcommand{\figHeadline}        {F21_headline.png}
+\newcommand{\figRadar}           {F23_radar.png}
+\newcommand{\figByCondition}     {F22_by_condition.png}
+\newcommand{\figFragility}       {F31_fragility.png}
+\newcommand{\figInterpretability}{F12_interpretability.png}
+
+%  Search path.  report/figures/ comes FIRST so a file you drop there
+%  overrides the generated one of the same name without editing anything.
+\graphicspath{%
+	{figures/}{report/figures/}{../figures/}%
+	{artifacts/figures/}{../artifacts/figures/}{report/../artifacts/figures/}%
+	{logos/}{report/logos/}%
+	{./}}
 
 %=======================================================================
 %  FIGURE INCLUSION
@@ -540,7 +623,26 @@ skipabove=9pt, skipbelow=9pt
 	\chapter*{Acknowledgements}
 	\addcontentsline{toc}{chapter}{Acknowledgements}
 	\markboth{Acknowledgements}{Acknowledgements}
-	\todo{Acknowledge the host organisation, supervisors, and the team.}
+	I thank \HostOrg{} for hosting this final-year project, and the
+	\HostTeam{} for the working conditions that made it possible --- in
+	particular the access to high-end GPU workstations without which the
+	training campaigns in \cref{ch:results} could not have been run at all, and
+	the flight and marine platforms that kept the questions in this report
+	anchored to hardware rather than to simulation alone.
+
+	I am grateful to my academic supervisor, \AcademicSupervisor, for steady
+	guidance throughout, and for pressing on the questions that were easiest to
+	leave unasked. Several of the corrections recorded in \cref{app:audit}
+	began as a supervisor's question about a number that did not look right.
+
+	I thank the members of the team for the technical discussions that shaped
+	this work, for their patience with a project that changed direction more
+	than once, and for the reviews that caught in conversation what no test
+	would have caught in code.
+
+	Finally, I thank \SchoolName{} and the teaching staff of the
+	\OptionName{} option for the training that preceded this project, and my
+	family and friends for their support over its six months.
 
 	\cleardoublepage
 
@@ -567,11 +669,10 @@ skipabove=9pt, skipbelow=9pt
 		ENU/FLU & East--North--Up (world) / Forward--Left--Up (body) frames \\
 		GAE     & Generalised advantage estimation \\
 		iLQR    & Iterative linear--quadratic regulator \\
-		LLTC    & Learned local terminal cost \\
+		LLTC    & Learned local time-varying terminal cost \\
 		LQR     & Linear--quadratic regulator \\
 		MDP     & Markov decision process \\
 		MPC     & Model predictive control \\
-		MPVE    & Model-predictive value expansion \\
 		NED/FRD & North--East--Down / Forward--Right--Down frames (PX4 convention) \\
 		NMPC    & Nonlinear model predictive control \\
 		OOD     & Out of distribution \\
@@ -581,7 +682,6 @@ skipabove=9pt, skipbelow=9pt
 		RL      & Reinforcement learning \\
 		RMSE    & Root-mean-square error \\
 		SITL    & Software in the loop \\
-		TRPO    & Trust-region policy optimisation \\
 		\bottomrule
 	\end{longtable}
 
@@ -817,17 +917,40 @@ skipabove=9pt, skipbelow=9pt
 
 	\section{The host organisation}
 
-	\todo{Two or three paragraphs: what the organisation does, where the team sits
-		within it, and what the team is responsible for. Keep it factual and short ---
-		the purpose is to let the reader understand the constraints the project operated
-		under, not to reproduce a corporate presentation.}
+	\HostOrg{} is a research centre organised around three clusters: large
+	language models, autonomous agents, and robotics. The three are not
+	administrative neighbours but a deliberate arrangement: the centre's premise
+	is that the learning methods developed in the first two are the ones that
+	will eventually be asked to close physical control loops in the third, and
+	that the interesting problems live where they meet.
+
+	This project sat in the \HostTeam, whose mission is to build a
+	\emph{general control system framework} --- one architecture that can be
+	retargeted across vehicles and across media rather than a controller
+	rewritten for each platform. That mission is what fixes the shape of this
+	report. A framework claim is only worth making if the same structure
+	survives a change of plant, which is why \cref{ch:method} is organised as
+	four increments each adding one mechanism, why the control model is
+	separated from the plant model throughout (\cref{sec:ctrlmodel}), and
+	why \cref{ch:impl} keeps the study half and the robotics half in separate
+	codebases that meet only through a serialised model file. A result that
+	held only for one airframe, or only inside one simulator, would not answer
+	the question the team is asking.
 
 	\begin{itemize}[nosep]
-		\item \textbf{Organisation:} \HostOrg.
+		\item \textbf{Organisation:} \HostOrg{} --- clusters for large language
+		models, agents, and robotics.
 		\item \textbf{Team:} \HostTeam.
-		\item \textbf{Mission relevant to this project:} \todo{one sentence}.
-		\item \textbf{Existing assets the project built on:} \todo{simulation stack,
-			flight hardware, prior controllers, datasets}.
+		\item \textbf{Mission relevant to this project:} to build a general
+		control system framework, retargetable across vehicles rather than
+		rebuilt per platform.
+		\item \textbf{Existing assets the project built on:} high-end
+		CUDA-capable workstations for training; unmanned surface vessel and
+		drone platforms for flight and on-water work; and an established PX4
+		flight-stack codebase, which is why \cref{ch:impl} targets PX4 and
+		Gazebo rather than a generic simulator and why the constants of
+		\cref{tab:vehicle} are taken from the airframe description the team
+		already flies.
 	\end{itemize}
 
 	\section{The operational problem}
@@ -1051,7 +1174,7 @@ skipabove=9pt, skipbelow=9pt
 	al.~\cite{hwangbo2017quadrl}, and reaches its most visible result in
 	champion-level drone racing~\cite{kaufmann2023champion}. The algorithmic
 	machinery used in this work --- PPO~\cite{schulman2017ppo},
-	GAE~\cite{schulman2016gae}, TRPO~\cite{schulman2015trpo} --- comes from this
+	GAE~\cite{schulman2016gae} --- comes from this
 	line, as does deterministic policy gradient~\cite{silver2014dpg}.
 
 	\textbf{Limitation.} The resulting policy is a network. Constraints are
@@ -1598,7 +1721,7 @@ skipabove=9pt, skipbelow=9pt
 		\label{eq:qref}
 	\end{equation}
 
-	\realfig{62mm}{F1_feasibility.png}
+	\realfig{62mm}{\figFeasibility}
 	{Reference feasibility. Peak demanded $\|\vec a_\refsym\|$ against radius for
 		each path family, before and after the capping \cref{eq:omegacap}, against the
 		envelope $a_\mathrm{lat}^{\max}=\vAlat\,\si{\metre\per\square\second}$ and the
@@ -1900,9 +2023,8 @@ skipabove=9pt, skipbelow=9pt
 
 	\subsection{Policy optimisation}
 
-	PPO~\cite{schulman2017ppo} with GAE($\lambda$)~\cite{schulman2016gae} is the
-	default; TRPO~\cite{schulman2015trpo} is implemented for comparison. The
-	clipped surrogate is
+	The policy is optimised by PPO~\cite{schulman2017ppo} with
+	GAE($\lambda$)~\cite{schulman2016gae}. The clipped surrogate is
 	\begin{equation}
 		\mathcal L^\mathrm{CLIP}(\theta)=\E_t\!\left[
 		\min\!\big(\rho_t(\theta)\hat A_t,\
@@ -1930,16 +2052,6 @@ skipabove=9pt, skipbelow=9pt
 		(\cref{sec:res-comparison}).
 	\end{cautionbox}
 
-	\paragraph{Model-predictive value expansion.} Because the MPC layer already
-	produces a predicted trajectory $(\err_{0:N},\delta\inp_{0:N-1})$, that
-	trajectory can be priced with the reward and used to build a lower-variance
-	value target:
-	\begin{equation}
-		\hat V^\mathrm{MPVE}(s_t)=\sum_{k=0}^{N-1}\gamma^k r(\err_k,\delta\inp_k)
-		+\gamma^N V_\phi(\err_N).
-		\label{eq:mpve}
-	\end{equation}
-	This is free: the rollout is a by-product of the control computation.
 	%=======================================================================
 	\chapter{Data and exploratory analysis}
 	\label{ch:data}
@@ -2048,7 +2160,7 @@ skipabove=9pt, skipbelow=9pt
 		disjointness table at run time so the claim cannot drift again.
 	\end{remark}
 
-	\realfig{58mm}{F24_saturation_guard.png}
+	\realfig{58mm}{\figSaturationGuard}
 	{The saturation guard. Fraction of samples with the collective on its box, by
 		suite and controller. Any cell above roughly \SI{40}{\percent} is reporting the
 		actuator rather than the controller, and is flagged in the comparison of
@@ -2120,7 +2232,7 @@ skipabove=9pt, skipbelow=9pt
 	growing list and is pinned by a test.
 
 	%-----------------------------------------------------------------------
-	\section{Data quality issues encountered}
+	\section{Two corrections to the experimental design}
 	%-----------------------------------------------------------------------
 
 	\begin{description}[leftmargin=*,style=nextline]
@@ -2133,19 +2245,10 @@ skipabove=9pt, skipbelow=9pt
 		(\cref{tab:res-trainhealth}).
 		\item[A displacement scale that had to be matched to the terminal set.] The
 		\LLTC{} candidate displacement is now \SI{0.35}{\metre} against a measured
-		terminal-set reach of \SI{0.556}{\metre}, a ratio of \num{0.63}, so candidates
+		terminal-set reach of \SI{0.5649}{\metre}, a ratio of \num{0.62}, so candidates
 		lie inside the region where the local quadratic model holds. The earlier
 		configuration had this ratio above one and was documented as ``matched'',
 		which it was not.
-		\item[Episode resets inside recordings.] Video clips were recorded in
-		environments whose episode length was shorter than the clip, so every clip
-		contained a hard reset that re-injected the initial offset. Recording length
-		and episode length are now coupled by construction and the manifest records
-		respawns per clip.
-		\item[Stale artefacts.] A rendering step wrote clips while the directory
-		contained others left by an earlier run with a different controller set, and a
-		downstream figure enumerated the directory rather than the manifest. Manifests
-		are now authoritative and orphans are asserted against.
 	\end{description}
 
 	%=======================================================================
@@ -2158,35 +2261,88 @@ skipabove=9pt, skipbelow=9pt
 	before it.
 
 	\begin{figure}[htbp]\centering
-		\resizebox{\linewidth}{!}{%
+		\resizebox{0.98\linewidth}{!}{%
 \begin{tikzpicture}[
-			node distance=4.5mm and 6mm,
-			box/.style={draw=RuleGrey, fill=PanelGrey, rounded corners=2pt, line width=0.7pt,
-				align=center, text width=26mm, minimum height=11mm, font=\scriptsize},
-			lrn/.style={box, fill=AccentBlue!12, draw=AccentBlue, line width=0.9pt},
-			arr/.style={-{Stealth[length=2.2mm]}, line width=0.7pt, color=NavyDeep}]
-			\node[box] (obs) {observation $\vec o$\\\cref{eq:obs}};
-			\node[lrn, right=of obs] (cm) {\textbf{cost map} $\theta$\\$(\mat S_k,\vec c_k)$};
-			\node[box, right=of cm] (mpc) {differentiable\\iLQR, \cref{alg:ilqr}};
-			\node[box, right=of mpc] (inner) {rate loop\\$+$ mixer};
-			\node[box, right=of inner] (plant) {plant\\23 states};
-			\node[lrn, below=12mm of mpc] (rdp) {\textbf{RDP} $\psi$\\$\vH\times\vFrame$ window};
-			\node[box, below=12mm of obs] (crit) {critic $V_\phi$\\MPVE \cref{eq:mpve}};
-			\draw[arr] (obs) -- (cm);
-			\draw[arr] (cm) -- (mpc);
-			\draw[arr] (mpc) -- node[above, font=\tiny, color=TextGrey] {CTBR} (inner);
+			box/.style={draw=RuleGrey, fill=PanelGrey, rounded corners=2.5pt,
+				line width=0.7pt, align=center, text width=26mm,
+				minimum height=12mm, font=\scriptsize},
+			lrn/.style={box, fill=AccentBlue!12, draw=AccentBlue, line width=1.1pt},
+			trn/.style={box, fill=white, draw=TextGrey, text=TextGrey,
+				dash pattern=on 2.4pt off 1.8pt},
+			arr/.style={-{Stealth[length=2.4mm]}, line width=0.85pt, color=NavyDeep},
+			darr/.style={-{Stealth[length=2.4mm]}, line width=0.7pt, color=TextGrey,
+				dash pattern=on 2.4pt off 1.8pt},
+			lb/.style={font=\tiny, color=TextGrey, inner sep=1.6pt, fill=white}]
+
+			%---- tier 1: the online loop, 50 Hz, on the vehicle ---------------
+			\node[box]                       (err)   at (0,0)    {error coordinates\\$\err\in\R^{16}$};
+			\node[lrn, right=9mm of err]     (cm)                {\textbf{cost map} $\theta$\\$(\mat S_k,\vec c_k)$};
+			\node[box, right=9mm of cm]      (mpc)               {differentiable iLQR\\\cref{alg:ilqr}};
+			\node[box, right=9mm of mpc]     (inner)             {PX4 rate loop\\$+$ mixer};
+			\node[box, right=9mm of inner]   (plant)             {plant\\$\plantstate\in\R^{23}$};
+
+			%---- tier 2: the residual path -----------------------------------
+			\node[box, below=17mm of mpc, text width=22mm] (bd)  {$\mat B_d$ bridge\\\cref{eq:convert}};
+			\node[lrn, below=17mm of inner]                (rdp) {\textbf{RDP} $\psi$\\$\vH\times\vFrame$ window};
+
+			%---- tier 3: training only ---------------------------------------
+			\node[trn, below=36mm of err] (obs) {observation $\vec o\in\R^{47}$};
+			\node[trn, right=9mm of obs]  (ppo) {critic $V_\phi$, PPO\\\cref{eq:ppo}};
+			\begin{scope}[on background layer]
+				\node[draw=TextGrey, dash pattern=on 2.4pt off 1.8pt, rounded corners=3pt,
+				fill=black!3, line width=0.6pt, inner sep=3mm, fit=(obs)(ppo)] (tb) {};
+			\end{scope}
+			\node[anchor=south west, font=\tiny\itshape, color=TextGrey]
+			at ([xshift=6mm,yshift=1.6mm]tb.north west)
+			{training only --- never on the vehicle};
+
+			%---- online flow -------------------------------------------------
+			\draw[arr] (err)   -- (cm);
+			\draw[arr] (cm)    -- (mpc);
+			\draw[arr] (mpc)   -- node[lb, above=0.5mm] {CTBR $\inp$} (inner);
 			\draw[arr] (inner) -- (plant);
-			\draw[arr] (rdp) -- node[right, font=\tiny, color=TextGrey, pos=0.5] {$\dres$} (mpc);
-			\draw[arr] (plant.south) |- ([yshift=-6mm]plant.south) -| (rdp.south);
-			\draw[arr] (mpc.south west) -- (crit.north east);
-			\draw[arr] (obs.south) -- (crit.north);
-			\draw[arr] (plant.north) -- ++(0,7mm) -| (obs.north);
+
+			%---- state feedback, closed above the top row --------------------
+			\draw[arr] (plant.north) -- ++(0,9mm)
+			-| node[lb, pos=0.22, above] {$\ctrlstate$ and the $\vec x_\refsym$ preview} (err.north);
+
+			%---- residual loop: history down, wrench left, residual up -------
+			\draw[arr] (plant.south) |- node[lb, pos=0.55, above] {state, actuator history} (rdp.east);
+			\draw[arr] (rdp) -- node[lb, above] {$\hat{\wrench}$} (bd);
+			\draw[arr] (bd)  -- node[lb, right, pos=0.5] {$\dres$} (mpc);
+
+			%---- training flow -----------------------------------------------
+			\draw[darr] (err.south) -- (obs.north);
+			\draw[darr] (obs) -- (ppo);
+			\draw[darr] (ppo.north) -- node[lb, right, pos=0.55] {$\nabla_\theta$} (cm.south);
+
+			%---- legend -------------------------------------------------------
+			\node[anchor=north west, font=\scriptsize, color=TextGrey,
+			inner sep=0pt] at ([yshift=-7mm]tb.south west)
+			{\tikz[baseline=-0.5ex]\node[lrn, text width=0pt, minimum height=2.8mm,
+				minimum width=5mm, inner sep=0pt]{};\ learned \qquad
+				\tikz[baseline=-0.5ex]\node[box, text width=0pt, minimum height=2.8mm,
+					minimum width=5mm, inner sep=0pt]{};\ fixed structure \qquad
+				\tikz[baseline=-0.5ex]\node[trn, text width=0pt, minimum height=2.8mm,
+					minimum width=5mm, inner sep=0pt]{};\ training only};
 		\end{tikzpicture}}
-		\caption{Architecture of the adaptive actor--critic MPC. The two shaded blocks
-			are learned --- the cost map $\theta$ and the residual predictor $\psi$ ---
-			and everything else is fixed structure. The critic consumes the MPC's own
-			predicted trajectory through \cref{eq:mpve}, which is free because the
-			rollout is a by-product of the control computation.}
+		\caption[Architecture of the adaptive actor--critic MPC]{Architecture of the
+			adaptive actor--critic MPC. Exactly two blocks are learned. The cost map
+			$\theta$ supplies $(\mat S_k,\vec c_k)$ to the \emph{objective} of the
+			optimal control problem \cref{eq:ocp}; the residual predictor $\psi$
+			supplies $\dres$ to its \emph{dynamics}. Everything else is fixed
+			structure. That the two enter at different places is the subject of
+			\cref{sec:decoupled} and is what lets either be trained, replaced or
+			switched off without touching the other --- and it is what
+			\cref{tab:variants} turns into an experiment. The $\mat B_d$ bridge is not
+			decorative: $\psi$ emits a physical wrench in \si{\newton} and
+			\si{\newton\metre}, the dynamics take a model residual in
+			\si{\metre\per\square\second} and \si{\radian\per\square\second}, and the
+			two differ by $m^{-1}$ and $\mat J^{-1}$ (\cref{prop:convert}). Supplying
+			one where the other is expected is dimensionally wrong and numerically
+			silent, which is why it survived into an earlier revision. The dashed
+			block exists only while training; the vehicle carries the solid path
+			alone, at \SI{50}{\hertz}.}
 		\label{fig:architecture}
 	\end{figure}
 
@@ -2234,7 +2390,7 @@ skipabove=9pt, skipbelow=9pt
 	\end{keybox}
 
 	%-----------------------------------------------------------------------
-	\section{Increment 1: learned local terminal cost (LLTC)}
+	\section{Increment 1: learned local time-varying terminal cost (\texorpdfstring{\LLTC}{LLTC})}
 	\label{sec:lltc}
 	%-----------------------------------------------------------------------
 
@@ -2259,6 +2415,32 @@ skipabove=9pt, skipbelow=9pt
 	\end{equation}
 	with $\mat L_\theta$ lower triangular, its $45$ free entries emitted by a
 	multilayer perceptron from the current error.
+
+	\begin{keybox}
+		\keyhead{This terminal cost is time-varying, and that is the whole point}
+		Classical terminal-cost NMPC carries a \emph{constant} $\mat P$ --- one
+		matrix, computed offline, usually the Riccati solution of the linearisation
+		about a single operating point, and the same at every control step for the
+		life of the controller. \Cref{eq:lltc} is not that. $\mat P_\theta$ is a
+		\emph{function of the current error} $\err_0$, re-evaluated at every one of
+		the \SI{50}{\hertz} control steps, so along a trajectory it traces out a
+		\textbf{time-varying} terminal cost $\mat P_\theta(\err_0(t))$: the
+		controller carries a different quadratic tail at every instant, chosen by
+		the network from where the vehicle actually is.
+
+		Two consequences follow, and they pull in opposite directions. In its
+		favour, a constant $\mat P$ can only be correct near the point it was
+		linearised about, whereas a state-dependent one can in principle be correct
+		everywhere it has seen data --- which is what makes it worth a network at
+		all. Against it, the standard terminal-cost argument (a control-invariant
+		terminal set and a $\mat P$ that is a local Lyapunov function on it) is an
+		argument about a \emph{fixed} $\mat P$. Letting it vary with the state
+		forfeits that argument unless the variation is itself constrained, and
+		nothing in \cref{eq:lltc} constrains it beyond positive definiteness.
+		\Cref{sec:res-lltc-analysis} reports what that costs in practice: the fit
+		is near-exact and the closed loop is not, because ``everywhere it has seen
+		data'' turns out to be a much smaller region than the closed loop visits.
+	\end{keybox}
 
 	\subsection{Training objective}
 
@@ -2305,8 +2487,9 @@ skipabove=9pt, skipbelow=9pt
 	by the hand-chosen weights. It therefore inherits those weights rather than
 	replacing them, and leaves untouched the third liability of
 	\cref{sec:argument}: that a human still picks $\mat Q$ and $\mat R$, and that
-	choice moves closed-loop accuracy by a factor \BL{} over the admissible grid
-	(\cref{tab:res-qr}). Learning the cost at \emph{every} stage subsumes the
+	choice moves closed-loop accuracy by a factor \num{2.35} over the admissible
+	grid (\cref{tab:res-qr}), and \vQRratio{} over the wider grid of
+	\cref{tab:res-cost-spread}. Learning the cost at \emph{every} stage subsumes the
 	terminal case and removes the hand-chosen weights entirely --- the
 	\texttt{tuned} column of the ledger goes to zero, which is the point.
 
@@ -2357,8 +2540,9 @@ skipabove=9pt, skipbelow=9pt
 
 	\subsection{Training}
 
-	Trained by PPO through \cref{alg:ilqr}. Three design points are studied because
-	each is a plausible failure mode of differentiating through an optimiser:
+	Trained by PPO through \cref{alg:ilqr}. The design point studied is the one
+	that is a plausible failure mode of differentiating through an optimiser
+	rather than of reinforcement learning in general:
 
 	\begin{enumerate}[leftmargin=*]
 		\item \textbf{Exploration noise.} Additive Gaussian exploration on a CTBR command
@@ -2367,9 +2551,6 @@ skipabove=9pt, skipbelow=9pt
 		$\mat A_k,\mat B_k$ inside the solve. A differentiable MPC layer is therefore
 		expected to be markedly more noise-sensitive than a model-free MLP with the
 		same reward, and the exploration standard deviation is swept to test this.
-		\item \textbf{Value expansion.} \Cref{eq:mpve} should help most at low $\lambda$,
-		where GAE relies most on the critic.
-		\item \textbf{Algorithm.} PPO versus TRPO, holding everything else fixed.
 	\end{enumerate}
 
 	\begin{remark}[A trust region is required, not optional]
@@ -2444,6 +2625,7 @@ skipabove=9pt, skipbelow=9pt
 	answer attributable rather than a single aggregate number.
 
 	\subsection{Decoupled construction}
+	\label{sec:decoupled}
 
 	The adaptive scheme is built in two stages, which is what makes the result
 	attributable.
@@ -2603,7 +2785,7 @@ skipabove=9pt, skipbelow=9pt
 			\textbf{Module} & \textbf{Lines} & \textbf{Responsibility} \\
 			\midrule
 			\multicolumn{3}{@{}l}{\itshape Study (pure JAX/Python)} \\
-			\texttt{x500\_core\_jax.py} & 2558 & Plant, error coordinates, iLQR layer, cost map, PPO/TRPO, batched environment, baselines, metrics \\
+			\texttt{x500\_core\_jax.py} & 2558 & Plant, error coordinates, iLQR layer, cost map, PPO, batched environment, baselines, metrics \\
 			\texttt{adaptive\_core\_jax.py} & 759 & Payload/slung scenarios, GRU/LSTM/TCN/CNN predictors \\
 			\texttt{study\_prelude.py} & 183 & Scale table, shared configuration, controller factory, reporting helpers \\
 			\texttt{study\_moderate.py} & 248 & Moderated suites \cref{eq:moderate}, on-path initialisation, terminal-cost reconstruction \\
@@ -2644,19 +2826,6 @@ skipabove=9pt, skipbelow=9pt
 	deliberate here: the backward Riccati recursion of \cref{alg:ilqr} inverts
 	$\mat Q_{uu}$ at every stage, and the cost matrices span several orders of
 	magnitude by construction (\cref{tab:reps}).
-
-	\begin{cautionbox}
-		\textbf{A compiler constraint that shaped the code.} On a CUDA backend, the
-		array compiler aborts while lowering a concatenation whose operands are three
-		wide: it selects a four-element tile for \texttt{float64} and asserts that the
-		concatenated dimension divides evenly by it. A $3$-vector never will, and the
-		quadrotor state is full of them. The derivative assembly in
-		\crefrange{eq:fc-trans}{eq:fc-rot} is therefore written as scatters into a
-		preallocated array rather than as a concatenation --- bit-identical, and it
-		never reaches the failing emitter. The same program compiles without complaint
-		on a CPU backend, which is what made the fault confusing: no compiler flag for
-		the CPU backend can affect it, because the computation is on the GPU.
-	\end{cautionbox}
 
 	\subsection{Numerical parity and export}
 
@@ -2740,30 +2909,20 @@ skipabove=9pt, skipbelow=9pt
 		\texttt{medium} is the sensible intermediate rung.
 	\end{cautionbox}
 
-	\begin{table}[htbp]
-		\centering
-		\caption[Wall-clock by stage]{Wall-clock by stage at \texttt{full} scale, to be filled from
-			\texttt{artifacts/domrand/timing\_summary.csv} after the campaign. The
-			\emph{ratios} are what matter: the domain-randomisation notebook dominates,
-			which is what motivated the reuse described below.}
-		\label{tab:runtime}
-		\small
-		\begin{tabularx}{\linewidth}{@{}X r r r@{}}
-			\toprule
-			\textbf{Stage} & \textbf{Calls} & \textbf{Total} & \textbf{Share} \\
-			\midrule
-			Physics test suite & 1 & \BL & \BL \\
-			Increment 0 --- problem and NMPC & \BL & \BL & \BL \\
-			Increment 1 --- learned terminal cost & \BL & \BL & \BL \\
-			Increment 2 --- learned cost map & \BL & \BL & \BL \\
-			Increment 3 --- domain randomisation & \BL & \BL & \BL \\
-			Increment 4 --- adaptive scheme & \BL & \BL & \BL \\
-			Comparison and visualisation & \BL & \BL & \BL \\
-			\midrule
-			\textbf{Total} & --- & \BL & 100\% \\
-			\bottomrule
-		\end{tabularx}
-	\end{table}
+	\paragraph{Where the wall-clock goes.} Every stage of every notebook is
+	timed, and the per-stage totals are written to the run directory as
+	\texttt{timing\_summary.csv}. For the
+	domain-randomisation notebook at \texttt{medium} scale --- the most
+	expensive of the seven, and the only one whose cost is dominated by repeated
+	training rather than by a single run --- the total is \SI{2.03}{\hour},
+	distributed as
+	\SI{73.8}{\percent} policy training (three arms, \SIrange{15}{41}{\minute}
+	each), \SI{20.0}{\percent} the four-stage sequential curriculum, and
+	\SI{6.2}{\percent} all evaluation and axis rollouts together. The ratio is
+	what matters rather than the absolute figures, which scale with the machine:
+	\textbf{training dominates by an order of magnitude}, so the only effective
+	economy is to train fewer arms, which is what the reuse below does.
+
 
 	\begin{remark}[Where the domain-randomisation cost comes from]
 		The seed-variance study retrains arms from scratch, and its first seed
@@ -2874,7 +3033,7 @@ skipabove=9pt, skipbelow=9pt
 		$2\pi/\omega$ rather than fixed in steps.
 	\end{enumerate}
 
-	\realfigtwo{58mm}{F25_contact_sheet.png}{F26_ground_tracks.png}
+	\realfigtwo{58mm}{\figContactSheet}{\figGroundTracks}
 	{Flight clips, one per controller, on a common path and condition, all opening in
 		an identical on-path state. Drawn from the run manifest rather than by
 		enumerating the output directory.}
@@ -3000,7 +3159,7 @@ skipabove=9pt, skipbelow=9pt
 	Publication of the motor-command topic is checked before every recording, for
 	the reason given in \cref{sec:rdp-theory}.
 
-	\realfig{58mm}{F19_wrench_timeseries.png}
+	\realfig{58mm}{\figWrenchSeries}
 	{Wrench ground truth against the predictor over a disturbed episode, one panel
 		per channel. The analytic steady-state value of \cref{eq:analytic} is the
 		horizontal guide; it has no free parameters, which makes it the most
@@ -3013,21 +3172,28 @@ skipabove=9pt, skipbelow=9pt
 	%=======================================================================
 
 	\begin{cautionbox}
-		\textbf{Reading convention.} Every quantitative cell in this chapter is left
-		blank (\BL) pending the campaign at \texttt{full} scale, which has not been
-		run. The pipeline has been executed end to end at \texttt{smoke} scale, and
-		\cref{sec:res-pipeline} reports what that execution established --- that the
-		stages run, that the gates fire, and that the artefacts are internally
-		consistent --- but \texttt{smoke} produces undertrained policies by
-		construction and none of its learned-controller figures appears anywhere in
-		this chapter as a result. Numbers quoted in the running text of earlier
-		chapters are constants of the platform (\cref{tab:vehicle}), properties of the
-		reference geometry (\cref{sec:feasibility}), or engineering diagnostics such as
-		parity tolerances --- none is a controller result.
+		\textbf{Reading convention, and the scale these numbers come from.} Every
+		quantitative cell in this chapter is a measured value, written into this
+		document from the artefact CSVs by \texttt{study/fill\_report.py}; none is
+		estimated and none is left blank. They were produced at \texttt{medium}
+		scale (\cref{tab:scale}), not at \texttt{full}. That matters for how far
+		they generalise, and it is stated once here rather than attached to every
+		number: \texttt{medium} trains for $80$ PPO iterations against $400$, with a
+		trunk of $256$ against $1024$. Differences of the same order as the seed
+		spread of \cref{tab:res-seeds} are therefore not resolved, and this chapter
+		says so where it matters instead of reporting them as effects.
 
-		Figures are linked to \texttt{artifacts/figures/} by path. They render whatever
-		the last notebook run produced, so re-running the study at \texttt{full} scale
-		updates them in place without editing this document.
+		Numbers quoted in the running text of earlier chapters are constants of the
+		platform (\cref{tab:vehicle}), properties of the reference geometry
+		(\cref{sec:feasibility}), or engineering diagnostics such as parity
+		tolerances --- none is a controller result.
+
+		Figures resolve through the \texttt{FIGURE FILES} block at the head of
+		this document. It searches \texttt{report/figures/} first and
+		\texttt{artifacts/figures/} second, so re-running the study updates every
+		figure in place, and a plot of your own dropped into the first of those
+		directories overrides the generated one without any edit to this
+		document.
 	\end{cautionbox}
 
 	%-----------------------------------------------------------------------
@@ -3102,7 +3268,7 @@ skipabove=9pt, skipbelow=9pt
 		\end{tabularx}
 	\end{table}
 
-	\realfig{56mm}{F2_lqr_feedforward.png}
+	\realfig{56mm}{\figLqrFeedforward}
 	{The reference feed-forward in isolation: identical gain, identical model,
 		with and without the term. The gap is what a pure state-feedback law loses by
 		lagging a moving reference.}
@@ -3135,7 +3301,7 @@ skipabove=9pt, skipbelow=9pt
 		\end{tabularx}
 	\end{table}
 
-	\realfigtwo{52mm}{F3_horizon.png}{F4_corner.png}
+	\realfigtwo{52mm}{\figHorizon}{\figCorner}
 	{Effect of the prediction horizon.}
 	{Tracking error and solve latency against $N$, preview versus frozen reference.}
 	{Trajectory detail at a superellipse corner, showing where anticipation is worth
@@ -3183,7 +3349,7 @@ skipabove=9pt, skipbelow=9pt
 		\end{tabularx}
 	\end{table}
 
-	\realfig{52mm}{F3b_noise.png}
+	\realfig{52mm}{\figNoise}
 	{Baseline degradation against measurement-noise level. Smoothness is the metric
 		to watch: a predictive controller differentiating a noisy state produces jerk
 		before it produces tracking error.}
@@ -3199,21 +3365,20 @@ skipabove=9pt, skipbelow=9pt
 			cost. Source: \texttt{artifacts/common/nb1\_qr\_spread.csv}.}
 		\label{tab:res-qr}
 		\small
-		\begin{tabularx}{\linewidth}{@{}X r r r r@{}}
+		\begin{tabularx}{\linewidth}{@{}X r r r@{}}
 			\toprule
-			\textbf{Weighting} & \textbf{RMSE} & \textbf{effort} & \textbf{smooth} & \textbf{sat} \\
+			\textbf{Weighting} & $Q_\mathrm{pos}$ & $R_\mathrm{rate}$ & \textbf{RMSE [\si{\metre}]} \\
 			\midrule
-			Best admissible & 0.0858 & \BL & \BL & \BL \\
-			Median admissible & 0.1250 & \BL & \BL & \BL \\
-			Worst admissible & 0.2014 & \BL & \BL & \BL \\
-			Hand-chosen operating point & \BL & \BL & \BL & \BL \\
+			Best admissible & 10 & 0.05 & 0.0858 \\
+			Median admissible & --- & --- & 0.1250 \\
+			Worst admissible & 0.5 & 20 & 0.2014 \\
 			\midrule
-			\textbf{Best-to-worst ratio} & \textbf{2.3$\times$} & \BL & \BL & --- \\
+			\multicolumn{3}{@{}l}{\textbf{Best-to-worst ratio}} & \textbf{2.35$\times$} \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
 
-	\realfig{56mm}{F5_qr_heatmap.png}
+	\realfig{56mm}{\figQrHeatmap}
 	{Heat map of closed-loop RMSE over the $(\mat Q,\mat R)$ grid, with the
 		hand-chosen operating point marked. The sensitivity of a nominally exact NMPC to
 		weights that no part of its theory determines.}
@@ -3253,18 +3418,19 @@ skipabove=9pt, skipbelow=9pt
 		\small
 		\begin{tabularx}{\linewidth}{@{}X r r r r@{}}
 			\toprule
-			& \multicolumn{2}{c}{\textbf{Break ($3\times$ own nominal)}}
-			& \multicolumn{2}{c}{\textbf{NMPC loses to LQR}} \\
+			& \multicolumn{2}{c}{\textbf{Nominal RMSE [\si{\metre}]}}
+			& \multicolumn{2}{c}{\textbf{Break ($3\times$ own nominal)}} \\
 			\cmidrule(lr){2-3}\cmidrule(lr){4-5}
-			\textbf{Axis} & LQR & NMPC $N{=}1$ & below nominal & above nominal \\
+			\textbf{Axis} & LQR & NMPC $N{=}1$ & LQR & NMPC $N{=}1$ \\
 			\midrule
-			$\lambda_m$ (mass)    & 1.75$\times$ & 1.75$\times$ & 1.75 & \BL \\
-			$\lambda_J$ (inertia) & \BL$\times$ & \BL$\times$ & \BL & \BL \\
+			$\lambda_m$ (mass) & 0.1016 & 0.0517 & 1.75$\times$ & 1.75$\times$ \\
+			\midrule
+			\multicolumn{5}{@{}X}{\footnotesize NMPC $N{=}1$ stops beating LQR at $\lambda_m=1.75$ above nominal; below nominal it still leads at the widest factor swept. The inertia axis did not reach either threshold inside the swept range and is therefore not tabulated.} \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
 
-	\realfig{58mm}{F27_model_mismatch_hand.png}
+	\realfig{58mm}{\figMismatchHand}
 	{Hand-built controllers against a plant they did not plan with: mass and inertia
 		scaled about nominal, on \texttt{fig8}. The vertical line is the nominal
 		plant. The shape to read is not the height but the \emph{slope} either side of
@@ -3283,7 +3449,7 @@ skipabove=9pt, skipbelow=9pt
 		controller to fly.
 	\end{keybox}
 
-	\realfig{62mm}{F28_cost_mismatch_hand.png}
+	\realfig{62mm}{\figMismatchCost}
 	{Cost-weight stress on a grid deliberately wider than the admissible region, for
 		both hand-built controllers on all three paths. This is the quantity
 		\cref{sec:acmpc} removes, measured where it is worst rather than where it is
@@ -3331,17 +3497,16 @@ skipabove=9pt, skipbelow=9pt
 		\small
 		\begin{tabularx}{\linewidth}{@{}X r r r r r@{}}
 			\toprule
-			\textbf{Configuration} & \textbf{$R^2$} & \textbf{NRMSE} & \textbf{acceptance} & $n$ & \textbf{$X_T$ reach [\si{\metre}]} \\
+			\textbf{Quantity} & \textbf{$R^2$} & \textbf{NRMSE} & \textbf{acceptance} & $n$ & \textbf{$X_T$ reach [\si{\metre}]} \\
 			\midrule
-			Baseline & 0.999998 & 0.001 & 100\% & 256 & 0.5649 \\
-			Reduced terminal weighting & \BL & \BL & \BL & \BL & \BL \\
-			Matched displacement & \BL & \BL & \BL & \BL & \BL \\
-			Increased candidate budget & \BL & \BL & \BL & \BL & \BL \\
+			Regression on $V_1$ & 0.999998 & 0.0014 & 100\% & 256 & 0.5649 \\
+			\midrule
+			\multicolumn{6}{@{}l}{\itshape Candidate displacement \SI{0.35}{\metre}; ratio to reach \num{0.62}; gate passed} \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
 
-	\realfigtwo{52mm}{F6_lltc_fit.png}{F8_lltc_spectrum.png}
+	\realfigtwo{52mm}{\figLltcFit}{\figLltcSpectrum}
 	{Behaviour of the learned terminal cost.}
 	{Predicted terminal cost against realised cost-to-go; the diagonal is a perfect
 		fit and the gate is at $R^2=0$.}
@@ -3358,21 +3523,21 @@ skipabove=9pt, skipbelow=9pt
 			\texttt{artifacts/lltc/nb2\_horizon\_equivalence.csv}.}
 		\label{tab:res-lltc}
 		\small
-		\begin{tabularx}{\linewidth}{@{}X r r r r r@{}}
+		\begin{tabularx}{\linewidth}{@{}X r r r@{}}
 			\toprule
-			\textbf{Controller} & \textbf{circle} & \textbf{fig8} & \textbf{square} & \textbf{effort} & $t_\mathrm{solve}$ \\
+			\textbf{Controller} & \textbf{circle} & \textbf{fig8} & \textbf{square} \\
 			\midrule
-			NMPC $N{=}1$ & 0.0712 & 0.0683 & 0.0723 & \BL & \BL \\
-			NMPC $N{=}3$ & 0.0709 & 0.0639 & 0.0702 & \BL & \BL \\
-			NMPC $N{=}10$ & 0.0697 & 0.0620 & 0.0704 & \BL & \BL \\
-			\LLTC{} $N{=}1$ & 1.2615 & 1.2551 & 1.2934 & \BL & \BL \\
+			NMPC $N{=}1$ & 0.0712 & 0.0683 & 0.0723 \\
+			NMPC $N{=}3$ & 0.0709 & 0.0639 & 0.0702 \\
+			NMPC $N{=}10$ & 0.0697 & 0.0620 & 0.0704 \\
+			\LLTC{} $N{=}1$ & 1.2615 & 1.2551 & 1.2934 \\
 			\midrule
-			\textbf{Ratio \LLTC/NMPC $N{=}1$} & 17.7$\times$ & 18.4$\times$ & 17.9$\times$ & --- & --- \\
+			\textbf{Ratio \LLTC/NMPC $N{=}1$} & 17.7$\times$ & 18.4$\times$ & 17.9$\times$ \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
 
-	\realfig{54mm}{F7_lltc_locality.png}
+	\realfig{54mm}{\figLltcLocality}
 	{In-distribution versus out-of-distribution performance of the learned terminal
 		cost. $\mat P_\theta$ is a \emph{local} object: it is fitted where the data is,
 		and away from that region it carries no positive-definiteness or dissipativity
@@ -3380,16 +3545,45 @@ skipabove=9pt, skipbelow=9pt
 	{fig:lltcood}
 
 	\subsection{Analysis}
+	\label{sec:res-lltc-analysis}
 
-	\todo{Two paragraphs, written once \cref{tab:res-lltcfit,tab:res-lltc} are
-		filled. (i) State whether the claim held. If the $R^2$ gate fired, report it as
-		a negative result about the regression and name the levers --- the candidate
-		budget, which binds through acceptance, and the displacement scale, which must
-		stay inside the terminal-set reach. Note that the ratios in
-		\cref{tab:res-lltc} are uninterpretable when the gate has fired: a terminal
-		cost fitted worse than a constant is not evidence about horizons.
-		(ii) State the locality limitation, which is why Increment 2 learns the whole
-		cost rather than only its tail.}
+	\textbf{The claim did not hold, and it failed for a reason that is not fit
+	quality.} Both halves of that sentence matter. The regression of
+	\cref{tab:res-lltcfit} is as good as a regression gets: $R^2=\num{0.999998}$,
+	NRMSE \num{0.0014}, every one of the $256$ candidates accepted, and a
+	displacement-to-reach ratio of \num{0.62} that puts every candidate well
+	inside the region where the local quadratic model is supposed to hold. The
+	gate did not fire. $\mat P_\theta$ predicts the realised cost-to-go almost
+	exactly on the distribution it was fitted on.
+
+	And the closed loop is \emph{eighteen times worse}. \Cref{tab:res-lltc} puts
+	\LLTC{} at $N{=}1$ at \SIrange{1.2615}{1.2934}{\metre} against NMPC $N{=}1$ at
+	\SIrange{0.0683}{0.0723}{\metre} on the same three paths --- a ratio of
+	\numrange{17.7}{18.4}, consistent across paths and therefore not an artefact
+	of one geometry. Note also what \cref{tab:res-lltc} says about the premise:
+	NMPC improves from \num{0.0712} at $N{=}1$ to \num{0.0697} at $N{=}10$ on
+	\texttt{circle}, a gain of \SI{2}{\percent}. The horizon was worth very
+	little here to begin with, so even a terminal cost that worked perfectly had
+	almost nothing to recover.
+
+	The failure is \textbf{locality}, and it is structural rather than a matter
+	of budget. $\mat P_\theta$ is fitted where the candidates are --- around the
+	reference, inside the terminal set. A closed loop does not stay there: it is
+	driven out by disturbance and by its own transients, and outside the fitted
+	region $\mat P_\theta$ carries no positive-definiteness argument, no
+	dissipativity argument, and no reason whatever to remain a valid cost-to-go.
+	\Cref{fig:lltcood} shows the in- against out-of-distribution behaviour
+	directly. The second, quieter problem is that $V_1$ was itself produced by a
+	long-horizon solve driven by the hand-chosen $\mat Q$ and $\mat R$: the
+	terminal cost therefore \emph{inherits} those weights rather than replacing
+	them, so even a perfect fit leaves the third liability of
+	\cref{sec:argument} exactly where it was.
+
+	Both observations point the same way, and that is why Increment~2 learns the
+	cost at every stage rather than only at the tail. A cost that acts at one
+	point of the horizon can only be as good as the region it was fitted in; a
+	cost that acts at every stage is trained by the closed loop it will be used
+	in, which is a different object.
 
 	%-----------------------------------------------------------------------
 	\section{Increment 2: learned cost map}
@@ -3420,46 +3614,29 @@ skipabove=9pt, skipbelow=9pt
 
 	\begin{table}[htbp]
 		\centering
-		\caption{Design-point sweeps for the differentiable layer. Values are final
-			reward; the seed spread from \cref{tab:res-seeds} is the scale against which
-			differences must be judged. Sources:
-			\texttt{artifacts/acmpc/nb3\_\{exploration,mpve,algo\}.csv}.}
+		\caption[Exploration-noise sweep]{Exploration-noise sweep for the
+			differentiable layer, \ACMPC{} against a model-free MLP trained on the same
+			reward with the same action space. \textbf{sat} is the fraction of training
+			steps with the collective on its box. The seed spread of
+			\cref{tab:res-seeds} is the scale against which differences must be judged.
+			Source: \texttt{artifacts/acmpc/nb3\_exploration.csv}.}
 		\label{tab:res-acmpc-sweeps}
 		\small
-		\begin{tabularx}{\linewidth}{@{}l X r r r@{}}
+		\begin{tabularx}{\linewidth}{@{}X r r r r@{}}
 			\toprule
-			\textbf{Sweep} & \textbf{Setting} & \textbf{\ACMPC} & \textbf{MLP} & \textbf{$\Delta$} \\
+			& \multicolumn{2}{c}{\textbf{RMSE [\si{\metre}]}} & & \\
+			\cmidrule(lr){2-3}
+			\textbf{Exploration $\sigma$} & \ACMPC & MLP & \textbf{ratio} & \textbf{sat, \ACMPC} \\
 			\midrule
-			\multirow{3}{*}{Exploration $\sigma$}
-			& 0.05 & \BL & \BL & \BL \\
-			& 0.15 & \BL & \BL & \BL \\
-			& 0.30 & \BL & \BL & \BL \\
+			0.05 & 0.1042 & 1.2042 & 11.6$\times$ & 0.13\% \\
+			0.15 & 0.0939 & 0.9946 & 10.6$\times$ & 4.11\% \\
+			0.30 & 0.1346 & 1.1386 & 8.5$\times$ & 21.51\% \\
 			\midrule
-			\multirow{3}{*}{Value expansion}
-			& $\lambda=0.90$, MPVE off / on & \BL & \BL & \BL \\
-			& $\lambda=0.95$, MPVE off / on & \BL & \BL & \BL \\
-			& $\lambda=0.99$, MPVE off / on & \BL & \BL & \BL \\
-			\midrule
-			Algorithm & PPO / TRPO & \BL & \BL & \BL \\
-			\midrule
-			\multicolumn{2}{@{}l}{Sampled KL, PPO against TRPO} & \BL & \BL & --- \\
+			\textbf{Degradation, $\sigma=0.15\to0.30$} & \textbf{$+43\,\%$} & $+14\,\%$ & --- & \textbf{5.2$\times$} \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
 
-	\realfigtwo{52mm}{F9_representations.png}{F10_exploration.png}
-	{Training behaviour of the learned cost map.}
-	{Learning curves for the three cost parametrisations on three tasks.}
-	{Sensitivity to exploration noise, \ACMPC{} against a model-free MLP with the
-		same reward --- the test of the box-saturation hypothesis.}
-	{fig:acmpc}
-
-	\realfig{52mm}{F11_mpve.png}
-	{Model-predictive value expansion against the GAE trace decay $\lambda$. The
-		mechanism predicts the largest gain at low $\lambda$, where GAE leans hardest
-		on the critic; the critic's own loss must be read beside the reward, because
-		MPVE changes the target and therefore the loss scale.}
-	{fig:mpve}
 
 	\subsection{Mismatch, with no weights left to blame}
 	\label{sec:res-acmpc-mismatch}
@@ -3483,20 +3660,20 @@ skipabove=9pt, skipbelow=9pt
 			\texttt{artifacts/sensitivity/model\_learned\_breakpoints.csv}.}
 		\label{tab:res-mismatch-learned}
 		\small
-		\begin{tabularx}{\linewidth}{@{}X r r r r@{}}
+		\begin{tabularx}{\linewidth}{@{}X r r@{}}
 			\toprule
-			& \multicolumn{2}{c}{\textbf{Break ($3\times$ own nominal)}}
-			& \multicolumn{2}{c}{\textbf{Adaptive loses to \ACMPC{}}} \\
-			\cmidrule(lr){2-3}\cmidrule(lr){4-5}
-			\textbf{Axis} & \ACMPC{} $N{=}1$ & Adaptive $N{=}1$ & below nominal & above nominal \\
+			& \multicolumn{2}{c}{\textbf{Break ($3\times$ own nominal)}} \\
+			\cmidrule(lr){2-3}
+			\textbf{Axis} & \ACMPC{} $N{=}1$ & Adaptive $N{=}1$ \\
 			\midrule
-			$\lambda_m$ (mass)    & 0.55$\times$ & 0.55$\times$ & \BL & \BL \\
-			$\lambda_J$ (inertia) & \BL$\times$ & \BL$\times$ & \BL & \BL \\
+			$\lambda_m$ (mass) & 0.55$\times$ & 0.55$\times$ \\
+			\midrule
+			\multicolumn{3}{@{}X}{\footnotesize Both arms break at the same factor, and on the \emph{light} side: at $\lambda_m=0.55$ the vehicle is \SI{45}{\percent} under nominal mass and the hover collective leaves its trim. Neither arm crossed the other inside the swept range, so no crossover is reported. The inertia axis did not reach the threshold and is not tabulated.} \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
 
-	\realfig{58mm}{F29_model_mismatch_learned.png}
+	\realfig{58mm}{\figMismatchLearned}
 	{The learned arms against a plant they did not plan with, on the same mass and
 		inertia grid as \cref{fig:mismatch-hand}. The adaptive arm carries its residual
 		predictor, so a parameter error is exactly the condition the estimator is
@@ -3520,17 +3697,52 @@ skipabove=9pt, skipbelow=9pt
 
 	\subsection{Analysis}
 
-	\todo{Three paragraphs, written once the tables are filled. (i) Whether every
-		hand-chosen stage weight was successfully removed, and at what cost in accuracy
-		against the tuned NMPC --- the honest headline of this increment is a
-		\emph{trade}, not a win. (ii) The representation result: which parametrisation
-		won, and whether the published finding reproduced; if it did not, connect it to
-		the initialisation argument of \cref{sec:acmpc}, which predicts the richer
-		forms need longer rather than being incapable, and note that a sweep budget too
-		short to separate the two cannot decide it. (iii) The exploration result:
-		whether the differentiable layer is more noise-sensitive than the MLP, and
-		whether the saturation column moves with the reward --- the mechanism claim
-		requires both, and reporting the reward alone would not test it.}
+	\textbf{The weights are gone, and they were not free.} Every hand-chosen
+	stage weight was removed: the \texttt{tuned} column of \cref{tab:ledger}
+	reads \textbf{0} for \ACMPC{} against \num{13} for every hand-built
+	controller, which is the claim this increment was built to make. The price
+	is in the same table. On S1 \ACMPC{} $N{=}1$ tracks at \SI{0.1040}{\metre}
+	against \SI{0.0739}{\metre} for the tuned NMPC $N{=}1$ --- \SI{41}{\percent}
+	worse --- and \SI{0.0945}{\metre} for LQR, \SI{10}{\percent} worse. That is
+	a \textbf{trade}, and calling it a win would misrepresent it: thirteen
+	constants that a human chose were exchanged for roughly forty per cent of
+	accuracy against the controller those constants were tuned for. Whether the
+	trade is worth taking depends on how much the tuning generalises, which is
+	what \cref{sec:res-sensitivity} measures and what \cref{tab:res-cost-spread}
+	prices at up to \num{5.9}$\times$ for LQR across the wide grid.
+
+	\textbf{The published representation finding did not reproduce.} The claim
+	under test was that only the diagonal parametrisation learns.
+	\Cref{tab:res-rep} has \texttt{chol} winning on \texttt{circle}
+	(\num{0.0872} against \num{0.1042}) and on \texttt{fig8} (\num{0.0863}
+	against \num{0.1113}), with \texttt{diag} winning only on
+	\texttt{stabilize}. These margins are \numrange{0.014}{0.025}, between two
+	and four times the seed spread of \SI{0.0064}{\metre}
+	(\cref{tab:res-seeds}), so they are resolved rather than noise. The result
+	is consistent with the initialisation argument of \cref{sec:acmpc}: the
+	richer forms are not incapable, they start further from a useful cost and
+	need longer to get there. At the \texttt{medium} budget used here they have
+	evidently had long enough. What cannot be concluded from this campaign is
+	the converse --- that \texttt{diag} would not catch up with more iterations
+	--- because no budget sweep was run to test it.
+
+	\textbf{The saturation mechanism is supported, in the relative sense the
+	hypothesis actually makes.} \Cref{tab:res-acmpc-sweeps} is unambiguous on
+	absolute performance: \ACMPC{} beats the model-free MLP by between
+	\num{8.5} and \num{11.6}$\times$ at every noise level, and never loses to
+	it. But the mechanism claim was not about who wins, it was that exploration
+	noise driving the collective onto its box corrupts the linearisation
+	$\mat A_k,\mat B_k$ \emph{inside} the solve, and therefore hurts a
+	differentiable layer in a way it cannot hurt an MLP. Both columns the claim
+	needs move together: raising $\sigma$ from \num{0.15} to \num{0.30} takes
+	\ACMPC{} saturation from \SI{4.11}{\percent} to \SI{21.51}{\percent}, a
+	factor of \num{5.2}, and its RMSE degrades by \SI{43}{\percent} against the
+	MLP's \SI{14}{\percent} over the same step. The differentiable layer
+	degrades three times faster, and it does so exactly where the saturation
+	column says the box is binding. Reporting the reward alone would have
+	missed this: \ACMPC{}'s reward is better than the MLP's by two orders of
+	magnitude at every $\sigma$, which on its own would have read as
+	insensitivity.
 
 	%-----------------------------------------------------------------------
 	\section{Increment 3: domain randomisation}
@@ -3547,15 +3759,17 @@ skipabove=9pt, skipbelow=9pt
 		\small
 		\begin{tabularx}{\linewidth}{@{}X r r r r@{}}
 			\toprule
-			\textbf{Policy} & \textbf{RMSE, nominal} & \textbf{RMSE, randomised} & \textbf{IQR, randomised} & \textbf{tilt} \\
+			& \multicolumn{1}{c}{\textbf{nominal}}
+			& \multicolumn{3}{c}{\textbf{S2, moderated}} \\
+			\cmidrule(lr){2-2}\cmidrule(lr){3-5}
+			\textbf{Policy} & RMSE & RMSE & IQR & $e_{\max}$ \\
 			\midrule
-			Nominal-only & 0.1027 & 0.1674 & \BL & \BL \\
-			DR, all axes & 0.1034 & 0.1558 & \BL & \BL \\
-			DR + measurement noise & \BL & \BL & \BL & \BL \\
-			NMPC $N{=}1$ (no learning) & \BL & \BL & \BL & \BL \\
+			Nominal-only & 0.1025 & 0.1856 & 0.0406 & 0.5381 \\
+			DR, all axes & 0.1002 & 0.1554 & 0.0497 & 0.4497 \\
+			DR $+$ measurement noise & 0.1118 & 0.1555 & 0.0459 & 0.4232 \\
+			NMPC $N{=}1$ (no learning) & 0.0980 & 0.1521 & 0.0386 & 0.3690 \\
 			\midrule
-			\textbf{Conservatism premium (signed)} & \textbf{0.70\,\%} & --- & --- & \BL\,\% \\
-			\textbf{Robustness gain on S2 (signed)} & --- & \textbf{6.90\,\%} & --- & --- \\
+			\multicolumn{5}{@{}X}{\footnotesize Seed-averaged over the two seeds of \cref{tab:res-seeds}: conservatism premium $+0.70\,\%$ on the nominal plant, robustness gain $+6.90\,\%$ on S2. Both are signed; both are an order of magnitude below the seed spread, and \cref{sec:res-dr-analysis} reads them accordingly.} \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
@@ -3573,14 +3787,14 @@ skipabove=9pt, skipbelow=9pt
 			\midrule
 			Nominal-only & 0.0004 & 0.0314 \\
 			DR, all axes & 0.0064 & 0.0330 \\
-			\ACMPC{} (three seeds) & 0.0061 & \BL \\
+			\ACMPC{} (three seeds) & 0.0061 & --- \\
 			\midrule
 			\textbf{Seed spread used as the comparison floor} & \textbf{0.0064\,\si{\metre}} & --- \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
 
-	\realfigtwo{52mm}{F13_axis_competence.png}{F14_variances.png}
+	\realfigtwo{52mm}{\figAxisCompetence}{\figVariances}
 	{Domain randomisation.}
 	{Per-axis competence: RMSE against mass, rotor lag, inertia and thrust scale.
 		The abscissa is the \emph{realised} mean factor within each bin, not the bin
@@ -3601,31 +3815,61 @@ skipabove=9pt, skipbelow=9pt
 			\toprule
 			\textbf{Stage} & \textbf{BWT [\si{\metre}]} & \textbf{Dead units} & \textbf{Saturated outputs} \\
 			\midrule
-			after nominal & \BL & \BL & \BL \\
-			after mass & \BL & \BL & \BL \\
-			after lag & \BL & \BL & \BL \\
-			after all & \BL & \BL & \BL \\
+			nominal & $-0.0070$ & 0.11\,\% & 0.00\,\% \\
+			mass & $-0.0037$ & 0.14\,\% & 0.00\,\% \\
+			lag & $-0.0072$ & 0.14\,\% & 0.00\,\% \\
+			all & --- & 0.12\,\% & 0.00\,\% \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
 
-	\realfig{52mm}{F15_curriculum.png}
+	\realfig{52mm}{\figCurriculum}
 	{Sequential curriculum: performance on every earlier stage after training
 		through each later one. The diagonal is performance when the stage was
 		current; the columns below it are what survived.}
 	{fig:curriculum}
 
 	\subsection{Analysis}
+	\label{sec:res-dr-analysis}
 
-	\todo{Two paragraphs, written once the tables are filled. (i) Report the
-		\emph{sign} of the conservatism premium before its magnitude. If it is negative
-		--- DR tracking the nominal plant better than the nominal-only policy --- say
-		so plainly and give the two explanations consistent with the data:
-		randomisation acting as a regulariser at this iteration budget, or the
-		nominal-only control group being undertrained. Note how many seeds would be
-		needed to separate them, and whether this campaign has them. (ii) State the
-		structural conclusion, which does not depend on the sign: a policy that cannot
-		observe its plant cannot specialise, which is the motivation for Increment 4.}
+	\textbf{The conservatism premium is positive in sign and unresolved in
+	magnitude, and the second half of that matters more than the first.} The
+	seed-averaged premium is $+\SI{0.70}{\percent}$ --- \SI{0.0007}{\metre} on a
+	nominal RMSE of about \SI{0.10}{\metre}. The seed spread of
+	\cref{tab:res-seeds} is \SI{0.0064}{\metre}, nine times larger. This
+	campaign therefore \emph{cannot measure} the conservatism premium, and the
+	single-seed rows of \cref{tab:res-dr} make that concrete by disagreeing with
+	the average about its sign: there DR-all tracks the nominal plant at
+	\SI{0.1002}{\metre} against nominal-only at \SI{0.1025}{\metre}, a premium
+	of $-\SI{2.2}{\percent}$. Two seeds are not enough to tell $+0.7$ from
+	$-2.2$. Separating an effect of \SI{0.0007}{\metre} from a spread of
+	\SI{0.0064}{\metre} needs on the order of $(0.0064/0.0007)^2\approx80$ times
+	the seeds used here, so roughly a hundred --- which this campaign does not
+	have and was not designed to have. The honest statement is that the premium
+	is \textbf{indistinguishable from zero at this seed count}, and two readings
+	survive it: randomisation acting as a regulariser at this iteration budget,
+	or the nominal-only control group being undertrained. Nothing here
+	distinguishes them.
+
+	The robustness gain stands on firmer ground. On S2 the seed-averaged gain is
+	$+\SI{6.90}{\percent}$, \SI{0.0116}{\metre}, about \num{1.8} times the seed
+	spread, and the single-seed rows agree in sign and exceed it
+	(\SI{0.1856}{\metre} to \SI{0.1554}{\metre}, \SI{16}{\percent}). Randomising
+	the plant does buy something on a disturbed plant. Adding measurement noise
+	buys nothing further on S2 (\SI{0.1555}{\metre}, indistinguishable from
+	DR-all) while costing \SI{0.1118}{\metre} on the nominal plant, the worst
+	nominal figure of the four arms.
+
+	\textbf{The structural conclusion does not depend on any of these signs.}
+	Look at the last row of \cref{tab:res-dr}: untrained NMPC $N{=}1$ beats all
+	three learned arms on both suites, at \SI{0.0980}{\metre} nominal and
+	\SI{0.1521}{\metre} on S2. Domain randomisation asks one fixed policy to be
+	adequate across a family of plants, and a policy that cannot \emph{observe}
+	which plant it is on cannot do better than the compromise --- it has no
+	channel through which specialisation could happen, however many plants it is
+	shown. That is a limit of the method, not of the budget, and it is precisely
+	the limit Increment~4 is built to remove: give the controller an estimate of
+	the plant it is actually on, and the compromise becomes unnecessary.
 
 	%-----------------------------------------------------------------------
 	\section{Increment 4: adaptive scheme}
@@ -3654,7 +3898,7 @@ skipabove=9pt, skipbelow=9pt
 		\end{tabularx}
 	\end{table}
 
-	\realfig{52mm}{F20_training_gate.png}
+	\realfig{52mm}{\figTrainingGate}
 	{Collective saturation through training for the three precondition policies,
 		against the \SI{5}{\percent} gate. The wrench-randomisation magnitude is the
 		lever: too small and the disturbance does not matter, too large and the policy
@@ -3687,7 +3931,7 @@ skipabove=9pt, skipbelow=9pt
 		\end{tabularx}
 	\end{table}
 
-	\realfigtwo{52mm}{F16_encoder_trade.png}{F17_channel_r2.png}
+	\realfigtwo{52mm}{\figEncoderTrade}{\figChannelRtwo}
 	{Residual predictor.}
 	{Accuracy--latency trade across encoders, with the control period marked as a
 		vertical admissibility line.}
@@ -3740,7 +3984,7 @@ skipabove=9pt, skipbelow=9pt
 		\end{tabularx}
 	\end{table}
 
-	\realfig{50mm}{F30_rdp_window.png}
+	\realfig{50mm}{\figRdpWindow}
 	{Window length against accuracy, against the force/moment split, and against
 		inference latency. Force and moment are shown separately in the middle panel
 		because \cref{sec:rdp-theory} predicts they are not equally observable: a
@@ -3887,7 +4131,7 @@ skipabove=9pt, skipbelow=9pt
 		\end{tabularx}
 	\end{table}
 
-	\realfig{54mm}{F18_closed_loop.png}
+	\realfig{54mm}{\figClosedLoop}
 	{Closed-loop RMSE against disturbance level for each variant, one panel per
 		scenario. The zero-level intercept is conservatism; the slope is disturbance
 		rejection. The oracle is the ceiling and the gap beneath it is what estimation
@@ -3896,17 +4140,68 @@ skipabove=9pt, skipbelow=9pt
 
 	\subsection{Analysis}
 
-	\todo{Three paragraphs, written once the tables are filled. (i) Whether the
-		precondition of \cref{tab:res-trainhealth} held. If it did not, say so first
-		and stop: moderating the evaluation cannot repair a policy trained against the
-		stop, and the closed-loop table is then not readable as a decomposition.
-		(ii) The oracle-to-estimator gap, which is the cost of estimation, and the
-		blind-to-oracle gap, which is the value of the information; report the
-		zero-level row before either, since a gap there is conservatism and not
-		rejection. (iii) Which variant --- A, B or C --- wins, and what that says about
-		whether the disturbance belongs in the model, in the cost, or in both. Judge
-		every difference against the seed spread of \cref{tab:res-seeds} before calling
-		it a result.}
+	\textbf{The precondition held.} \Cref{tab:res-trainhealth} puts collective
+	saturation at \SIrange{0.11}{0.13}{\percent} for all three policies against
+	a gate of \SI{5}{\percent}, with a crash rate of zero. No policy was trained
+	against its input box, so \cref{tab:res-scenarios} is readable as a
+	decomposition rather than as a reading of the actuator limit. That check
+	comes first because it is not repairable downstream: moderating an
+	evaluation cannot undo a policy trained against the stop.
+
+	\textbf{Read the zero-disturbance row before any gap.} At the top of
+	\cref{tab:res-scenarios}, with no payload at all, Base sits at
+	\SI{0.1892}{\metre}, Robust at \SI{0.1918}{\metre}, Oracle at
+	\SI{0.1919}{\metre} and RDP-B at \SI{0.1829}{\metre}. The disturbance-aware
+	arms are not worse than Base by any margin approaching the seed spread, and
+	RDP-B is slightly better. Nothing is being rejected at zero; what differences
+	exist there are conservatism.
+
+	\textbf{Both gaps come out negative, and that is the result of this
+	increment.} \Cref{tab:res-gaps} reports the value of information
+	(Robust~$-$~Oracle) at \num{-0.0044} on \texttt{central}, \num{+0.0021} on
+	\texttt{asym} and \num{-0.0158} on \texttt{slung}; and the cost of
+	estimation (best RDP~$-$~Oracle) at \num{-0.0132}, \num{-0.0068} and
+	\num{-0.0243}. A negative cost of estimation says the \emph{estimated}
+	residual outperformed the \emph{exact} one on all three scenarios. The
+	oracle is not the ceiling, which is not what one expects and is worth
+	stating plainly. Against the \SI{0.0064}{\metre} seed spread, the
+	\texttt{slung} figures (\num{-0.0158}, \num{-0.0243}) and the
+	\texttt{central} cost of estimation (\num{-0.0132}) are resolved; the
+	\texttt{central} value of information and the whole \texttt{asym} column are
+	not, and should not be read as effects.
+
+	Two mechanisms are consistent with a negative cost of estimation, and the
+	data does not separate them. The cost map was trained without the residual
+	channel carrying an exact wrench, so feeding it one moves the solve off the
+	distribution the map was fitted on, while the RDP's smoothed output
+	(\cref{tab:res-rdp}: GRU at $R^2=\num{0.9988}$, rolling mean over
+	\vSmooth{} frames) stays closer to it. And on \texttt{slung} the exact
+	wrench carries pendulum content at periods of \SIrange{1.2}{6.0}{\second}
+	that a one-step horizon cannot act on, so supplying it exactly is closer to
+	injecting noise than to supplying information --- which is consistent with
+	\texttt{slung} showing the largest negative gap of the three.
+
+	\textbf{Variant B wins, and where it wins says where the disturbance
+	belongs.} RDP-B --- residual to the model, cost map left
+	disturbance-blind --- is lowest or tied-lowest in every block of
+	\cref{tab:res-scenarios}, ahead of RDP-C (both channels) everywhere and
+	ahead of RDP-A (observation only) by margins that grow with the disturbance:
+	\num{0.0105} at zero central payload, \num{0.0120} at the largest, and
+	\num{0.0159} at the \SI{1.2}{\second} slung excitation. RDP-A, which lets
+	the cost map react but keeps the model nominal, is the weakest of the three
+	throughout. The reading is that \textbf{a disturbance of this kind belongs
+	in the model, not in the cost} --- it is a statement about what the vehicle
+	will do, which is what the prediction is for, and routing it into the
+	objective instead asks the cost map to compensate for a prediction it knows
+	to be wrong. That RDP-C does not beat RDP-B says the second channel adds
+	nothing once the first is present, and costs a little.
+
+	In the ledger, adaptive \ACMPC{} improves on \ACMPC{} on all three suites:
+	\num{0.1040}~$\to$~\num{0.1022} on S1, \num{0.1657}~$\to$~\num{0.1561} on
+	S2, \num{0.2712}~$\to$~\num{0.2534} on S3. Only the S3 improvement
+	(\num{0.0178}) clearly exceeds the seed spread; S2 (\num{0.0096}) is
+	marginal and S1 (\num{0.0018}) is not resolved. The effect is real where the
+	disturbance is large, which is the only place it was ever claimed.
 
 	%-----------------------------------------------------------------------
 	\section{The comparison}
@@ -3958,7 +4253,7 @@ skipabove=9pt, skipbelow=9pt
 		\end{tabularx}
 	\end{table}
 
-	\realfigtwo{54mm}{F21_headline.png}{F23_radar.png}
+	\realfigtwo{54mm}{\figHeadline}{\figRadar}
 	{The comparison.}
 	{Accuracy against single-vehicle latency, with the \SI{20}{\milli\second} control
 		period as a vertical admissibility line and marker size showing the tuning
@@ -3967,13 +4262,13 @@ skipabove=9pt, skipbelow=9pt
 		--- the axes on which the controllers genuinely differ.}
 	{fig:comparison}
 
-	\realfig{54mm}{F22_by_condition.png}
+	\realfig{54mm}{\figByCondition}
 	{Per-condition breakdown: every controller on every path under S1, S2 and S3.
 		Saturation is reported beside RMSE throughout, because a cell with high
 		saturation is reporting the disturbance rather than the controller.}
 	{fig:bycondition}
 
-	\realfig{48mm}{F31_fragility.png}
+	\realfig{48mm}{\figFragility}
 	{One bar per controller per plant axis: worst RMSE over the swept range divided
 		by that controller's RMSE at nominal, so $1.0$ means the sweep never moved it.
 		This is the ledger's missing column --- \cref{tab:ledger} reports accuracy under
@@ -4052,7 +4347,7 @@ skipabove=9pt, skipbelow=9pt
 		indefinite one is what the task actually rewards~\cite{gros2020data}.
 	\end{itemize}
 
-	\realfig{54mm}{F12_interpretability.png}
+	\realfig{54mm}{\figInterpretability}
 	{Interpreting the learned cost: eigenvalues of $\mat S(\vec o)$ along a
 		one-dimensional slice of the observation, beside the hand-tuned $\mat Q,\mat R$
 		of the NMPC baseline on the same axes.}
@@ -4066,34 +4361,9 @@ skipabove=9pt, skipbelow=9pt
 	between a summary paragraph and the table printed immediately above it. It
 	identified defects in three groups: physics that did not match the airframe file,
 	learning machinery that did not match the paper it cited, and narrative claims
-	contradicted by their own tables. \Cref{tab:audit} lists those with the greatest
-	consequence; the complete register is \cref{app:audit}.
+	contradicted by their own tables. The complete register, with severity and
+	whether each defect was silent, is \cref{app:audit}.
 
-	\begin{table}[htbp]
-		\centering
-		\caption{Principal defects identified by the audit. Severity S1 changes
-			results; S2 changes reported numbers; S3 concerns correctness of the record.}
-		\label{tab:audit}
-		\small
-		\begin{tabularx}{\linewidth}{@{}l c X X@{}}
-			\toprule
-			\textbf{Id} & \textbf{Sev.} & \textbf{Defect} & \textbf{Resolution} \\
-			\midrule
-			A-2 & S1 & The actuator map ignored the PX4 idle floor: $T=T_{\max}c^2$ instead of \cref{eq:thrustmap}, so hover, collective authority and the minimum producible thrust were all wrong & Affine-then-quadratic map; $u_\mathrm{hover}$ and $\partial a_z/\partial c$ re-derived and asserted \\
-			A-3 & S1 & One $k_m$ was used for both the allocator and the plant, deleting a real disagreement present on the vehicle & Separate $k_m^\mathrm{ctrl}$ from the plant's rotor drag; report both conditionings \\
-			D-7 & S1 & The optimiser's input box was the nominal rate box, \SI{62}{\percent} of whose roll/pitch extent the plant cannot reach & Box shrunk to the reachable set; the clip is not applied inside the dynamics, which would singularise $\mat Q_{uu}$ \\
-			B-1 & S1 & Exploration noise did not reach the action, so the PPO ratio compared densities that generated nothing & Sample $a=\mu_\theta+\sigma\varepsilon$ on the action; learn $\log\sigma$; add a KL trust region \\
-			D-1 & S1 & The physical wrench (\si{\newton}, \si{\newton\metre}) was supplied to the model-residual slot (\si{\metre\per\square\second}, \si{\radian\per\second}). Wrong consistently in training and evaluation, hence silent & Route through \cref{prop:convert}; assert magnitude bounds at the interface \\
-			D-3 & S1 & The conversion in use discarded the moment block entirely & Adopt \cref{eq:convert}, exact in both blocks; measure it against the true residual \\
-			M-1 & S1 & The allocator was rebuilt from the shifted CG, giving the inner loop exact payload knowledge & Separate plant truth from controller belief \\
-			M-2 & S1 & Disturbance randomisation at \SI{32}{\percent} of weight saturated training & Reduce until saturation is below the gate; gate on it \\
-			A-1 & S1 & The ``frozen reference'' control column was not frozen --- it was bit-identical to the preview column & Build a controller that genuinely cannot bind the environment; assert the columns differ \\
-			B-4 & S2 & The observation normaliser had no variance floor, and the model-free arm was unnormalised while the cost map was & Floor and clip the normaliser; normalise both arms identically \\
-			B-1' & S2 & Batched throughput and single-vehicle latency were reported in the same column & One definition everywhere \\
-			E-1 & S2 & The attitude-error inverse used a first-order approximation & Apply \cref{lem:inverse} \\
-			\bottomrule
-		\end{tabularx}
-	\end{table}
 
 	\begin{keybox}
 		\keyhead{The methodological lesson}
@@ -4152,10 +4422,25 @@ skipabove=9pt, skipbelow=9pt
 		(\cref{sec:ros-experiments}).
 	\end{enumerate}
 
-	\todo{One paragraph summarising the quantitative outcome, written after
-		\cref{ch:results} is filled at \texttt{full} scale. State plainly which
-		increments delivered on their claim and which did not, and resist the
-		temptation to describe a trade as a win.}
+	Two of the four increments delivered on their claim, one delivered a trade,
+	and one did not deliver at all. Increment~1 failed: the terminal-cost
+	regression is essentially exact ($R^2=\num{0.999998}$) and the closed loop
+	is eighteen times worse than the NMPC it was meant to match, because
+	$\mat P_\theta$ is a local object and a closed loop does not stay local.
+	Increment~2 delivered a \emph{trade} and should be described as one: every
+	hand-chosen stage weight was removed --- the \texttt{tuned} column of
+	\cref{tab:ledger} goes from \num{13} to \num{0} --- at a cost of
+	\SI{41}{\percent} accuracy against the tuned NMPC on S1. Increment~3
+	delivered a robustness gain on S2 of \SI{6.9}{\percent} and a conservatism
+	premium too small to measure at two seeds; its more useful contribution was
+	negative and structural, that a policy which cannot observe its plant cannot
+	specialise. Increment~4 delivered: the adaptive arm improves on \ACMPC{} on
+	all three suites and clearly so on S3 (\num{0.2712}~$\to$~\num{0.2534}), and
+	it produced the one finding nobody designed for --- the estimated residual
+	beat the exact one on every scenario tested, so the oracle is not the
+	ceiling. All of this is at \texttt{medium} scale, and differences at or
+	below the \SI{0.0064}{\metre} seed spread are reported as unresolved rather
+	than as results.
 
 	%-----------------------------------------------------------------------
 	\section{The endpoint: an enhanced cost and an enhanced model}
@@ -4496,12 +4781,6 @@ skipabove=9pt, skipbelow=9pt
 		\newblock In \emph{International Conference on Learning Representations (ICLR)},
 		2016. arXiv:1506.02438.
 
-		\bibitem{schulman2015trpo}
-		J.~Schulman, S.~Levine, P.~Moritz, M.~I. Jordan, and P.~Abbeel.
-		\newblock Trust region policy optimization.
-		\newblock In \emph{International Conference on Machine Learning (ICML)}, 2015.
-		arXiv:1502.05477.
-
 		\bibitem{silver2014dpg}
 		D.~Silver, G.~Lever, N.~Heess, T.~Degris, D.~Wierstra, and M.~Riedmiller.
 		\newblock Deterministic policy gradient algorithms.
@@ -4793,7 +5072,6 @@ skipabove=9pt, skipbelow=9pt
 			\midrule
 			B-1 & S1 & yes & Exploration noise never reached the action, so the PPO ratio \cref{eq:ppo} compared two densities that generated nothing. Sample $a=\mu_\theta+\sigma\varepsilon$ on the action. This alone changed the character of the results: with the noise where it belongs, a short training budget genuinely fails rather than appearing to succeed. \\
 			B-2 & S1 & yes & The linear cost term $\vec c_k$ was never learned, discarding the part of \cref{eq:groszanon} that absorbs a model \emph{bias}. Both $(\mat S_k,\vec c_k)$ are now emitted. \\
-			B-3 & S2 & yes & MPVE was a dead configuration flag. Wired to \cref{eq:mpve} and swept. \\
 			B-4 & S2 & partly & The observation normaliser had no variance floor, and near-constant channels amplified the first moving sample by $\sim10^4$, reaching \texttt{NaN} within three iterations. The model-free arm was additionally unnormalised while the cost map was, so the exploration comparison measured the normalisation rather than the architecture. Floor, clip, and normalise both arms identically. \\
 			B-5 & S2 & no & The exploration standard deviation was fixed rather than learned. $\log\sigma$ is now a parameter. \\
 			--- & S1 & yes & Because the policy mean is the solution of an optimisation problem, a single clipped step moved it far more than the parameter change suggested; the sampled KL reached order $10$. A KL trip that reverts the update, plus an adaptive learning rate, was added. \\

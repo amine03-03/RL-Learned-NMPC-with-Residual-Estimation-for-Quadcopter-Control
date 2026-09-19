@@ -67,7 +67,7 @@
 \title{Learning the Cost of a Wrong Model}
 \subtitle{Adaptive actor--critic MPC with residual dynamics estimation
   for a quadrotor}
-\author{Abdoulaziz Amine Bouzid}
+\author{BOUZID Amine}
 \institute{Final-year project (PFE)}
 \date{\today}
 
@@ -755,24 +755,6 @@
   \end{itemize}
 \end{frame}
 
-\begin{frame}{Model-predictive value expansion}
-  \[
-    V_H(o)=\sum_{t=0}^{H-1}\gamma^{t}\hat r_t+\gamma^{H}V(o_H),
-    \qquad
-    \mathcal{L}=\sum_{t=0}^{H-1}\big(V(o_t)-\mathrm{sg}[\,V_H^{(t)}\,]\big)^{2}
-  \]
-  \begin{itemize}
-    \item The solver has already produced a predicted trajectory; MPVE prices
-      it instead of discarding it.
-    \item The consistency term aligns the training distribution with the
-      prediction distribution.
-    \item $\hat r_t$ is the \emph{full} reward: with $\omega$ a state and the
-      command increment available, no term has to be dropped.
-  \end{itemize}
-  \takeaway{Dropping terms from $\hat r$ biases the critic optimistic in
-    proportion to how hard the policy is working the rates.}
-\end{frame}
-
 % ==========================================================================
 \section{Data and protocol}
 % ==========================================================================
@@ -977,20 +959,24 @@
   \begin{table}
     \centering
     \small
-    \begin{tabular}{lrrrr}
+    \begin{tabular}{lrrrrr}
       \toprule
-      Controller & RMSE [m] & Sat. & Crash & Latency [ms] \\
+      Controller & S1 & S2 & S3 & p95 [ms] & tuned \\
       \midrule
-      PID              & \BL & \BL & \BL & \BL \\
-      LQR              & \BL & \BL & \BL & \BL \\
-      NMPC (tuned)     & \BL & \BL & \BL & \BL \\
-      LLTC             & \BL & \BL & \BL & \BL \\
-      AC-MPC           & \BL & \BL & \BL & \BL \\
-      Adaptive AC-MPC  & \BL & \BL & \BL & \BL \\
+      LQR $+$ feed-forward   & 0.0945 & 0.1882 & 0.3079 & 0.42 & 13 \\
+      NMPC $N{=}1$           & 0.0739 & 0.1275 & 0.2368 & 12.04 & 13 \\
+      NMPC $N{=}10$          & 0.0699 & 0.0993 & 0.1986 & \alert{126.69} & 13 \\
+      LLTC $N{=}1$           & 1.2547 & 1.2921 & 1.3202 & 12.20 & 13 \\
+      AC-MPC $N{=}1$         & 0.1040 & 0.1657 & 0.2712 & 12.17 & \textbf{0} \\
+      Adaptive AC-MPC $N{=}1$ & 0.1022 & 0.1561 & 0.2534 & 12.56 & \textbf{0} \\
       \bottomrule
     \end{tabular}
   \end{table}
-  \takeaway{Cells marked \BL{} await the full-scale campaign.}
+  \takeaway{RMSE in metres; \texttt{medium} scale; seed spread $0.0064\,$m is
+    the resolution. \alert{$N{=}10$ misses the $20\,$ms period} --- the only
+    row that is inadmissible. The last column is the claim: thirteen
+    hand-chosen constants go to zero, and S1 accuracy pays about $41\,\%$
+    for it.}
 \end{frame}
 
 % ==========================================================================
@@ -1123,15 +1109,17 @@
       \toprule
       Stage & Median [ms] & p95 [ms] \\
       \midrule
-      Residual estimation     & \BL & \BL \\
-      MPC solve               & \BL & \BL \\
-      Total, against $20\,$ms & \BL & \BL \\
+      Residual estimation (GRU) & 1.23 & 1.24 \\
+      MPC solve, $N{=}1$        & 12.40 & 12.56 \\
+      \midrule
+      Total, against $20\,$ms   & \textbf{13.63} & \textbf{13.80} \\
       \bottomrule
     \end{tabular}
   \end{table}
-  \takeaway{The first solve pays compilation; the budget is measured after
-    warm-up, on a batch of one, which is the only quantity comparable to the
-    control period.}
+  \takeaway{$69\,\%$ of the period at p95, with $6.2\,$ms of margin. The first
+    solve pays compilation; the budget is measured after warm-up, on a batch of
+    one, which is the only quantity comparable to the control period. Batched
+    throughput is a different number and is not this one.}
 \end{frame}
 
 \begin{frame}{Simulated scenarios}

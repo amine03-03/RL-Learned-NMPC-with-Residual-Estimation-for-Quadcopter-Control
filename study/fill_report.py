@@ -201,17 +201,27 @@ def _noise(rows):
 
 @table("tab:res-qr", "common/nb1_qr_spread.csv")
 def _qr(rows):
+    """Weighting, the two grid coordinates, and RMSE.
+
+    The sweep records the grid point and the closed-loop RMSE it produced and
+    nothing else, so the table has exactly those columns. Effort, smoothness
+    and saturation were columns of an earlier design that this artefact never
+    carried; they are gone rather than marked, because a column that can never
+    be filled is not a placeholder, it is a promise the data cannot keep.
+    """
     out = []
     for case, name in (("best", "Best admissible"), ("median", "Median admissible"),
-                       ("worst", "Worst admissible"), ("hand", "Hand-chosen operating point")):
+                       ("worst", "Worst admissible")):
         r = pick(rows, case=case)
-        # the spread CSV carries RMSE only; effort, smoothness and saturation
-        # are not among its columns, so those cells stay marked
-        out.append(f"{name} & {f(num(r, 'rmse'))} & {BL} & {BL} & {BL}" + r" \\")
+        q, rr = num(r, "Q_pos"), num(r, "R_rate")
+        out.append(f"{name} & " + ("---" if q is None else f"{q:g}") + " & "
+                   + ("---" if rr is None else f"{rr:g}") + " & "
+                   + f(num(r, "rmse")) + r" \\")
     b, w = num(pick(rows, case="best"), "rmse"), num(pick(rows, case="worst"), "rmse")
-    ratio = BL if (b is None or w is None or not b) else f"{w / b:.1f}"
+    ratio = "---" if (b is None or w is None or not b) else f"{w / b:.2f}"
     out.append(r"\midrule")
-    out.append(rf"\textbf{{Best-to-worst ratio}} & \textbf{{{ratio}$\times$}} & {BL} & {BL} & --- \\")
+    out.append(r"\multicolumn{3}{@{}l}{\textbf{Best-to-worst ratio}} & \textbf{"
+               + ratio + r"$\times$} \\")
     return out
 
 
@@ -347,30 +357,47 @@ def _degradation(rows):
 @table("tab:res-mismatch-hand", "sensitivity/model_hand_breakpoints.csv")
 def _mismatch_hand(rows):
     out = []
-    for ax, label in (("m", r"$\lambda_m$ (mass)   "), ("J", r"$\lambda_J$ (inertia)")):
+    for ax, label in (("m", r"$\lambda_m$ (mass)"), ("J", r"$\lambda_J$ (inertia)")):
         r = pick(rows, axis=ax)
+        nl, nn = num(r, "nominal_LQR"), num(r, "nominal_NMPC")
         bl, bn = num(r, "break_LQR"), num(r, "break_NMPC")
-        above, below = num(r, "NMPC_loses_above"), num(r, "NMPC_loses_below")
+        if bl is None and bn is None:
+            continue            # this axis never reached the threshold; no row
         out.append(f"{label} & " + " & ".join([
-            (BL if bl is None else f"{bl:.2f}") + r"$\times$",
-            (BL if bn is None else f"{bn:.2f}") + r"$\times$",
-            BL if above is None else f"{above:.2f}",
-            BL if below is None else f"{below:.2f}",
+            f(nl), f(nn),
+            ("---" if bl is None else f"{bl:.2f}") + r"$\times$",
+            ("---" if bn is None else f"{bn:.2f}") + r"$\times$",
         ]) + r" \\")
+    r = pick(rows, axis="m")
+    above = num(r, "NMPC_loses_above")
+    out.append(r"\midrule")
+    out.append(r"\multicolumn{5}{@{}X}{\footnotesize NMPC $N{=}1$ stops beating LQR at "
+               + (r"$\lambda_m=" + f"{above:.2f}$" if above is not None else "no swept factor")
+               + r" above nominal; below nominal it still leads at the widest factor "
+                 r"swept. The inertia axis did not reach either threshold inside the "
+                 r"swept range and is therefore not tabulated.} \\")
     return out
 
 
 @table("tab:res-mismatch-learned", "sensitivity/model_learned_breakpoints.csv")
 def _mismatch_learned(rows):
     out = []
-    for ax, label in (("m", r"$\lambda_m$ (mass)   "), ("J", r"$\lambda_J$ (inertia)")):
+    for ax, label in (("m", r"$\lambda_m$ (mass)"), ("J", r"$\lambda_J$ (inertia)")):
         r = pick(rows, axis=ax)
         a, b = num(r, "AC-MPC N=1"), num(r, "Adaptive AC-MPC N=1")
+        if a is None and b is None:
+            continue            # this axis never reached the threshold; no row
         out.append(f"{label} & " + " & ".join([
-            (BL if a is None else f"{a:.2f}") + r"$\times$",
-            (BL if b is None else f"{b:.2f}") + r"$\times$",
-            BL, BL,
+            ("---" if a is None else f"{a:.2f}") + r"$\times$",
+            ("---" if b is None else f"{b:.2f}") + r"$\times$",
         ]) + r" \\")
+    out.append(r"\midrule")
+    out.append(r"\multicolumn{3}{@{}X}{\footnotesize Both arms break at the same factor, "
+               r"and on the \emph{light} side: at $\lambda_m=0.55$ the vehicle is "
+               r"\SI{45}{\percent} under nominal mass and the hover collective leaves "
+               r"its trim. Neither arm crossed the other inside the swept range, so no "
+               r"crossover is reported. The inertia axis did not reach the threshold "
+               r"and is not tabulated.} \\")
     return out
 
 
@@ -416,79 +443,158 @@ def _seeds(rows):
         eps = [num(r, "episode_std") for r in rs]
         eps = [v for v in eps if v is not None]
         out.append(f"{label} & "
-                   + (BL if len(vals) < 2 else f"{max(vals) - min(vals):.4f}")
-                   + " & " + (BL if not eps else f"{sum(eps) / len(eps):.4f}") + r" \\")
+                   + ("---" if len(vals) < 2 else f"{max(vals) - min(vals):.4f}")
+                   + " & " + ("---" if not eps else f"{sum(eps) / len(eps):.4f}") + r" \\")
     av = [num(r, "rmse") for r in (ac or [])]
     av = [v for v in av if v is not None]
+    # nb3_seeds.csv records one RMSE per seed and no per-episode dispersion, so
+    # the episode-IQR cell is struck out rather than marked: it is not awaiting
+    # a campaign, the artefact does not carry it.
     out.append(r"\ACMPC{} (three seeds) & "
-               + (BL if len(av) < 2 else f"{max(av) - min(av):.4f}")
-               + f" & {BL}" + r" \\")
+               + ("---" if len(av) < 2 else f"{max(av) - min(av):.4f}")
+               + " & ---" + r" \\")
     pool = ([max(vals) - min(vals)] if len(vals) >= 2 else []) + \
            ([max(av) - min(av)] if len(av) >= 2 else [])
-    floor = BL if not pool else f"{max(pool):.4f}"
+    floor = "---" if not pool else f"{max(pool):.4f}"
     out.append(r"\midrule")
     out.append(r"\textbf{Seed spread used as the comparison floor} & \textbf{"
                + floor + r"\,\si{\metre}} & --- \\")
     return out
 
 
-@table("tab:res-dr", "domrand/T6_robustness.csv")
+@table("tab:res-dr", "domrand/headline.csv")
 def _dr(rows):
-    """T6_robustness.csv is long-format: one metric name per row."""
+    """Four policies x two suites, from the headline sweep.
+
+    The per-policy rows come from headline.csv, which is the only artefact
+    carrying all four arms and the dispersion columns. The two signed summary
+    figures are seed-AVERAGED and come from T6_robustness.csv, so they are
+    reported in a footnote row that says so: quoting a two-seed mean beside
+    single-seed rows without marking which is which is how a reader ends up
+    comparing them.
+    """
+    T6 = load("domrand/T6_robustness.csv") or []
+
     def metric(name):
-        for r in rows:
+        for r in T6:
             if (r.get("metric") or "").strip() == name:
                 return num(r, "value")
         return None
 
-    nom_n = metric("RMSE on the nominal plant, nominal-only policy")
-    dr_n = metric("RMSE on the nominal plant, DR-all policy")
-    nom_2 = metric("RMSE on S2, nominal-only policy")
-    dr_2 = metric("RMSE on S2, DR-all policy")
-    prem, gain = metric("conservatism premium [%] (signed)"), metric("robustness gain on S2 [%]")
+    def cell(policy, suite, key):
+        for r in rows:
+            if (r.get("policy") or "").strip() == policy and \
+               (r.get("suite") or "").strip() == suite:
+                return num(r, key)
+        return None
 
-    out = [f"Nominal-only & {f(nom_n)} & {f(nom_2)} & {BL} & {BL}" + r" \\",
-           f"DR, all axes & {f(dr_n)} & {f(dr_2)} & {BL} & {BL}" + r" \\",
-           # this suite reports the two headline policies only
-           f"DR + measurement noise & {BL} & {BL} & {BL} & {BL}" + r" \\",
-           f"NMPC $N{{=}}1$ (no learning) & {BL} & {BL} & {BL} & {BL}" + r" \\",
-           r"\midrule",
-           r"\textbf{Conservatism premium (signed)} & \textbf{"
-           + (BL if prem is None else f"{prem:.2f}") + r"\,\%} & --- & --- & " + BL + r"\,\% \\",
-           r"\textbf{Robustness gain on S2 (signed)} & --- & \textbf{"
-           + (BL if gain is None else f"{gain:.2f}") + r"\,\%} & --- & --- \\"]
+    out = []
+    for pol, label in (("nominal", "Nominal-only"),
+                       ("DR-all", "DR, all axes"),
+                       ("DR-all+noise", r"DR $+$ measurement noise"),
+                       ("NMPC N=1", r"NMPC $N{=}1$ (no learning)")):
+        out.append(f"{label} & " + " & ".join([
+            f(cell(pol, "nominal", "rmse")),
+            f(cell(pol, "S2 moderated", "rmse")),
+            f(cell(pol, "S2 moderated", "rmse_iqr")),
+            f(cell(pol, "S2 moderated", "maxerr")),
+        ]) + r" \\")
+    prem, gain = metric("conservatism premium [%] (signed)"), \
+        metric("robustness gain on S2 [%]")
+    out.append(r"\midrule")
+    out.append(r"\multicolumn{5}{@{}X}{\footnotesize Seed-averaged over the two seeds "
+               r"of \cref{tab:res-seeds}: conservatism premium $"
+               + ("---" if prem is None else f"{prem:+.2f}")
+               + r"\,\%$ on the nominal plant, robustness gain $"
+               + ("---" if gain is None else f"{gain:+.2f}")
+               + r"\,\%$ on S2. Both are signed; both are an order of magnitude "
+                 r"below the seed spread, and \cref{sec:res-dr-analysis} reads them "
+                 r"accordingly.} \\")
     return out
 
 
 @table("tab:res-lltc", "lltc/nb2_horizon_equivalence.csv")
 def _lltc(rows):
     """The CSV is indexed by path with one column per controller; the table is
-    the transpose. Effort and solve time are not among its columns."""
+    the transpose. Effort and solve time were columns of an earlier design that
+    this artefact never carried, so the table does not have them."""
     ctrls = (("NMPC N=1", r"NMPC $N{=}1$"), ("NMPC N=3", r"NMPC $N{=}3$"),
              ("NMPC N=10", r"NMPC $N{=}10$"), ("LLTC N=1", r"\LLTC{} $N{=}1$"))
     out = []
     for key, label in ctrls:
         cells = [f(num(pick(rows, path=pth), key)) for pth in ("circle", "fig8", "square")]
-        out.append(f"{label} & " + " & ".join(cells) + f" & {BL} & {BL}" + r" \\")
+        out.append(f"{label} & " + " & ".join(cells) + r" \\")
     rat = [num(pick(rows, path=pth), "ratio LLTC/NMPC N=1") for pth in ("circle", "fig8", "square")]
     out.append(r"\midrule")
     out.append(r"\textbf{Ratio \LLTC/NMPC $N{=}1$} & "
-               + " & ".join(BL if v is None else f"{v:.1f}$\\times$" for v in rat)
-               + r" & --- & --- \\")
+               + " & ".join("---" if v is None else f"{v:.1f}$\\times$" for v in rat)
+               + r" \\")
     return out
 
 
 @table("tab:res-lltcfit", "lltc/nb2_fit.csv")
 def _lltcfit(rows):
-    """The fit artefact records the shipped configuration only; the three
-    ablation rows are left marked."""
+    """The fit artefact records the configuration that was actually run.
+
+    The three ablation rows of an earlier design (reduced terminal weighting,
+    matched displacement, increased candidate budget) were never executed, so
+    they are not tabulated. The displacement-to-reach ratio and the gate verdict
+    are carried in a footnote row, because they are properties of the same single
+    fit rather than a second row of it.
+    """
     r = rows[0] if rows else None
-    out = ["Baseline & " + " & ".join([
-        f(num(r, "R2"), 6), fg(num(r, "NRMSE")), fpct(num(r, "acceptance"), 0),
+    out = [r"Regression on $V_1$ & " + " & ".join([
+        f(num(r, "R2"), 6), f(num(r, "NRMSE"), 4), fpct(num(r, "acceptance"), 0),
         fi(num(r, "n")), f(num(r, "reach_m"), 4)]) + r" \\"]
-    for name in ("Reduced terminal weighting", "Matched displacement",
-                 "Increased candidate budget"):
-        out.append(f"{name} & " + " & ".join([BL] * 5) + r" \\")
+    disp, ratio = num(r, "disp_m"), num(r, "disp_over_reach")
+    gate = (r.get("gate_passed") or "").strip().lower() if r else ""
+    out.append(r"\midrule")
+    out.append(r"\multicolumn{6}{@{}l}{\itshape Candidate displacement "
+               + ("---" if disp is None else rf"\SI{{{disp:g}}}{{\metre}}")
+               + "; ratio to reach "
+               + ("---" if ratio is None else rf"\num{{{ratio:.2f}}}")
+               + "; gate " + ("passed" if gate == "true" else "not passed")
+               + r"} \\")
+    return out
+
+
+@table("tab:res-acmpc-sweeps", "acmpc/nb3_exploration.csv")
+def _explore(rows):
+    """AC-MPC against the model-free MLP across the exploration-noise sweep.
+
+    The value-expansion and algorithm blocks of an earlier design are gone with
+    the mechanisms they measured. What is left is the sweep that tests the one
+    claim specific to differentiating through an optimiser: that noise driving
+    the collective onto its box corrupts the linearisation inside the solve.
+    Reporting the ratio and the saturation beside the RMSE is what makes that
+    testable -- the reward alone would read as insensitivity.
+    """
+    def cell(arch, sigma, key):
+        for r in rows:
+            if (r.get("arch") or "").startswith(arch) and \
+               abs((num(r, "sigma") or -1) - sigma) < 1e-9:
+                return num(r, key)
+        return None
+
+    out, keep = [], {}
+    for sig in (0.05, 0.15, 0.30):
+        a = cell("AC-MPC", sig, "rmse")
+        m = cell("MLP", sig, "rmse")
+        sat = cell("AC-MPC", sig, "train_sat")
+        keep[sig] = (a, m, sat)
+        ratio = "---" if (a is None or m is None or not a) else f"{m / a:.1f}$\\times$"
+        out.append(f"{sig:.2f} & {f(a)} & {f(m)} & {ratio} & {fpct(sat, 2)}" + r" \\")
+
+    def growth(x, y):
+        return "---" if (x is None or y is None or not x) else f"$+{100 * (y - x) / x:.0f}\\,\\%$"
+
+    a0, m0, s0 = keep[0.15]
+    a1, m1, s1 = keep[0.30]
+    satx = "---" if (s0 is None or s1 is None or not s0) else f"{s1 / s0:.1f}$\\times$"
+    out.append(r"\midrule")
+    out.append(r"\textbf{Degradation, $\sigma=0.15\to0.30$} & \textbf{"
+               + growth(a0, a1) + "} & " + growth(m0, m1)
+               + r" & --- & \textbf{" + satx + r"} \\")
     return out
 
 
