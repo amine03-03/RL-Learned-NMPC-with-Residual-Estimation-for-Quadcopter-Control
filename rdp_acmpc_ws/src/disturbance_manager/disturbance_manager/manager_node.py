@@ -51,8 +51,11 @@ def main(args=None):                                       # pragma: no cover
             g = lambda k: self.get_parameter(k).value
             params = {}
             if float(g("payload_mass")) > 0.0:
-                params = dict(payload_mass=float(g("payload_mass")),
-                              payload_offset=list(g("payload_offset")))
+                from acmpc_controller import px4_topics as _PT
+                params = dict(
+                    payload_mass=float(g("payload_mass")),
+                    payload_offset=_PT.as_floats(
+                        g("payload_offset"), 3, "payload_offset").tolist())
             self.scen = Scenario(g("scenario"), seed=int(g("seed")),
                                  t_on=float(g("t_on")), t_off=float(g("t_off")),
                                  params=params)

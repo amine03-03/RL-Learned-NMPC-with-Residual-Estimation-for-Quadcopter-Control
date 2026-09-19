@@ -13,11 +13,39 @@ prediction nobody reads, and would make the three legs differ in CPU load as
 well as in control law -- a confound in the one measurement that is about
 timing.
 """
+from typing import List
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+
+
+def num(name, kind=float):
+    """A launch argument as a TYPED node parameter.
+
+    A bare LaunchConfiguration in a parameter dict reaches the node as a
+    string, and ROS 2 then guesses the type from how the string looks.  The
+    guess is usually right and occasionally is not -- "10" for a parameter the
+    node declared as a double arrives as an integer and the node refuses it at
+    start-up, which reads as a node that died for no reason.  Say the type.
+    """
+    return ParameterValue(LaunchConfiguration(name), value_type=kind)
+
+
+def vec3(a, b, c):
+    """Three launch arguments as one double[3] node parameter.
+
+    A Python list of LaunchConfigurations does NOT become a double array: each
+    element is a substitution resolving to a string, so the node is handed a
+    string array where it declared doubles and rejects it.  Build the literal
+    and declare its type instead.
+    """
+    return ParameterValue(
+        PythonExpression(["[float(", a, "), float(", b, "), float(", c, ")]"]),
+        value_type=List[float])
 
 #: Only this controller is fed the residual estimate (see controller_node.CONTROLLERS)
 ADAPTIVE = "acmpc_adaptive"
@@ -46,51 +74,52 @@ def generate_launch_description():
     ]
     c = LaunchConfiguration("controller")
     ns = LaunchConfiguration("px4_namespace")
-    hold = [LaunchConfiguration("hold_x"), LaunchConfiguration("hold_y"),
-            LaunchConfiguration("hold_z")]
-    off = [LaunchConfiguration("payload_rx"), LaunchConfiguration("payload_ry"),
-           LaunchConfiguration("payload_rz")]
+    hold = vec3(LaunchConfiguration("hold_x"), LaunchConfiguration("hold_y"),
+                LaunchConfiguration("hold_z"))
+    off = vec3(LaunchConfiguration("payload_rx"), LaunchConfiguration("payload_ry"),
+               LaunchConfiguration("payload_rz"))
+    ns_p = ParameterValue(ns, value_type=str)
     is_adaptive = IfCondition(PythonExpression(["'", c, "' == '", ADAPTIVE, "'"]))
 
     controller = Node(
         package="acmpc_controller", executable="controller_node",
         name="acmpc_controller", output="screen", emulate_tty=True,
-        parameters=[{"controller": c,
+        parameters=[{"controller": ParameterValue(c, value_type=str),
                      "reference": "hold",
                      "p_hold": hold,
-                     "horizon": LaunchConfiguration("horizon"),
-                     "n_iter": LaunchConfiguration("n_iter"),
-                     "rate_hz": LaunchConfiguration("rate_hz"),
-                     "auto_arm": LaunchConfiguration("auto_arm"),
-                     "px4_namespace": ns}])
+                     "horizon": num("horizon", int),
+                     "n_iter": num("n_iter", int),
+                     "rate_hz": num("rate_hz", float),
+                     "auto_arm": num("auto_arm", bool),
+                     "px4_namespace": ns_p}])
 
     estimator = Node(
         package="rdp_estimator", executable="estimator_node",
         name="rdp_estimator", output="screen", emulate_tty=True,
         condition=is_adaptive,
-        parameters=[{"model_path": LaunchConfiguration("model_path"),
-                     "rate_hz": LaunchConfiguration("rate_hz"),
-                     "px4_namespace": ns}])
+        parameters=[{"model_path": num("model_path", str),
+                     "rate_hz": num("rate_hz", float),
+                     "px4_namespace": ns_p}])
 
     truth = Node(
         package="disturbance_manager", executable="manager_node",
         name="disturbance_manager", output="screen", emulate_tty=True,
         parameters=[{"scenario": "S7",
-                     "payload_mass": LaunchConfiguration("payload_mass"),
+                     "payload_mass": num("payload_mass", float),
                      "payload_offset": off,
-                     "px4_namespace": ns}])
+                     "px4_namespace": ns_p}])
 
     plot = Node(
         package="visualization", executable="live_zx",
         name="live_zx", output="screen", emulate_tty=True,
         condition=IfCondition(LaunchConfiguration("plot")),
-        parameters=[{"session_dir": LaunchConfiguration("session_dir"),
-                     "controller": c,
+        parameters=[{"session_dir": num("session_dir", str),
+                     "controller": ParameterValue(c, value_type=str),
                      "setpoint": hold,
-                     "payload_mass": LaunchConfiguration("payload_mass"),
+                     "payload_mass": num("payload_mass", float),
                      "payload_offset": off,
-                     "headless": LaunchConfiguration("headless"),
-                     "px4_namespace": ns}])
+                     "headless": num("headless", bool),
+                     "px4_namespace": ns_p}])
 
     return LaunchDescription(args + [
         LogInfo(msg=["S7 hover / asymmetric payload -- controller ", c,

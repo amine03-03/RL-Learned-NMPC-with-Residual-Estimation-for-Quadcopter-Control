@@ -100,7 +100,7 @@ def main(args=None):                                       # pragma: no cover
             if self.ref_mode not in ("hold", "lissajous"):
                 raise SystemExit(f"reference must be 'hold' or 'lissajous', "
                                  f"got {self.ref_mode!r}")
-            self.p_hold = np.asarray(g("p_hold"), float)
+            self.p_hold = PT.as_floats(g("p_hold"), 3, "p_hold")
             ok, pv, pa, budget = (
                 L.check_feasible(mode=L.HOLD) if self.ref_mode == "hold"
                 else L.check_feasible(g("A"), g("B"), g("omega")))

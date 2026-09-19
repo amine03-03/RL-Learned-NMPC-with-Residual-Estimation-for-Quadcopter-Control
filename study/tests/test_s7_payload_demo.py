@@ -442,3 +442,29 @@ def test_P9_a_tie_within_one_version_is_deterministic():
                      "px4_msgs_old/msg/VehicleOdometryV1"})
     assert PT.select(ODOM, g_a, importer=imp).type_str == \
         PT.select(ODOM, g_b, importer=imp).type_str == "px4_msgs/msg/VehicleOdometry"
+
+
+# --------------------------------------------------------------------------- #
+#  V1..V3  vector parameters, however ROS 2 delivers them
+# --------------------------------------------------------------------------- #
+def test_V1_vector_parameter_accepts_every_shape_launch_can_deliver():
+    """A launch file can hand a node a double[] as floats, as strings, or as
+    one string.  The node dies during construction on the unexpected shape,
+    which in the launch output looks like a node that died for no reason."""
+    for v in ([0.0, 0.0, 1.5], ["0.0", "0.0", "1.5"], "[0.0, 0.0, 1.5]",
+              "0.0 0.0 1.5", (0, 0, 1.5), np.array([0.0, 0.0, 1.5])):
+        assert PT.as_floats(v, 3, "p_hold") == pytest.approx([0.0, 0.0, 1.5])
+
+
+def test_V2_vector_parameter_refuses_the_wrong_length_or_content():
+    for bad in ("[1,2]", [1, 2, 3, 4], "abc", ["1", "x", "3"]):
+        with pytest.raises(ValueError):
+            PT.as_floats(bad, 3, "p_hold")
+
+
+def test_V3_vector_parameter_names_itself_in_the_error():
+    """The message is the whole value of this helper: it has to say which
+    parameter was wrong, in a launch log carrying four nodes' output."""
+    with pytest.raises(ValueError) as ex:
+        PT.as_floats("[1,2]", 3, "payload_offset")
+    assert "payload_offset" in str(ex.value)

@@ -133,7 +133,16 @@ ros2 run acmpc_controller check_px4        # must PASS before flying
 # 3. fly all three, 40 s each, one accumulating figure
 ./tools/run_hover_payload_demo.sh
 
-# one leg only
+# or one controller at a time -- naming one REUSES the newest session, so
+# these three commands build the same figure as the line above
+./tools/run_hover_payload_demo.sh nmpc1
+./tools/run_hover_payload_demo.sh acmpc
+./tools/run_hover_payload_demo.sh acmpc_adaptive
+
+# two of them, in order; --new-session forces a fresh directory
+./tools/run_hover_payload_demo.sh nmpc1 acmpc_adaptive --new-session
+
+# the launch file directly, if you want to watch one leg by hand
 ros2 launch acmpc_controller hover_payload_demo.launch.py controller:=acmpc_adaptive
 
 # re-render a finished session without a graph

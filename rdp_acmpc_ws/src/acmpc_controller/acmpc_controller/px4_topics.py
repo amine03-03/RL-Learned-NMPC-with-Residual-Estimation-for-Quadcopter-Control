@@ -217,3 +217,36 @@ def resolve(node, base, timeout_s=10.0, namespace="", required=True,
         raise TopicNotFound(msg)
     node.get_logger().warn(msg)
     return None
+
+
+def as_floats(value, n=None, name="parameter"):
+    """A vector parameter as a list of floats, however ROS 2 delivered it.
+
+    A launch file can hand a node a ``double[]`` as a genuine float list, as a
+    list of strings, or as one string like ``"[0.0, 0.0, 1.5]"`` or
+    ``"0.0 0.0 1.5"`` -- depending on how the value was built and whether its
+    type was declared.  The failure when it arrives in the unexpected shape is
+    a node that dies during construction, which from the launch output looks
+    like a node that died for no reason at all.
+
+    This lives here rather than in each node because three of them take vector
+    parameters and all three were written assuming the float-list case.
+    """
+    import numpy as np
+
+    if isinstance(value, str):
+        parts = [p for p in value.replace("[", " ").replace("]", " ")
+                 .replace(",", " ").split() if p]
+    else:
+        try:
+            parts = list(value)
+        except TypeError:
+            parts = [value]
+    try:
+        out = [float(p) for p in parts]
+    except (TypeError, ValueError) as ex:
+        raise ValueError(
+            f"{name} must be {n or 'a list of'} numbers; got {value!r}") from ex
+    if n is not None and len(out) != n:
+        raise ValueError(f"{name} must have {n} elements, got {len(out)}: {value!r}")
+    return np.asarray(out, dtype=float)

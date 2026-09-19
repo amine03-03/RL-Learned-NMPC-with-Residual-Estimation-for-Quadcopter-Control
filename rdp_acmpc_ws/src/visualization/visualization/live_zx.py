@@ -463,8 +463,10 @@ def main(args=None):                                       # pragma: no cover
             self.session = os.path.abspath(g("session_dir"))
             os.makedirs(self.session, exist_ok=True)
             self.npz = os.path.join(self.session, "zx_traces.npz")
-            truth = EST.payload_truth(float(g("payload_mass")), g("payload_offset"))
-            self.rec = DemoRecorder(setpoint=g("setpoint"), truth=truth)
+            off = PT.as_floats(g("payload_offset"), 3, "payload_offset")
+            sp = PT.as_floats(g("setpoint"), 3, "setpoint")
+            truth = EST.payload_truth(float(g("payload_mass")), off)
+            self.rec = DemoRecorder(setpoint=sp, truth=truth)
             self.rec.load(self.npz)
             if g("controller"):
                 self.rec.select(g("controller"))
