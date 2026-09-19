@@ -592,15 +592,16 @@ skipabove=9pt, skipbelow=9pt
 		\textbf{Symbol} & \textbf{Meaning} & \textbf{Units} \\
 		\midrule
 		\endhead
-		$\ctrlstate\in\R^{10}$ & Control-model state $[\vec p,\vec v,\quat]$ & --- \\
+		$\ctrlstate\in\R^{17}$ & Control-model state $[\vec p,\vec v,\quat,\bodyrate,\vec\Omega]$ & --- \\
 		$\plantstate\in\R^{23}$ & Plant state (rigid body $+$ actuators $+$ filters) & --- \\
 		$\inp\in\R^{4}$ & CTBR command $[c,\bar\omega_x,\bar\omega_y,\bar\omega_z]$ & --- \\
-		$\err\in\R^{9}$ & Tracking error in the reduced attitude parametrisation & --- \\
-		$\dres\in\R^{6}$ & Model residual $[\vec a_\mathrm{res},\bodyrate_\mathrm{res}]$ & \si{\metre\per\square\second}, \si{\radian\per\second} \\
+		$\err\in\R^{16}$ & Tracking error in the reduced attitude parametrisation & --- \\
+		$\dres\in\R^{6}$ & Model residual $[\vec a_\mathrm{res},\vec\alpha_\mathrm{res}]$ & \si{\metre\per\square\second}, \si{\radian\per\square\second} \\
 		$\wrench\in\R^{6}$ & External wrench $[\vec F_\mathrm{ext},\vec\tau_\mathrm{ext}]$ & \si{\newton}, \si{\newton\metre} \\
 		$m$ & Composite vehicle mass & \si{\kilogram} \\
 		$T_{\max}$ & Maximum collective thrust & \si{\newton} \\
 		$\Omega_{\min},\Omega_{\max}$ & Idle and maximum rotor speed & \si{\radian\per\second} \\
+		$\Omega_\mathrm{sc}$ & Rotor-speed scale in the error coordinates & \si{\radian\per\second} \\
 		$\mat J$ & Composite inertia tensor about the CG & \si{\kilogram\square\metre} \\
 		$\mat R(\quat)$ & Body-to-world rotation matrix & --- \\
 		$\mat S_k,\vec c_k$ & Learned quadratic / linear cost terms at stage $k$ & --- \\
@@ -1178,35 +1179,137 @@ skipabove=9pt, skipbelow=9pt
 		\cref{eq:Bcol} against a finite difference of \cref{eq:fc-trans}.
 	\end{keybox}
 
-	\subsection{Control model (\texorpdfstring{$10$}{10} states)}
+	\subsection{Control model (\texorpdfstring{$17$}{17} states)}
+	\label{sec:ctrlmodel}
 
-	The model used \emph{inside} the optimiser is deliberately minimal:
-	$\ctrlstate=[\vec p,\vec v,\quat]\in\R^{10}$, input
-	$\inp=[c,\bar\omega_x,\bar\omega_y,\bar\omega_z]\in\R^4$.
+	The model solved \emph{inside} the optimiser carries the rigid body, the
+	autopilot's rate loop and the actuator:
+	\begin{equation}
+		\ctrlstate=[\underbrace{\vec p}_{3},\underbrace{\vec v}_{3},
+		\underbrace{\quat}_{4},\underbrace{\bodyrate}_{3},
+		\underbrace{\vec\Omega}_{4}]\in\R^{17},
+		\qquad
+		\inp=[c,\bar\omega_x,\bar\omega_y,\bar\omega_z]\in\R^{4}.
+		\label{eq:ctrlstate}
+	\end{equation}
+	The input remains the CTBR command the autopilot actually exposes, so nothing
+	about the deployment interface is assumed away; what the two extra blocks buy
+	is that the rate loop and the actuator are \emph{predicted} rather than taken
+	to be instantaneous.
 
+	Every constant below is \emph{nominal}. A controller does not know the true
+	inertia, rotor constant or motor time constant, and the mismatch between these
+	and the plant's is precisely the model error the adaptive scheme of
+	\cref{sec:adaptive} is built to estimate; using the true values here would
+	delete the object of study.
+
+	\paragraph{Commanded rate, inner loop and mixer.}
 	\begin{align}
-		\bodyrate &= \clip\!\big(\diag(\bodyrate_{\max})\,\bar{\bodyrate},\
+		\bodyrate_c &= \clip\!\big(\diag(\bodyrate_{\max})\,\bar{\bodyrate},\
 		-\bodyrate_\mathrm{lim},\ \bodyrate_\mathrm{lim}\big),
 		&\bodyrate_{\max}&=(10,10,4)\ \si{\radian\per\second},
 		\label{eq:unpack}\\[2pt]
-		\dot{\vec p} &= \vec v, &
-		\dot{\vec v} &= \frac{T(c)}{m}\vec z_b(\quat)-g\vec e_3+\vec a_\mathrm{res},
-		\label{eq:fc-trans}\\[2pt]
-		\dot{\quat} &= \tfrac12\,\quat\otimes
-		\begin{bmatrix}0\\ \bodyrate+\bodyrate_\mathrm{res}\end{bmatrix},
-		&\bodyrate_\mathrm{lim}&=\SI{220}{\degree\per\second}.
-		\label{eq:fc-rot}
+		\vec\tau_\mathrm{cmd} &= \mat J_\mathrm{nom}\big(\vec K_r\odot
+		(\bodyrate_c-\bodyrate)\big)+\bodyrate\times\mat J_\mathrm{nom}\bodyrate,
+		&\bodyrate_\mathrm{lim}&=\SI{220}{\degree\per\second},
+		\label{eq:fc-inner}\\[2pt]
+		\vec f_\mathrm{cmd} &= \clip\!\left(\mat M_\mathrm{ctrl}^{-1}
+		\begin{bmatrix}T(c)\\ \vec\tau_\mathrm{cmd}\end{bmatrix},\ 0,\ f_{\max}\right),
+		&\vec\Omega_\mathrm{cmd}&=\clip\!\big(\sqrt{\vec f_\mathrm{cmd}/K_T},\
+		\Omega_{\min},\ \Omega_{\max}\big).
+		\label{eq:fc-mixer}
 	\end{align}
 
-	Here $\dres=[\vec a_\mathrm{res},\bodyrate_\mathrm{res}]\in\R^6$ is an
-	\emph{optional model correction}, whose two blocks carry units
-	\si{\metre\per\square\second} and \si{\radian\per\second}. This is the slot the
-	adaptive scheme of \cref{sec:adaptive} writes into, and the units are stated
-	here because a dimensional inconsistency at this interface was one of the
-	defects found by the audit (\cref{sec:audit-defects}).
+	\paragraph{Rigid body and actuator.}
+	\begin{align}
+		\dot{\vec p} &= \vec v,
+		&\dot{\vec v} &= \frac{K_T\sum_i\Omega_i^{2}}{m}\vec z_b(\quat)-g\vec e_3
+		+\vec a_\mathrm{res},
+		\label{eq:fc-trans}\\[2pt]
+		\dot{\quat} &= \tfrac12\,\quat\otimes
+		\begin{bmatrix}0\\ \bodyrate\end{bmatrix},
+		&\dot{\bodyrate} &= \mat J_\mathrm{nom}^{-1}\!\left(
+		\mat M_\tau^\mathrm{nom}K_T\vec\Omega^{2}
+		-\bodyrate\times\mat J_\mathrm{nom}\bodyrate\right)+\vec\alpha_\mathrm{res},
+		\label{eq:fc-rot}\\[2pt]
+		\dot{\vec\Omega} &= \frac{\vec\Omega_\mathrm{cmd}-\vec\Omega}{\tau_m},
+		&\tau_m&=\begin{cases}\tau_\uparrow & \vec\Omega_\mathrm{cmd}\ge\vec\Omega\\
+			\tau_\downarrow & \text{otherwise.}\end{cases}
+		\label{eq:fc-act}
+	\end{align}
 
-	Integration is classical fourth-order Runge--Kutta at $\Delta t_c=\SI{0.02}{\second}$
-	with the quaternion renormalised after each step.
+	Here $\dres=[\vec a_\mathrm{res},\vec\alpha_\mathrm{res}]\in\R^6$ is an
+	\emph{optional model correction}, with units \si{\metre\per\square\second} and
+	\si{\radian\per\square\second}. This is the slot the adaptive scheme of
+	\cref{sec:adaptive} writes into; \cref{sec:disturbance} shows that, because
+	\cref{eq:fc-rot} carries a torque input, an external wrench maps into it
+	exactly.
+
+	\begin{proposition}[The model is a cascade]
+		\label{prop:cascade}
+		In \crefrange{eq:fc-trans}{eq:fc-act} the command $\inp$ enters only through
+		$\vec\Omega_\mathrm{cmd}$. Hence $\partial\dot{\ctrlstate}/\partial\inp$ is
+		supported on the rotor block alone: the input reaches the body rate only
+		through $\vec\Omega$, and the attitude only through $\bodyrate$.
+	\end{proposition}
+
+	\begin{proof}
+		$\inp$ appears in \crefrange{eq:unpack}{eq:fc-mixer} and nowhere else.
+		\Cref{eq:fc-trans,eq:fc-rot} depend on $\ctrlstate$ alone, and
+		\cref{eq:fc-act} is the only equation in which $\vec\Omega_\mathrm{cmd}$
+		occurs.
+	\end{proof}
+
+	\begin{proposition}[Steady-state gains]
+		\label{prop:dcgain}
+		Hold $\inp$ constant until $\dot{\vec\Omega}=\vec 0$ and
+		$\dot{\bodyrate}=\vec 0$. Then the model reproduces the two gains that
+		characterise the vehicle:
+		\begin{equation}
+			\bodyrate_\infty=\diag(\bodyrate_{\max})\,\bar{\bodyrate},
+			\qquad
+			\left.\frac{\partial a_z}{\partial c}\right|_\mathrm{hover}
+			=\frac{2T_{\max}(1-r)\big(r+u_\mathrm{hover}(1-r)\big)}{m},
+			\label{eq:dcgain}
+		\end{equation}
+		the second being \cref{eq:Bcol} exactly.
+	\end{proposition}
+
+	\begin{proof}
+		At $\dot{\vec\Omega}=\vec 0$ we have $\vec\Omega=\vec\Omega_\mathrm{cmd}$, so
+		by \cref{eq:fc-mixer} the realised wrench is
+		$\mat M_\mathrm{ctrl}K_T\vec\Omega^{2}=[T(c),\vec\tau_\mathrm{cmd}]\transp$
+		whenever the clips are inactive. Substituting the moment part into
+		\cref{eq:fc-rot} and setting $\dot{\bodyrate}=\vec 0$ leaves
+		$\vec K_r\odot(\bodyrate_c-\bodyrate)=\vec 0$, i.e.\ $\bodyrate=\bodyrate_c$,
+		which is \cref{eq:unpack}. For the collective, a symmetric change of $c$
+		leaves the moment rows unchanged, so $K_T\sum_i\Omega_i^{2}=T(c)$ and the map
+		$c\mapsto a_z$ is \cref{eq:thrustmap} divided by $m$, whose derivative at
+		hover is \cref{eq:Bcol}.
+	\end{proof}
+
+	\begin{remark}[Why the inner loop is purely proportional]
+		The autopilot of \cref{eq:ratepid} is a PID, and its integrator drives
+		$\bodyrate_f\to\bodyrate_c$, so its steady-state rate gain is exactly
+		$\diag(\bodyrate_{\max})$. Reproducing $\vec K_d$ while omitting $\vec K_i$
+		would instead give
+		$\bodyrate_\infty=\big(\vec K_r\oslash(\vec K_r+\vec K_d)\big)\odot
+		\diag(\bodyrate_{\max})\bar{\bodyrate}$ --- a \SI{2}{\percent} droop on roll
+		and pitch. That is a \emph{standing} gain error, not a transient: it
+		integrates directly into attitude error over the horizon, which is worse than
+		a slightly fast transient. Carrying $\vec I_\omega$ as three further states
+		would remove it, at the cost of a mode the horizon barely resolves. Dropping
+		the pair is therefore the choice that preserves \cref{prop:dcgain}, and it is
+		the reason \cref{eq:fc-inner} has no derivative or integral term.
+	\end{remark}
+
+	\paragraph{Integration.} Classical fourth-order Runge--Kutta over
+	$\Delta t_c=\SI{0.02}{\second}$ in $n^{c}_\mathrm{sub}=2$ sub-steps, with the
+	quaternion renormalised and the rotor speeds kept physical after each. The
+	sub-stepping is dictated by the actuator rather than by accuracy in the slow
+	states: the rotor pole $\tau_\uparrow=\SI{12.5}{\milli\second}$ is \emph{faster}
+	than the control period, so $\Delta t_c/\tau_\uparrow=1.6$ and a single RK4 step
+	resolves the fastest mode of \cref{eq:fc-act} only marginally.
 
 	\begin{remark}[The input box is the reachable set]
 		Because of the \SI{220}{\degree\per\second} clip in \cref{eq:unpack}, the
@@ -1326,17 +1429,23 @@ skipabove=9pt, skipbelow=9pt
 	\label{sec:error}
 	%-----------------------------------------------------------------------
 
-	Tracking is expressed in a reduced $9$-dimensional error, which removes the
+	Tracking is expressed in a reduced $16$-dimensional error, which removes the
 	quaternion's redundancy while remaining a local diffeomorphism:
 	\begin{equation}
 		\err=\begin{bmatrix}\vec p-\vec p_\refsym\\ \vec v-\vec v_\refsym\\
-			2\,\sgn(q_{e,w})\,\vec q_{e,v}\end{bmatrix}\in\R^9,
+			2\,\sgn(q_{e,w})\,\vec q_{e,v}\\
+			\bodyrate-\bodyrate_\refsym\\
+			(\vec\Omega-\vec\Omega_\refsym)/\Omega_\mathrm{sc}
+		\end{bmatrix}\in\R^{16},
 		\qquad \quat_e=\quat_\refsym^{*}\otimes\quat.
 		\label{eq:err}
 	\end{equation}
 	The sign selects the shorter rotation. For a tilt $\vartheta$ about a unit axis,
 	$\|\err_{7:9}\|=2\sin(\vartheta/2)$, so the parametrisation is exact for
-	$\vartheta<\pi$ and first-order equivalent to a rotation vector.
+	$\vartheta<\pi$ and first-order equivalent to a rotation vector. The rate and
+	rotor blocks are plain vector differences --- neither lives on a manifold ---
+	so \cref{lem:inverse} inverts the whole of \cref{eq:err}, not merely its
+	attitude part.
 
 	\begin{lemma}[Exact inverse of the attitude error]
 		\label{lem:inverse}
@@ -1368,6 +1477,41 @@ skipabove=9pt, skipbelow=9pt
 		\SI{120}{\degree}. The implementation used the approximation; this is
 		defect~E\nbd 1 in \cref{sec:audit-defects}, low severity but exactly
 		quantifiable, and a one-line correction.
+	\end{remark}
+
+	\begin{remark}[The rotor scale is a change of coordinates, not a weight]
+		\label{rem:omsc}
+		$\Omega_\mathrm{sc}=\Omega_{\max}$ enters \cref{eq:err} and its inverse
+		symmetrically, so it is a similarity transform of the error space: no
+		trajectory, gain or optimal cost depends on the value chosen. Its purpose is
+		conditioning. Rotor speeds are $\mathcal O(10^{3})\,\si{\radian\per\second}$
+		while the remaining blocks are $\mathcal O(10^{-1})$, and the learned stage
+		weights of \cref{sec:acmpc} already span five decades; leaving the rotor block
+		unscaled would make the conditioning of $\mat Q_{uu}$ a function of the units
+		in which rotor speed happens to be expressed.
+	\end{remark}
+
+	\begin{remark}[The reference rotor speed, and why $\err=\vec 0$ is exact at trim]
+		\label{rem:omref}
+		Differential flatness fixes $\vec p_\refsym$, $\vec v_\refsym$ and
+		$\quat_\refsym$, and a centred difference of $\quat_\refsym$ fixes
+		$\bodyrate_\refsym$. The reference rotor speed follows by inverting the
+		nominal allocator at the reference wrench,
+		\begin{equation}
+			\vec\tau_\refsym=\mat J_\mathrm{nom}\dot{\bodyrate}_\refsym
+			+\bodyrate_\refsym\times\mat J_\mathrm{nom}\bodyrate_\refsym,
+			\qquad
+			\vec\Omega_\refsym=\clip\!\left(\sqrt{\mat M_\mathrm{ctrl}^{-1}
+				\begin{bmatrix}T_\refsym\\ \vec\tau_\refsym\end{bmatrix}\Big/K_T},\
+			\Omega_{\min},\ \Omega_{\max}\right),
+			\label{eq:omref}
+		\end{equation}
+		with $\dot{\bodyrate}_\refsym$ a centred difference of $\bodyrate_\refsym$ ---
+		so no closed-form jerk or snap of the reference path is required. At hover
+		$\vec\tau_\refsym=\vec 0$ and $T_\refsym=mg$, giving
+		$\vec\Omega_\refsym=\sqrt{mg/4K_T}$, which is exactly the trimmed rotor speed.
+		Hence $\err$ vanishes identically on the trimmed hover state, and $\err=\vec 0$
+		is a genuine equilibrium of \cref{eq:edyn} rather than an approximate one.
 	\end{remark}
 
 	%-----------------------------------------------------------------------
@@ -1494,8 +1638,8 @@ skipabove=9pt, skipbelow=9pt
 
 	\subsection{The optimal control problem}
 
-	With $N_\tau=N_e+N_u=13$, stage weights $\mat S_k\in\mathbb S^{13}_{+}$ and
-	linear terms $\vec c_k\in\R^{13}$:
+	With $N_\tau=N_e+N_u=20$, stage weights $\mat S_k\in\mathbb S^{20}_{+}$ and
+	linear terms $\vec c_k\in\R^{20}$:
 	\begin{equation}
 		\begin{aligned}
 			\min_{\delta\inp_{0:N-1}}\quad
@@ -1591,14 +1735,18 @@ skipabove=9pt, skipbelow=9pt
 	\begin{definition}[Model residual]
 		\label{def:residual}
 		\begin{equation}
-			\dres=\begin{bmatrix}\vec a_\mathrm{plant}-\vec a_\mathrm{model}\\
-				\bodyrate_\mathrm{plant}-\bodyrate_\mathrm{cmd}\end{bmatrix}
-			\in\R^6,\qquad
-			\vec a_\mathrm{model}=\frac{T(\inp)}{m}\vec z_b-g\vec e_3,
+			\dres=\begin{bmatrix}
+				\vec a_\mathrm{plant}-\vec a_\mathrm{model}\\
+				\dot{\bodyrate}_\mathrm{plant}-\dot{\bodyrate}_\mathrm{model}
+			\end{bmatrix}\in\R^6,
 			\label{eq:dres}
 		\end{equation}
-		with units $[\si{\metre\per\square\second},\ \si{\radian\per\second}]$. This is
-		exactly the slot $\dres$ occupies in \crefrange{eq:fc-trans}{eq:fc-rot}.
+		where $\vec a_\mathrm{model}$ and $\dot{\bodyrate}_\mathrm{model}$ are the
+		right-hand sides of \cref{eq:fc-trans,eq:fc-rot} evaluated with
+		$\dres=\vec 0$. Units $[\si{\metre\per\square\second},\
+		\si{\radian\per\square\second}]$. This is exactly the slot $\dres$ occupies in
+		\crefrange{eq:fc-trans}{eq:fc-rot}: both blocks are what the nominal model
+		fails to account for, in the coordinates the model itself uses.
 	\end{definition}
 
 	\begin{definition}[External wrench]
@@ -1616,31 +1764,58 @@ skipabove=9pt, skipbelow=9pt
 
 	\begin{proposition}[Conversion]
 		\label{prop:convert}
-		The force block converts exactly, $\vec a_\mathrm{res}=\vec F_\mathrm{ext}/m$.
-		The moment block has no exact image in $\bodyrate_\mathrm{res}$, because the
-		$10$-state model has no torque input. Under the rate loop \cref{eq:ratepid}, and
-		over horizons short compared with the integral time constant, a constant moment
-		produces the first-order rate offset
+		\Cref{def:residual,def:wrench} are two coordinate representations of the same
+		disturbance, related by the invertible, constant, block-diagonal map
 		\begin{equation}
-			\bodyrate_\mathrm{res}\approx G(t)\,\diag(\vec K_r)^{-1}\mat J_\mathrm{nom}^{-1}
-			\vec\tau_\mathrm{ext},
-			\label{eq:tau2rate}
+			\dres=\begin{bmatrix}m^{-1}\mat I_3 & \mat 0\\[2pt]
+				\mat 0 & \mat J_\mathrm{nom}^{-1}\end{bmatrix}\wrench,
+			\qquad\text{that is}\qquad
+			\vec a_\mathrm{res}=\frac{\vec F_\mathrm{ext}}{m},
+			\quad
+			\vec\alpha_\mathrm{res}=\mat J_\mathrm{nom}^{-1}\vec\tau_\mathrm{ext}.
+			\label{eq:convert}
 		\end{equation}
-		where $G(t)$ is the exact closed-loop gain of the rate loop to a step moment and
-		$G(0^+)=1$ recovers the $K_i$-neglected steady state.
+		Both blocks are exact, and the map is invertible because $m>0$ and
+		$\mat J_\mathrm{nom}\succ0$.
 	\end{proposition}
 
-	\begin{proof}[Justification]
-		Neglecting $\vec K_d$ and the gyro filter, the closed-loop rate error obeys
-		$\ddot{\vec\epsilon}+\vec K_r\dot{\vec\epsilon}+\vec K_i\vec\epsilon=0$ with
-		$\vec\epsilon(0)=\vec 0$, $\dot{\vec\epsilon}(0)=\mat J^{-1}\vec\tau_\mathrm{ext}$,
-		giving $G(t)=K_r(e^{r_+t}-e^{r_-t})/(r_+-r_-)$. The integrator removes the
-		offset on a time scale $\sim1/K_i$, so the $K_i$-neglected form is the
-		$t\to0$ limit. Measured: $G=\num{0.901}$ at \SI{0.5}{\second} and
-		$\num{0.103}$ at \SI{8}{\second}. It is a model, not an identity, and
-		\cref{sec:res-adaptive} measures it against the true residual rather than
-		assuming it.
+	\begin{proof}
+		The force block is \cref{eq:Fext} divided by $m$, which is the definition of
+		$\vec a_\mathrm{res}$ in \cref{eq:fc-trans}. For the moment block,
+		\cref{eq:tauext} defines $\vec\tau_\mathrm{ext}$ as the moment the nominal
+		rigid body fails to resolve, while \cref{eq:fc-rot} maps any resolved moment
+		to angular acceleration through $\mat J_\mathrm{nom}^{-1}$ and carries
+		$\vec\alpha_\mathrm{res}$ additively on the same line. An unmodelled moment
+		$\vec\tau_\mathrm{ext}$ is therefore exactly an unmodelled angular
+		acceleration $\mat J_\mathrm{nom}^{-1}\vec\tau_\mathrm{ext}$.
 	\end{proof}
+
+	\begin{remark}[Exactness here is structural, not fortunate]
+		\label{rem:exactness}
+		\Cref{eq:convert} holds because \cref{eq:fc-rot} has a torque input. A control
+		model whose deepest rotational state is attitude has no image for the moment
+		block at all: a moment can then only be represented through the rate offset it
+		eventually produces, and that offset is a property of the autopilot's
+		closed-loop response --- it depends on how long the moment has been acting
+		relative to the rate loop's integral time constant, so the same physical
+		disturbance has different representations at different times. Carrying
+		$\bodyrate$ as a state removes that dependence. One consequence is that the
+		estimator of \cref{sec:adaptive} can be trained against the wrench, which is
+		what a force--torque sensor measures and what \cref{def:wrench} is expressed
+		in, and its prediction converted for the optimiser without a modelling step in
+		between.
+	\end{remark}
+
+	\begin{remark}[What the exact conversion does \emph{not} remove]
+		\Cref{prop:convert} is exact as a change of coordinates between the two
+		descriptions of the disturbance. It says nothing about whether the nominal
+		$m$ and $\mat J_\mathrm{nom}$ used in it are the true ones --- by construction
+		they are not, and the difference is part of what the estimator must learn. Nor
+		does it make the \emph{prediction} exact: \cref{eq:fc-inner} is a proportional
+		reduction of a PID rate loop, so a moment that the autopilot's integrator has
+		already absorbed is still represented here as a persistent angular
+		acceleration.
+	\end{remark}
 
 	\begin{cautionbox}
 		\textbf{Numerical illustration.} With the study's randomisation magnitudes
@@ -1648,8 +1823,11 @@ skipabove=9pt, skipbelow=9pt
 		$\tau_\mathrm{DR}=\SI{0.3572}{\newton\metre}$: feeding the raw wrench into the
 		residual slot injects \SI{6.478}{\metre\per\square\second} where
 		\SI{3.138}{\metre\per\square\second} is correct --- a factor $m=\vMass$ --- and
-		\SI{0.3572}{\radian\per\second} where \cref{eq:tau2rate} gives a quite
-		different number. See defect~D\nbd 1.
+		\SI{0.3572}{\radian\per\square\second} where \cref{eq:convert} gives
+		$\tau_\mathrm{DR}/J_{xx}=\SI{14.99}{\radian\per\square\second}$, short by the
+		factor $\mat J_\mathrm{nom}$. The two errors point in opposite directions ---
+		the force block too large, the moment block too small --- which is exactly why
+		neither is caught by a sanity check on magnitude. See defect~D\nbd 1.
 	\end{cautionbox}
 
 	%-----------------------------------------------------------------------
@@ -1672,9 +1850,9 @@ skipabove=9pt, skipbelow=9pt
 	\subsection{Observation}
 
 	The policy is \emph{disturbance-blind} by default, receiving
-	$n_o=40$ features:
+	$n_o=47$ features:
 	\begin{equation}
-		\vec o=\Big[\underbrace{\err}_{9}\ \Big\|\
+		\vec o=\Big[\underbrace{\err}_{16}\ \Big\|\
 		\underbrace{\{\vec p_\refsym(t{+}5h\Delta t_c)-\vec p,\ \vec v_\refsym(t{+}5h\Delta t_c)\}_{h=1}^{3}}_{18}\ \Big\|\
 		\underbrace{\clip(\textstyle\int\!\err_p,\pm5)}_{3}\ \Big\|\
 		\underbrace{\overline{\delta\inp}}_{4}\ \Big\|\
@@ -2112,7 +2290,7 @@ skipabove=9pt, skipbelow=9pt
 	\end{enumerate}
 
 	\begin{remark}
-		\LLTC{} leaves the stage cost --- $N_e+N_u=13$ hand-chosen weights --- entirely
+		\LLTC{} leaves the stage cost --- $N_e+N_u=20$ hand-chosen weights --- entirely
 		untouched. The tuning criticism of \cref{sec:baselines} therefore still applies
 		in full, which is what motivates Increment~2.
 	\end{remark}
@@ -2345,8 +2523,8 @@ skipabove=9pt, skipbelow=9pt
 		\si{\newton} and moments in \si{\newton\metre} --- is dimensionally wrong and,
 		because it is wrong \emph{consistently} between training and evaluation,
 		produces no error message. \Cref{prop:convert} gives the correct conversion,
-		including \cref{eq:tau2rate} for the moment block, which the original
-		implementation discarded entirely.
+		exact in both blocks; the original implementation discarded the moment block
+		entirely.
 	\end{cautionbox}
 
 	\subsection{Disturbance scenarios}
@@ -3575,38 +3753,48 @@ skipabove=9pt, skipbelow=9pt
 		sampling rate and the recurrent encoder is not earning its state.
 	\end{keybox}
 
-	\subsection{Validity of the moment conversion}
+	\subsection{Consistency of the two disturbance representations}
+
+	\Cref{prop:convert} asserts that \cref{def:residual,def:wrench} describe the
+	same disturbance in different coordinates. That is a statement about the model,
+	so it is checked against the plant rather than assumed: \cref{tab:res-dmod}
+	converts the measured wrench through \cref{eq:convert} and compares it with the
+	measured residual, on scenarios chosen so that the moment block is the dominant
+	one.
 
 	\begin{table}[htbp]
 		\centering
-		\caption{The (4.13)-style conversion of \cref{eq:tau2rate} measured against the
-			true residual of \cref{def:residual}. The force block converts exactly by
-			$1/m$; the moment block is a \emph{model} and its error is scenario
-			dependent. A ratio of $1$ would mean the conversion is exact. Source:
+		\caption{The conversion of \cref{eq:convert} measured against the true
+			residual of \cref{def:residual}. A ratio of $1$ means the two
+			representations agree, which \cref{prop:convert} predicts for both blocks.
+			The \texttt{none} mode zeroes the moment block and is retained only as an
+			ablation. Source:
 			\texttt{artifacts/acmpc\_adaptive/nb5\_dmod\_validity.csv}.}
 		\label{tab:res-dmod}
 		\small
 		\begin{tabularx}{\linewidth}{@{}l l X r r r@{}}
 			\toprule
-			\textbf{Scenario} & \textbf{Level} & \textbf{Mode} & $\|\bodyrate_\mathrm{res}\|$ converted & $\|\bodyrate_\mathrm{res}\|$ true & \textbf{ratio} \\
+			\textbf{Scenario} & \textbf{Level} & \textbf{Mode} & $\|\vec\alpha_\mathrm{res}\|$ converted & $\|\vec\alpha_\mathrm{res}\|$ true & \textbf{ratio} \\
 			\midrule
-			central & \BL & first\_order / none / closed\_loop & \BL & \BL & \BL \\
-			asym & \BL & first\_order / none / closed\_loop & \BL & \BL & \BL \\
-			asym & \BL & first\_order / none / closed\_loop & \BL & \BL & \BL \\
+			central & \BL & exact / none & \BL & \BL & \BL \\
+			asym & \BL & exact / none & \BL & \BL & \BL \\
+			asym & \BL & exact / none & \BL & \BL & \BL \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
 
 	\begin{keybox}
-		\keyhead{Why all three conversion modes are tabled rather than one being declared correct}
-		\Cref{eq:tau2rate} neglects the rate loop's integrator, so it is the
-		short-transient limit. On a \emph{standing} moment the integrator has absorbed
-		most of the disturbance and the true rate residual is near zero, which is what
-		the \texttt{none} mode encodes; on a genuine transient the first-order form is
-		right. The two bounds can differ by orders of magnitude on the same airframe,
-		and which is appropriate depends on how long the moment has been acting
-		relative to $1/K_i$. Neither bound is safe to assume, so \cref{tab:res-dmod}
-		reports the measurement and the closed-loop results name the mode they used.
+		\keyhead{What this table can and cannot establish}
+		A ratio near unity confirms that the conversion is implemented as
+		\cref{eq:convert} states and that the two accessors agree on the plant. It
+		does \emph{not} establish that the nominal $m$ and $\mat J_\mathrm{nom}$ in
+		\cref{eq:convert} are the true ones --- under randomisation they are not, by
+		construction --- nor that the model's \emph{prediction} of the disturbed
+		trajectory is exact, since \cref{eq:fc-inner} is a proportional reduction of a
+		PID rate loop. What it rules out is the failure mode that motivates
+		\cref{sec:disturbance}: a residual channel whose two descriptions disagree, so
+		that the quantity the estimator predicts is not the quantity the optimiser
+		consumes.
 	\end{keybox}
 
 	\subsection{Closed loop}
@@ -3859,7 +4047,7 @@ skipabove=9pt, skipbelow=9pt
 			D-7 & S1 & The optimiser's input box was the nominal rate box, \SI{62}{\percent} of whose roll/pitch extent the plant cannot reach & Box shrunk to the reachable set; the clip is not applied inside the dynamics, which would singularise $\mat Q_{uu}$ \\
 			B-1 & S1 & Exploration noise did not reach the action, so the PPO ratio compared densities that generated nothing & Sample $a=\mu_\theta+\sigma\varepsilon$ on the action; learn $\log\sigma$; add a KL trust region \\
 			D-1 & S1 & The physical wrench (\si{\newton}, \si{\newton\metre}) was supplied to the model-residual slot (\si{\metre\per\square\second}, \si{\radian\per\second}). Wrong consistently in training and evaluation, hence silent & Route through \cref{prop:convert}; assert magnitude bounds at the interface \\
-			D-3 & S1 & The conversion in use discarded the moment block entirely & Adopt \cref{eq:tau2rate} with the exact closed-loop gain; table all three modes \\
+			D-3 & S1 & The conversion in use discarded the moment block entirely & Adopt \cref{eq:convert}, exact in both blocks; measure it against the true residual \\
 			M-1 & S1 & The allocator was rebuilt from the shifted CG, giving the inner loop exact payload knowledge & Separate plant truth from controller belief \\
 			M-2 & S1 & Disturbance randomisation at \SI{32}{\percent} of weight saturated training & Reduce until saturation is below the gate; gate on it \\
 			A-1 & S1 & The ``frozen reference'' control column was not frozen --- it was bit-identical to the preview column & Build a controller that genuinely cannot bind the environment; assert the columns differ \\
@@ -4068,9 +4256,13 @@ skipabove=9pt, skipbelow=9pt
 		desirable in theory, but stage and terminal costs must stay quasi-convex to
 		keep the inner solve tractable. Positive sums of convex functions and
 		sum-of-squares constructions are the natural next step and were not explored.
-		\item \textbf{Moment injection is approximate.} \Cref{eq:tau2rate} is a model of
-		the rate loop's response, not an identity, and \cref{tab:res-dmod} is included
-		precisely because its validity is scenario dependent rather than assumed.
+		\item \textbf{The rate loop is reduced, not reproduced.} \Cref{eq:fc-inner}
+		is proportional, so the model does not carry the autopilot's integrator. A
+		moment that integrator has already absorbed is still predicted as a persistent
+		angular acceleration, which bounds how well any residual estimate can describe
+		a long-standing disturbance. Restoring $\vec I_\omega$ would close the gap at
+		the cost of three further states and the steady-state gain of
+		\cref{prop:dcgain}.
 		\item \textbf{Computational budget.} Seed sweeps are limited to three, which is
 		too few to separate some of the competing explanations \cref{sec:res-dr} has
 		to consider.
@@ -4449,47 +4641,32 @@ skipabove=9pt, skipbelow=9pt
 	Continuous hover linearisation in the error coordinates of \cref{eq:err}:
 	\begin{equation}
 		\mat A_c=\begin{bmatrix}
-			\mat 0 & \mat I_3 & \mat 0\\
-			\mat 0 & \mat 0 & -g\,\mat\Xi\\
-			\mat 0 & \mat 0 & \mat 0
+			\mat 0 & \mat I_3 & \mat 0 & \mat 0 & \mat 0\\
+			\mat 0 & \mat 0 & +g\,\mat\Xi & \mat 0 & \ast\\
+			\mat 0 & \mat 0 & \mat 0 & \mat I_3 & \mat 0\\
+			\mat 0 & \mat 0 & \mat 0 & \mat 0 & \ast\\
+			\mat 0 & \mat 0 & \mat 0 & \ast & \ast
 		\end{bmatrix},
 		\qquad
-		\mat B_c=\begin{bmatrix}
-			\mat 0 & \mat 0\\
-			\dfrac{\partial a_z}{\partial\delta u_0}\vec e_3 & \mat 0\\
-			\mat 0 & \tfrac12\diag(\bodyrate_{\max})
-		\end{bmatrix},
+		\mat B_c=\begin{bmatrix}\mat 0\\ \mat 0\\ \mat 0\\ \mat 0\\ \ast\end{bmatrix},
 		\qquad
 		\mat\Xi=\begin{bmatrix}0&1&0\\-1&0&0\\0&0&0\end{bmatrix},
 	\end{equation}
-	discretised exactly by the matrix exponential at $\Delta t_c$, after which
-	$\mat P_T$ and $\mat K_\mathrm{LQR}$ follow from the discrete algebraic Riccati
-	equation. Both the $\mat A_c$ and $\mat B_c$ blocks are asserted against a
-	finite difference of \crefrange{eq:fc-trans}{eq:fc-rot} at import time.
+	where $\ast$ denotes a nonzero block and the row order follows \cref{eq:err}.
+	Two structural facts are worth reading off. The velocity/attitude block carries
+	$+g\,\mat\Xi$: with $\vec\delta=2\vec q_{e,v}$ one has
+	$\vec z_b\approx\vec e_3+\vec\delta\times\vec e_3$, and the opposite sign yields
+	an LQR gain whose closed-loop spectral radius on the true plant exceeds unity.
+	And $\dot{\vec\delta}=\bodyrate$ places the attitude/rate coupling in
+	$\mat A_c$, so by \cref{prop:cascade} $\mat B_c$ is zero on every row but the
+	rotor block --- the input reaches attitude only through two integrations. The
+	gains that a direct attitude input would have stood for survive as the
+	steady-state statements of \cref{prop:dcgain}, and it is those that are asserted
+	numerically at import time, together with the $\mat A_c$ blocks above.
 
-	\section{Closed-loop gain of the rate loop to a step moment}
-
-	Neglecting $\vec K_d$ and the gyro filter, the rate error under
-	\cref{eq:ratepid} against a constant external moment obeys
-	\begin{equation}
-		\ddot{\vec\epsilon}+\vec K_r\dot{\vec\epsilon}+\vec K_i\vec\epsilon=\vec 0,
-		\qquad \vec\epsilon(0)=\vec 0,\quad
-		\dot{\vec\epsilon}(0)=\mat J^{-1}\vec\tau_\mathrm{ext},
-	\end{equation}
-	whose solution is
-	$\vec\epsilon(t)=\mat J^{-1}\vec\tau_\mathrm{ext}(e^{r_+t}-e^{r_-t})/(r_+-r_-)$
-	with $r_\pm=\big(-K_r\pm\sqrt{K_r^2-4K_i}\big)/2$. Normalising by the
-	$K_i$-neglected steady state $\mat J^{-1}\vec\tau_\mathrm{ext}/K_r$ gives the
-	gain used in \cref{eq:tau2rate},
-	\begin{equation}
-		G(t)=K_r\,\frac{e^{r_+t}-e^{r_-t}}{r_+-r_-},
-		\qquad G(0^+)=1 .
-	\end{equation}
-	With the gains of \cref{tab:vehicle}, $G=\num{0.901}$ at \SI{0.5}{\second} and
-	$\num{0.103}$ at \SI{8}{\second}: \cref{eq:tau2rate} is a short-transient model,
-	and applying it to a moment that has been standing for seconds overstates the
-	rate residual substantially. This is why \cref{tab:res-dmod} measures the
-	conversion rather than assuming it.
+	The system is discretised exactly by the matrix exponential at $\Delta t_c$,
+	after which $\mat P_T$ and $\mat K_\mathrm{LQR}$ follow from the discrete
+	algebraic Riccati equation.
 
 	\section{Peak demand of the superellipse}
 
@@ -4597,7 +4774,7 @@ skipabove=9pt, skipbelow=9pt
 			\textbf{Id} & \textbf{Sev.} & \textbf{Silent} & \textbf{Description and resolution} \\
 			\midrule
 			D-1 & S1 & yes & The wrench (\si{\newton},\si{\newton\metre}) was supplied to the residual slot (\si{\metre\per\square\second},\si{\radian\per\second}); force high by the factor $m$, moment dimensionally unrelated. Wrong consistently on both sides of the train/evaluate boundary, hence no error message. Route through \cref{prop:convert}; assert magnitude bounds. \\
-			D-3 & S1 & yes & The conversion discarded the moment block entirely. Adopt \cref{eq:tau2rate} with the exact closed-loop gain; report all three modes and measure them against the true residual (\cref{tab:res-dmod}). \\
+			D-3 & S1 & yes & The conversion discarded the moment block entirely. Adopt \cref{eq:convert}, which is exact in both blocks because \cref{eq:fc-rot} carries a torque input, and measure it against the true residual (\cref{tab:res-dmod}). \\
 			D-5 & S2 & yes & The helix reference was inconsistent when the feasibility cap bound. Demand and realisation now agree by construction. \\
 			M-1 & S1 & yes & The allocator was rebuilt from the shifted CG, giving the inner loop exact payload knowledge unlike a real allocator. Separate plant truth from controller belief. \\
 			M-2 & S1 & partly & Disturbance randomisation at \SI{32}{\percent} of weight saturated training. Reduced, and the saturation fraction became a gate. \\
