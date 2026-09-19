@@ -1790,7 +1790,7 @@ skipabove=9pt, skipbelow=9pt
 		acceleration $\mat J_\mathrm{nom}^{-1}\vec\tau_\mathrm{ext}$.
 	\end{proof}
 
-	\begin{remark}[Exactness here is structural, not fortunate]
+	\begin{remark}[Exactness is structural]
 		\label{rem:exactness}
 		\Cref{eq:convert} holds because \cref{eq:fc-rot} has a torque input. A control
 		model whose deepest rotational state is attitude has no image for the moment
@@ -1800,9 +1800,9 @@ skipabove=9pt, skipbelow=9pt
 		relative to the rate loop's integral time constant, so the same physical
 		disturbance has different representations at different times. Carrying
 		$\bodyrate$ as a state removes that dependence. One consequence is that the
-		estimator of \cref{sec:adaptive} can be trained against the wrench, which is
-		what a force--torque sensor measures and what \cref{def:wrench} is expressed
-		in, and its prediction converted for the optimiser without a modelling step in
+		estimator of \cref{sec:adaptive} can be trained against the wrench --- what a
+		force--torque sensor measures, and what \cref{def:wrench} is expressed in ---
+		and its prediction converted for the optimiser with no modelling step in
 		between.
 	\end{remark}
 
@@ -3765,27 +3765,41 @@ skipabove=9pt, skipbelow=9pt
 	\begin{table}[htbp]
 		\centering
 		\caption{The conversion of \cref{eq:convert} measured against the true
-			residual of \cref{def:residual}. A ratio of $1$ means the two
-			representations agree, which \cref{prop:convert} predicts for both blocks.
-			The \texttt{none} mode zeroes the moment block and is retained only as an
-			ablation. Source:
+			residual of \cref{def:residual}, under \texttt{mode=exact}. A ratio of $1$
+			means the two representations agree, which \cref{prop:convert} predicts
+			for \emph{both} blocks. The \texttt{none} ablation zeroes the moment block
+			by construction and is omitted here. The \texttt{central} scenario places
+			the payload on the axis, so it carries no moment and the moment ratio is
+			undefined: both sides are at the float noise floor,
+			\SI{5.52e-15}{\radian\per\square\second}. Source:
 			\texttt{artifacts/acmpc\_adaptive/nb5\_dmod\_validity.csv}.}
 		\label{tab:res-dmod}
 		\small
-		\begin{tabularx}{\linewidth}{@{}l l X r r r@{}}
+		\begin{tabularx}{\linewidth}{@{}l r X r r r@{}}
 			\toprule
-			\textbf{Scenario} & \textbf{Level} & \textbf{Mode} & $\|\vec\alpha_\mathrm{res}\|$ converted & $\|\vec\alpha_\mathrm{res}\|$ true & \textbf{ratio} \\
+			\textbf{Scenario} & \textbf{Level} & & $\|\vec\alpha_\mathrm{res}\|$ conv. & $\|\vec\alpha_\mathrm{res}\|$ true & \textbf{ratio} \\
 			\midrule
-			central & \BL & exact / none & \BL & \BL & \BL \\
-			asym & \BL & exact / none & \BL & \BL & \BL \\
-			asym & \BL & exact / none & \BL & \BL & \BL \\
+			central & 0.15 & force  & \multicolumn{2}{c}{$1.4709900000000$} & $1.000000000000$ \\
+			        &      & moment & \multicolumn{2}{c}{$5.52\times10^{-15}$} & --- \\
+			\addlinespace[2pt]
+			asym    & 0.01 & force  & \multicolumn{2}{c}{$0.0980660004983$} & $1.000000000000$ \\
+			        &      & moment & $2.0857104599945$ & $2.0857104599945$ & $1.000000000000$ \\
+			\addlinespace[2pt]
+			asym    & 0.07 & force  & \multicolumn{2}{c}{$0.6864620030776$} & $1.000000000000$ \\
+			        &      & moment & $14.599989547222$ & $14.599989547222$ & $1.000000000000$ \\
 			\bottomrule
 		\end{tabularx}
 	\end{table}
 
+	Both blocks agree to the last significant figure the double-precision
+	arithmetic carries, on every scenario where the block is non-zero. The
+	moment ratios are $0.9999999999999998$ and $1.0$ as read from the artefact;
+	they are quoted to twelve figures above only to make the point that the
+	agreement is exact rather than close.
+
 	\begin{keybox}
 		\keyhead{What this table can and cannot establish}
-		A ratio near unity confirms that the conversion is implemented as
+		A ratio of unity confirms that the conversion is implemented as
 		\cref{eq:convert} states and that the two accessors agree on the plant. It
 		does \emph{not} establish that the nominal $m$ and $\mat J_\mathrm{nom}$ in
 		\cref{eq:convert} are the true ones --- under randomisation they are not, by
@@ -3796,6 +3810,21 @@ skipabove=9pt, skipbelow=9pt
 		that the quantity the estimator predicts is not the quantity the optimiser
 		consumes.
 	\end{keybox}
+
+	\begin{cautionbox}
+		\textbf{The force block was not exact until the nominal thrust models were
+		reconciled.} \Cref{eq:tauext} has always resolved the nominal moment from the
+		\emph{actual} rotor speeds, $\mat M_\tau^\mathrm{nom}K_T\vec\Omega^2$, while
+		\cref{eq:Fext} took its thrust from the \emph{commanded} collective $T(c)$.
+		The two lines of the same definition therefore disagreed about what the
+		nominal model predicts. That was invisible while the control model's own
+		thrust also came from the command; once \cref{eq:fc-trans} computes it as
+		$K_T\sum_i\Omega_i^2$, the force block of \cref{eq:convert} was inexact by the
+		rotor-lag term --- measured at $2.1\times10^{-5}$ of the collective in settled
+		flight, giving the $10^{-4}$ relative disagreement visible in the force column
+		before the correction. With both lines taking rotor thrust, the force ratio
+		joins the moment ratio at unity.
+	\end{cautionbox}
 
 	\subsection{Closed loop}
 
