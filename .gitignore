@@ -7,3 +7,13 @@ artifacts/videos/
 build/
 install/
 log/
+
+# LaTeX build products
+report/*.aux
+report/*.fdb_latexmk
+report/*.fls
+report/*.lo[fgt]
+report/*.log
+report/*.out
+report/*.toc
+report/*.pdf
