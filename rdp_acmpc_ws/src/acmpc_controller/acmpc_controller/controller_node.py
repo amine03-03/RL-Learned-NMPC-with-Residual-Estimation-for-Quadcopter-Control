@@ -301,6 +301,10 @@ def main(args=None):                                       # pragma: no cover
                     f"solver compiled in {warm:.1f} s (before the loop, so the "
                     f"offboard heartbeat is never interrupted by it)")
 
+            # the study module the solver actually ran against, not a
+            # re-import and not a literal
+            self.om_max = np.asarray(self.ctrl.X.OM_MAX, float)
+
             self.t0 = None
             self.armed = False
             self.lost_offboard = False
@@ -449,11 +453,18 @@ def main(args=None):                                       # pragma: no cover
             mm.body_rate = True
             self.pub_mode.publish(mm)
 
-            om = F.ctbr_to_px4_rates(u[1:4] * np.array([10.0, 10.0, 4.0]))
+            # X.OM_MAX, not a literal: the solver's input box is the
+            # *reachable* rate set (U_HI[1:] = rate_max / om_max), so
+            # OM_MAX * u[1:4] lands exactly on +-rate_max and needs no clamp
+            # here.  Restating either constant would break that identity
+            # silently the first time the study is retuned -- check_glue pins
+            # both.
+            om = F.ctbr_to_px4_rates(u[1:4] * self.om_max)
+            th = F.ctbr_to_px4_thrust(u[0])                # FRD, down-positive
             r = self.RatesSetpoint()
             r.timestamp = int(now * 1e6)
             r.roll, r.pitch, r.yaw = float(om[0]), float(om[1]), float(om[2])
-            r.thrust_body = [0.0, 0.0, float(-u[0])]       # FRD, down-positive
+            r.thrust_body = [float(th[0]), float(th[1]), float(th[2])]
             self.pub_rates.publish(r)
 
             aux = Float64MultiArray()

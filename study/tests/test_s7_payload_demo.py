@@ -777,3 +777,45 @@ def test_M6_status_is_resolved_like_every_other_px4_topic():
                      importer=lambda t: object)
     assert spec.topic == "/fmu/out/vehicle_status_v4" and spec.version == 4
     assert "/fmu/out/vehicle_status" in PT.DEFAULT_BASES
+
+
+# --------------------------------------------------------------------------- #
+#  T1..T4  the actuation path must not restate the study's constants
+# --------------------------------------------------------------------------- #
+def test_T1_the_rate_box_is_exactly_the_reachable_set():
+    """The node publishes ``OM_MAX * u[1:4]`` with no clamp of its own.  That
+    is only correct because the solver's input box IS the reachable rate set:
+    U_HI[1:] = rate_max / om_max, so the product lands exactly on rate_max.
+    Move either constant without the other and the node starts commanding
+    rates the control model never planned for -- which on the vehicle reads as
+    a controller that is merely poor, not as a mis-wiring."""
+    assert np.asarray(X.OM_MAX) * np.asarray(X.U_HI)[1:] == \
+        pytest.approx(np.full(3, float(X.P.rate_max)))
+    assert np.asarray(X.OM_MAX) * np.asarray(X.U_LO)[1:] == \
+        pytest.approx(np.full(3, -float(X.P.rate_max)))
+
+
+def test_T2_the_collective_box_is_what_px4_thrust_body_accepts():
+    """``thrust_body`` is a normalised [-1, 0] on the FRD z axis, so the
+    collective must already be bounded to [0, 1] before the sign flip."""
+    assert float(X.U_LO[0]) == 0.0 and float(X.U_HI[0]) == 1.0
+
+
+def test_T3_the_node_reads_the_constants_it_does_not_rewrite_them():
+    src = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..",
+        "rdp_acmpc_ws", "src", "acmpc_controller", "acmpc_controller",
+        "controller_node.py")).read()
+    assert "self.ctrl.X.OM_MAX" in src
+    assert "[10.0, 10.0, 4.0]" not in src          # the literal it used to hold
+    # and the FRD conversion goes through the tested helper, not an inline -u[0]
+    assert "F.ctbr_to_px4_thrust(u[0])" in src
+    assert "float(-u[0])" not in src
+
+
+def test_T4_refgen_om_max_still_matches_the_study():
+    """refgen restates the study's constants in pure NumPy on purpose; that is
+    only safe while something checks them."""
+    from acmpc_controller import refgen as RG
+    assert RG.OM_MAX == pytest.approx(np.asarray(X.OM_MAX))
+    assert RG.M_NOM == pytest.approx(float(X.M_TOT))

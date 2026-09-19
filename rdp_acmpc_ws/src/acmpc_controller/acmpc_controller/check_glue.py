@@ -60,6 +60,26 @@ def main(argv=None):
     from disturbance_manager import scenarios as SC
     _chk("scenario m", SC.M_NOM, X.M_TOT)
     _chk("scenario arm", SC.ARM, float(abs(X.R_ROTOR[0, 0])))
+    from acmpc_controller import refgen as RG
+    _chk("refgen om_max", RG.OM_MAX, np.asarray(X.OM_MAX))
+    _chk("refgen m", RG.M_NOM, X.M_TOT)
+    _chk("refgen J", RG.J_NOM, X.J_NOM)
+
+    # The node publishes OM_MAX * u[1:4] with no clamp of its own.  That is
+    # only correct because the solver's input box is the *reachable* rate set:
+    # U_HI[1:] = rate_max / om_max, so the product lands exactly on rate_max.
+    # If either constant moves without the other, the node would start
+    # commanding rates the control model never planned for -- which on the
+    # vehicle reads as a controller that is merely poor, not as a mis-wiring.
+    print("\nactuation identity (the node clamps nothing, the box does it):")
+    _chk("om_max * U_HI[1:] == rate_max",
+         np.asarray(X.OM_MAX) * np.asarray(X.U_HI)[1:],
+         np.full(3, float(X.P.rate_max)))
+    _chk("om_max * U_LO[1:] == -rate_max",
+         np.asarray(X.OM_MAX) * np.asarray(X.U_LO)[1:],
+         np.full(3, -float(X.P.rate_max)))
+    _chk("collective box is [0, 1] as PX4 thrust_body needs",
+         np.array([float(X.U_LO[0]), float(X.U_HI[0])]), np.array([0.0, 1.0]))
 
     print("\nB_d bridge (§4.4), against the study's wrench_to_dmod:")
     rng = np.random.default_rng(0)
