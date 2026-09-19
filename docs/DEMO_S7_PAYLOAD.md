@@ -261,7 +261,59 @@ node logs the compile time. After it, the first real tick is 8.5 ms.
 If you have a CUDA `jaxlib`, this is much faster; the warm-up is cheap either
 way and the ordering is what matters.
 
-## 8. Known limits
+## 8. Arming is confirmed, not assumed
+
+The node used to send the two offboard-handshake commands once and then set
+`armed = True` on the strength of having sent them:
+
+```
+_cmd(VEHICLE_CMD_DO_SET_MODE, 1.0, PX4_CUSTOM_MAIN_MODE_OFFBOARD)
+_cmd(VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0, 0.0)
+self.armed = True                       # <- a hope, not a fact
+```
+
+PX4 can refuse either one, and routinely does: the EKF has not converged, a
+preflight check is failing, or it has not yet seen enough of the
+`OffboardControlMode` stream to accept mode 6. Nothing came back, so the node
+carried on publishing rate setpoints at a vehicle that was sitting disarmed on
+the ground for the whole 40 s. Every node reported healthy, the solver hit its
+timing budget, and the Z-X plot was a flat line at z = 0 — which looks exactly
+like a controller that computes nothing.
+
+The node now resolves `/fmu/out/vehicle_status` through `px4_topics` (the
+user's graph carries it as `_v4`, so a hard-coded name would have produced a
+subscription that is silently never called — the failure this module exists to
+prevent) and reads the outcome back. Until PX4 reports **both**
+`arming_state == ARMING_STATE_ARMED` **and** `nav_state ==
+NAVIGATION_STATE_OFFBOARD`, the request is re-sent every `arm_retry_s` (default
+0.5 s), asking only for the half that is still missing, and the console says
+what is being withheld:
+
+```
+PX4 has not accepted the handshake after 4 request(s): arming_state=1
+(want 2), nav_state=4 (want 14).  Nothing will move until both match --
+the PX4 console carries the rejection reason.
+```
+
+Both halves are checked because armed-but-not-offboard is the trap. PX4 is then
+flying under its own controller and discarding every setpoint published here,
+so the trace is flat for a reason that has nothing to do with the controller
+under test.
+
+The two codes are taken off the resolved message class when it carries them as
+constants, falling back to the literals 2 and 14 only when it does not — the
+same reason the topic name is read off the graph rather than written down.
+
+The watch does not stop at takeoff. If PX4 leaves armed/offboard mid-run — a
+failsafe, or the land detector deciding an asymmetrically loaded vehicle has
+touched down — the node logs an error naming the instant, because everything
+in the trace after that point is PX4 flying, not the controller being measured.
+
+When `vehicle_status` never appears on the graph at all there is nothing to
+read back, and the node falls back to the old open-loop behaviour with a
+warning rather than refusing to fly.
+
+## 9. Known limits
 
 * **`actuator_motors` is not optional for the moment channels.** Per §6.2 the
   PWM block is the only observable channel for a *standing* moment: an

@@ -710,3 +710,70 @@ def test_W2_warmup_leaves_no_state_behind():
     assert np.abs(c.om_bar).max() == 0.0
     assert c.Om_hat == pytest.approx(np.full(4, float(X.OM_HOVER)))
     assert c.solve_ms == []
+
+
+# --------------------------------------------------------------------------- #
+#  M1..M6  the arm handshake must be confirmed, not assumed
+# --------------------------------------------------------------------------- #
+def test_M1_both_halves_are_required_before_the_run_counts_as_armed():
+    """Armed but not OFFBOARD is the dangerous half: PX4 is flying on its own
+    controller and discarding every rate setpoint we publish, so the trace is
+    flat for a reason that has nothing to do with the controller under test."""
+    A, O = CN.ARMING_STATE_ARMED, CN.NAVIGATION_STATE_OFFBOARD
+    assert CN.handshake_done(True, A, O) is True
+    assert CN.handshake_done(True, A, 4) is False          # armed, AUTO.LOITER
+    assert CN.handshake_done(True, 1, O) is False          # offboard, STANDBY
+    assert CN.handshake_done(True, 1, 4) is False
+
+
+def test_M2_no_status_message_yet_is_not_a_confirmation():
+    """The old code latched ``armed = True`` the moment it sent the request.
+    With the status topic present but no message delivered yet, arming_state is
+    None -- which must read as 'not yet', not as 'fine'."""
+    assert CN.handshake_done(True, None, None, tries=1) is False
+    assert CN.handshake_done(True, None, None, tries=99) is False
+
+
+def test_M3_a_missing_status_topic_falls_back_to_open_loop():
+    """No vehicle_status on the graph at all: there is nothing to read back, so
+    one sent request is all the confirmation available.  It must not block."""
+    assert CN.handshake_done(False, None, None, tries=0) is False
+    assert CN.handshake_done(False, None, None, tries=1) is True
+
+
+def test_M4_only_the_half_that_is_still_missing_is_re_requested():
+    A, O = CN.ARMING_STATE_ARMED, CN.NAVIGATION_STATE_OFFBOARD
+    assert CN.handshake_requests(True, 1, 4) == (True, True)     # neither yet
+    assert CN.handshake_requests(True, A, 4) == (True, False)    # armed only
+    assert CN.handshake_requests(True, 1, O) == (False, True)    # offboard only
+    assert CN.handshake_requests(True, A, O) == (False, False)   # done
+    # with no status to read, always ask for both
+    assert CN.handshake_requests(False, None, None) == (True, True)
+
+
+def test_M5_the_codes_are_read_off_the_message_when_it_carries_them():
+    """px4_topics exists so that nothing about the wire format is hard-coded.
+    The arming codes are part of the wire format, so the node prefers the
+    constants on the resolved class and only falls back to the literals."""
+    src = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..",
+        "rdp_acmpc_ws", "src", "acmpc_controller", "acmpc_controller",
+        "controller_node.py")).read()
+    assert 'getattr(cls, "ARMING_STATE_ARMED"' in src
+    assert 'getattr(cls, "NAVIGATION_STATE_OFFBOARD"' in src
+    # the handshake is never latched on the request alone any more: the only
+    # place that sets armed=True is the branch guarded by _handshake_done()
+    assert "PX4 confirms ARMED + OFFBOARD" in src
+    assert src.count("self.armed = True") == 1
+    assert "_handshake_done()" in src
+
+
+def test_M6_status_is_resolved_like_every_other_px4_topic():
+    """A hard-coded '/fmu/out/vehicle_status' would be silently never called on
+    the user's graph, which carries it as '_v4'."""
+    spec = PT.select("/fmu/out/vehicle_status",
+                     [("/fmu/out/vehicle_status_v4",
+                       ["px4_msgs/msg/VehicleStatus"])],
+                     importer=lambda t: object)
+    assert spec.topic == "/fmu/out/vehicle_status_v4" and spec.version == 4
+    assert "/fmu/out/vehicle_status" in PT.DEFAULT_BASES

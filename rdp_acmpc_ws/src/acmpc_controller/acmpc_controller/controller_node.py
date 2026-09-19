@@ -53,6 +53,46 @@ VEHICLE_CMD_COMPONENT_ARM_DISARM = 400
 PX4_CUSTOM_MAIN_MODE_OFFBOARD = 6.0
 
 
+#: ``VehicleStatus`` codes, used only as the fallback when the resolved message
+#: class does not carry them as constants.  PX4 has kept both stable, but the
+#: whole point of px4_topics is that nothing about the wire format is assumed.
+ARMING_STATE_ARMED = 2
+NAVIGATION_STATE_OFFBOARD = 14
+
+
+def handshake_done(has_status, arming_state, nav_state,
+                   armed_code=ARMING_STATE_ARMED,
+                   offboard_code=NAVIGATION_STATE_OFFBOARD, tries=0):
+    """Has PX4 confirmed **both** ARMED and OFFBOARD?
+
+    Both halves matter.  Armed but not offboard means PX4 is flying on its own
+    controller and discarding every setpoint we publish -- on the Z-X plot that
+    is indistinguishable from a controller that computes nothing, which is
+    exactly how long it took to find this the first time.
+
+    ``has_status`` false means ``vehicle_status`` never appeared on the graph,
+    so there is nothing to read back and a sent request is all the confirmation
+    available; that is the old open-loop behaviour, kept only for that case.
+    """
+    if not has_status:
+        return tries >= 1
+    return arming_state == armed_code and nav_state == offboard_code
+
+
+def handshake_requests(has_status, arming_state, nav_state,
+                       armed_code=ARMING_STATE_ARMED,
+                       offboard_code=NAVIGATION_STATE_OFFBOARD):
+    """``(send_set_mode, send_arm)`` -- whichever half PX4 has not granted.
+
+    Re-sending a command PX4 has already honoured is harmless, so this is an
+    ergonomic choice rather than a correctness one: it keeps the PX4 console
+    from filling with accepted duplicates while the other half is being
+    rejected, which is where the reason for the rejection is printed.
+    """
+    return ((not has_status) or nav_state != offboard_code,
+            (not has_status) or arming_state != armed_code)
+
+
 def main(args=None):                                       # pragma: no cover
     try:
         import rclpy
@@ -104,6 +144,7 @@ def main(args=None):                                       # pragma: no cover
                          ("p_hold", [0.0, 0.0, 1.5]),
                          ("A", 1.2), ("B", 0.9), ("omega", 1.0), ("z0", 1.5),
                          ("auto_arm", True), ("arm_after_s", 1.5),
+                         ("arm_retry_s", 0.5),
                          ("px4_namespace", ""), ("topic_timeout_s", 30.0)):
                 self.declare_parameter(k, v)
             g = lambda k: self.get_parameter(k).value
@@ -203,6 +244,37 @@ def main(args=None):                                       # pragma: no cover
             self.get_logger().info(f"setpoints to {rates}; mode to {ocm}; "
                                    f"commands to {vcmd}")
 
+            # -- read the arming state back, do not assume it --------------- #
+            # _arm() used to fire once and latch ``armed = True``.  A rejected
+            # handshake -- EKF not ready, a preflight check, an
+            # OffboardControlMode stream PX4 has not yet seen enough of -- then
+            # left the node streaming rate setpoints at a disarmed vehicle for
+            # the whole run, with a flat plot and nothing in the log to say
+            # why.  vehicle_status is what PX4 actually did.
+            vstat = PT.resolve(self, "/fmu/out/vehicle_status", 5.0, ns,
+                               required=False)
+            self.arming_state = None
+            self.nav_state = None
+            self.ARMED = ARMING_STATE_ARMED
+            self.OFFBOARD = NAVIGATION_STATE_OFFBOARD
+            self.has_status = vstat is not None
+            if self.has_status:
+                cls = vstat.msg_class
+                # Take the numbers off the message when it carries them, so a
+                # renumbering between PX4 generations cannot silently invert
+                # the check -- the same reason the topic name is resolved.
+                self.ARMED = int(getattr(cls, "ARMING_STATE_ARMED", self.ARMED))
+                self.OFFBOARD = int(getattr(cls, "NAVIGATION_STATE_OFFBOARD",
+                                             self.OFFBOARD))
+                self.create_subscription(cls, vstat.topic, self.on_status, qos)
+                self.get_logger().info(f"arming state from {vstat}")
+            else:
+                self.get_logger().warn(
+                    "/fmu/out/vehicle_status is not on the graph -- the arm "
+                    "handshake goes out open-loop and a rejection will not be "
+                    "visible here.  Start the uXRCE-DDS agent before the "
+                    "controller to get the confirmation back.")
+
             if spec["use_d"]:
                 self.create_subscription(WrenchStamped,
                                          "/rdp/disturbance_estimate", self.on_d, 10)
@@ -231,9 +303,13 @@ def main(args=None):                                       # pragma: no cover
 
             self.t0 = None
             self.armed = False
+            self.lost_offboard = False
+            self.arm_tries = 0
+            self.last_arm_t = -1e9
             self.n_tick = 0
             self.auto_arm = bool(g("auto_arm"))
             self.arm_after = float(g("arm_after_s"))
+            self.arm_retry = float(g("arm_retry_s"))
             self.create_timer(1.0 / float(g("rate_hz")), self.tick)
 
         def _fallback(self, cls_name, topic):
@@ -264,6 +340,10 @@ def main(args=None):                                       # pragma: no cover
             self.q_last = q
             self.state = np.concatenate([p, v, q, om])
 
+        def on_status(self, m):
+            self.arming_state = int(getattr(m, "arming_state", -1))
+            self.nav_state = int(getattr(m, "nav_state", -1))
+
         def on_d(self, m):
             self.d_hat = np.array([m.wrench.force.x, m.wrench.force.y,
                                    m.wrench.force.z, m.wrench.torque.x,
@@ -282,13 +362,40 @@ def main(args=None):                                       # pragma: no cover
             c.from_external = True
             self.pub_cmd.publish(c)
 
+        def _handshake_done(self):
+            """Has PX4 confirmed ARMED *and* OFFBOARD?
+
+            Both halves matter: armed but not offboard means PX4 is holding the
+            vehicle on its own controller and ignoring every setpoint we send,
+            which on the plot is indistinguishable from a controller that does
+            nothing.  With no status topic there is nothing to read back, so
+            one request is all the confirmation available.
+            """
+            return handshake_done(self.has_status, self.arming_state,
+                                  self.nav_state, self.ARMED, self.OFFBOARD,
+                                  self.arm_tries)
+
         def _arm(self, now):
-            """PX4 accepts OFFBOARD only after it has seen the stream (~10 msgs)."""
-            self._cmd(VEHICLE_CMD_DO_SET_MODE, 1.0,
-                      PX4_CUSTOM_MAIN_MODE_OFFBOARD, now)
-            self._cmd(VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0, 0.0, now)
-            self.armed = True
-            self.get_logger().info("offboard requested and arm commanded")
+            """Request whichever half is still missing.
+
+            PX4 accepts OFFBOARD only once it has seen the OffboardControlMode
+            stream (~10 messages), and can reject either command outright, so
+            this is called repeatedly until :meth:`_handshake_done` agrees.
+            Re-sending a command PX4 has already honoured is harmless, but
+            asking only for what is missing keeps the console legible.
+            """
+            send_mode, send_arm = handshake_requests(
+                self.has_status, self.arming_state, self.nav_state,
+                self.ARMED, self.OFFBOARD)
+            if send_mode:
+                self._cmd(VEHICLE_CMD_DO_SET_MODE, 1.0,
+                          PX4_CUSTOM_MAIN_MODE_OFFBOARD, now)
+            if send_arm:
+                self._cmd(VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0, 0.0, now)
+            self.arm_tries += 1
+            self.last_arm_t = now
+            if self.arm_tries == 1:
+                self.get_logger().info("offboard requested and arm commanded")
 
         def tick(self):
             if self.state is None:
@@ -356,7 +463,29 @@ def main(args=None):                                       # pragma: no cover
 
             self.n_tick += 1
             if self.auto_arm and not self.armed and t >= self.arm_after:
-                self._arm(now)
+                if self._handshake_done():
+                    self.armed = True
+                    self.get_logger().info(
+                        f"PX4 confirms ARMED + OFFBOARD after {self.arm_tries} "
+                        f"request(s), {t - self.arm_after:.1f} s into the run")
+                elif now - self.last_arm_t >= self.arm_retry:
+                    self._arm(now)
+                    if self.arm_tries in (4, 16) or self.arm_tries % 40 == 0:
+                        self.get_logger().warn(
+                            f"PX4 has not accepted the handshake after "
+                            f"{self.arm_tries} request(s): arming_state="
+                            f"{self.arming_state} (want {self.ARMED}), "
+                            f"nav_state={self.nav_state} (want {self.OFFBOARD}). "
+                            f"Nothing will move until both match -- the PX4 "
+                            f"console carries the rejection reason.")
+            elif self.armed and self.has_status and not self.lost_offboard \
+                    and not self._handshake_done():
+                self.lost_offboard = True
+                self.get_logger().error(
+                    f"PX4 LEFT armed/offboard at t={t:.2f}s (arming_state="
+                    f"{self.arming_state}, nav_state={self.nav_state}) -- a "
+                    f"failsafe or the land detector took the vehicle.  What the "
+                    f"trace shows after this point is PX4 flying, not {self.cname}.")
             if self.n_tick % 250 == 0:
                 sm = np.asarray(self.ctrl.solve_ms[-250:])
                 self.get_logger().info(
