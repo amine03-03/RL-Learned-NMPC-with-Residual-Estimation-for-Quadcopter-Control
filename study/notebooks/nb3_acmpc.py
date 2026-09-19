@@ -203,8 +203,13 @@ o, e, xr = env.obs()
 Sm, _ = X.costmap_apply(X.load_ckpt("acmpc", "model.pkl")["actor"], o, "diag", 1)
 learned = np.asarray(jnp.mean(jnp.diagonal(Sm[:, 0], axis1=-2, axis2=-1), 0))
 hand = np.r_[np.diag(X.Q_HAND), np.diag(X.R_HAND)]
-labels = ["e_px", "e_py", "e_pz", "e_vx", "e_vy", "e_vz", "e_ax", "e_ay", "e_az",
-          "du_c", "du_wx", "du_wy", "du_wz"]
+# the cost-map block is NTAU = NE + NU wide; derive the labels from that so a
+# change to the error vector cannot leave a short list to plot against
+labels = (["e_px", "e_py", "e_pz", "e_vx", "e_vy", "e_vz", "e_ax", "e_ay", "e_az",
+           "e_wx", "e_wy", "e_wz", "e_O1", "e_O2", "e_O3", "e_O4"][:X.NE]
+          + ["du_c", "du_wx", "du_wy", "du_wz"])
+assert len(labels) == X.NTAU == len(hand) == len(learned), (
+    f"{len(labels)} labels for NTAU={X.NTAU}, hand={len(hand)}, learned={len(learned)}")
 fig, ax = plt.subplots(figsize=(7.2, 3.4))
 xs = np.arange(len(labels))
 ax.bar(xs - 0.2, hand, 0.4, label="hand-tuned Q, R", edgecolor="k", lw=0.5)

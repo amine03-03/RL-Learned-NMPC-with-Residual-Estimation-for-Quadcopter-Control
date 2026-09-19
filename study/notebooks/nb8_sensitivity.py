@@ -245,7 +245,7 @@ rows = []
 for path in PATHS:
     for qp in QPOS:
         for rr in RRATE:
-            Q = np.diag([qp, qp, qp, 4.0, 4.0, 4.0, 1.0, 1.0, 0.5])
+            Q = X.stage_Q(qp, q_vel=4.0)
             R = np.diag([0.5, rr, rr, rr])
             env = X.Env(N_EV, 4242, 100000, S.nominal_spec(speed=SPEED), (path,))
             try:

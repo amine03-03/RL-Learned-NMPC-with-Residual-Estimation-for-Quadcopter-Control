@@ -57,8 +57,23 @@ env = S.ev_env("circle", n=min(N_CAND, 256), spec=S.nominal_spec(speed=(1.0, 1.5
 o, e0, xr = env.obs()
 B = env.n
 KEY, k1 = jax.random.split(KEY, 2)
-scale = jnp.asarray([DISP, DISP, DISP, DISP, DISP, DISP,
-                     0.3 * DISP, 0.3 * DISP, 0.3 * DISP])
+# Per-channel displacement of the candidate shell.  Built from X.NE rather
+# than written out, so that growing the error vector cannot silently leave a
+# short `scale` to broadcast against (it did: a 9-wide literal survived the
+# 10 -> 17 state change and only surfaced as a shape error here).
+#   pos, vel : DISP
+#   att      : 0.3 DISP, as before
+#   rate     : 0.3 DISP -- commensurate with attitude, since delta_dot = om
+#              exactly in the hover linearisation (C-2)
+#   rotor    : 0.15 DISP in NORMALISED units = ~52 rad/s at DISP = 0.35, which
+#              is the size of the rotor excursions actually seen in flight;
+#              the block is scaled by OM_SCALE = 1000, so anything of order
+#              DISP here would be a physically impossible rotor speed
+_sc = np.full(X.NE, 0.3 * DISP)
+_sc[0:6] = DISP
+_sc[12:16] = 0.15 * DISP
+scale = jnp.asarray(_sc)
+assert scale.shape == (X.NE,), f"candidate scale is {scale.shape}, want {(X.NE,)}"
 # G7c: ONE shell at `disp`, as originally.  G7 spread the candidates over
 # decades of magnitude, reasoning that the closed loop lives at |e| ~ 0.05 m
 # while the shell sits at |e| ~ 0.8 m, so the network was being extrapolated.
@@ -326,13 +341,15 @@ for v in sl:
     EV.append(np.linalg.eigvalsh(np.asarray(M.lltc_matrix(params, ee, EPS))[0]))
 EV = np.array(EV)
 fig, ax = plt.subplots(figsize=(5.4, 3.4))
+# cycle the markers: there are X.NE = 16 eigenvalues now, not 9
+_MK = ["o", "s", "^", "v", "D", "P", "X", "*", "<"]
 for i in range(X.NE):
     ax.semilogy(sl, np.maximum(EV[:, i], 1e-12), lw=1.1,
-                marker=["o", "s", "^", "v", "D", "P", "X", "*", "<"][i],
+                marker=_MK[i % len(_MK)],
                 markevery=12, ms=3.5, label=f"$\\lambda_{{{i}}}$")
 ax.set_xlabel("$e_x$ [m]"); ax.set_ylabel(r"eig $P_\theta(e)$ (log)")
 ax.set_title(r"F8  spectrum of $P_\theta$ along an error slice")
-ax.legend(fontsize=6, ncol=3)
+ax.legend(fontsize=5, ncol=4)
 fig.savefig(f"{FIG}/F8_lltc_spectrum.png", bbox_inches="tight")
 pd.DataFrame(EV, index=sl).to_csv(f"{FIG}/F8_lltc_spectrum.csv")
 print(f"\n  min eigenvalue over the slice = {EV.min():.3e} "

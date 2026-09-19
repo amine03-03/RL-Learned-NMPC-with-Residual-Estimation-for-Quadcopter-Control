@@ -382,7 +382,7 @@ RW = np.array([0.05, 0.2, 1.0, 5.0, 20.0])
 rowsQ = []
 for qp in QP:
     for rw in RW:
-        Q = np.diag([qp, qp, qp, 0.4 * qp, 0.4 * qp, 0.4 * qp, 1.0, 1.0, 0.5])
+        Q = X.stage_Q(qp)
         R = np.diag([0.5, rw, rw, rw])
         try:
             _, Pi, _, _ = X.dlqr(Q, R)
@@ -394,6 +394,11 @@ for qp in QP:
                 S.CFG["T_eval"] // 3, warmup=40))
             rowsQ.append(dict(Q_pos=qp, R_rate=rw, admissible=st["crash"] < 0.02, **st))
         except Exception as ex:
+            # say WHY.  A silent NaN row here once hid a 9-wide Q against a
+            # 16-state Riccati solve: the whole grid came back NaN and the
+            # failure only surfaced as an argmin on an empty frame.
+            print(f"    !! Q_pos={qp} R_rate={rw} failed: "
+                  f"{type(ex).__name__}: {ex}")
             rowsQ.append(dict(Q_pos=qp, R_rate=rw, admissible=False, rmse=np.nan,
                               maxerr=np.nan, sat=np.nan, crash=np.nan))
 QR = pd.DataFrame(rowsQ)
@@ -401,6 +406,11 @@ S.table(QR[["Q_pos", "R_rate", "rmse", "maxerr", "sat", "crash", "admissible"]],
         "Q/R sweep, NMPC N=1, nominal", csv=("common", "nb1_qr_sweep.csv"))
 
 adm = QR[QR.admissible & QR.rmse.notna()]
+if adm.empty:
+    raise SystemExit(
+        "Q/R SWEEP PRODUCED NO ADMISSIBLE POINT -- refusing to continue.\n"
+        "Every grid point either crashed or raised; the messages above say "
+        "which.  T2's best-to-worst ratio is meaningless without one.")
 best, worst = adm.rmse.min(), adm.rmse.max()
 T2 = pd.DataFrame([
     dict(case="best", Q_pos=adm.loc[adm.rmse.idxmin(), "Q_pos"],

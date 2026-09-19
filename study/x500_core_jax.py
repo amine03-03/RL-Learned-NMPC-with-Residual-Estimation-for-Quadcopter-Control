@@ -1304,6 +1304,24 @@ Q_REW = np.diag([200.0, 200.0, 200.0, 20.0, 20.0, 20.0, 20.0, 20.0, 10.0,
 R_REW = np.diag([2.0, 2.0, 2.0, 2.0])
 
 
+def stage_Q(q_pos, q_vel=None, q_att=(1.0, 1.0, 0.5)):
+    """An NE-wide diagonal stage cost, varying only the blocks a sweep varies.
+
+    The (Q_pos, R) sweeps of §8.1 step 6 and Notebook 8 move the position (and
+    sometimes velocity) weight and leave everything else alone.  "Everything
+    else" now includes a rate and a rotor block, so a hand-built diagonal is a
+    latent bug: nb1 and nb8 each carried a 9-wide ``np.diag([...])``, which
+    :func:`dlqr` could only answer with an exception once the control state grew
+    to 17.  Starting from ``Q_HAND`` and overwriting only what varies means the
+    untouched blocks track it by construction.
+    """
+    d = np.diag(Q_HAND).astype(float).copy()
+    d[0:3] = q_pos
+    d[3:6] = 0.4 * q_pos if q_vel is None else q_vel
+    d[6:9] = np.asarray(q_att, dtype=float)
+    return np.diag(d)
+
+
 def _hover_ref():
     """The 17-state hover reference and the CTBR command that trims it."""
     xr = _assemble((1,), NX,
