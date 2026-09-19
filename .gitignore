@@ -14,6 +14,8 @@ report/*.fdb_latexmk
 report/*.fls
 report/*.lo[fgt]
 report/*.log
+report/*.nav
 report/*.out
+report/*.snm
 report/*.toc
 report/*.pdf

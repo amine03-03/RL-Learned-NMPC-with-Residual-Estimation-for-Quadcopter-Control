@@ -1,0 +1,741 @@
+% nofirafonts: the theme's default Fira Sans/Math fonts need firamath-otf,
+% which requires XeLaTeX or LuaLaTeX. This deck targets pdflatex, so it
+% opts out and falls back to Computer Modern via the documented class option.
+\documentclass[10pt]{beamer}
+\usetheme[nofirafonts]{focus}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+% --------------------------------------------------------------------------
+% Artefact probing.
+%
+% The deck is built either from report/ or from the repository root, so the
+% path to the figures differs. Probe once against a figure the study always
+% produces, and fall back to labelled placeholders if neither probe hits --
+% a partial run then still yields a complete, readable deck.
+% --------------------------------------------------------------------------
+\newcommand{\figroot}{}
+\IfFileExists{../artifacts/figures/F1_feasibility.png}
+  {\renewcommand{\figroot}{../artifacts/figures/}}{}
+\IfFileExists{artifacts/figures/F1_feasibility.png}
+  {\renewcommand{\figroot}{artifacts/figures/}}{}
+
+% \plot{file}{what the reader should look for}
+\newcommand{\plot}[2]{%
+  \begin{center}%
+  \IfFileExists{\figroot#1}%
+    {\includegraphics[width=\linewidth,height=0.60\textheight,keepaspectratio]{\figroot#1}}%
+    {\setlength{\fboxsep}{6pt}%
+     \fbox{\parbox[c][0.52\textheight][c]{0.86\linewidth}{\centering\footnotesize
+       \textbf{figure placeholder}\\[4pt]
+       \texttt{\detokenize{#1}}\\[6pt]#2}}}%
+  \end{center}}
+
+% A cell awaiting the full-scale campaign, matching the report's convention.
+\newcommand{\BL}{\textcolor{black!35}{\rule[0.35ex]{1.1em}{0.6pt}}}
+
+% A one-line takeaway, set apart from the evidence above it.
+\newcommand{\takeaway}[1]{\vspace{2pt}\footnotesize\textbf{Reading.} #1}
+
+\title{Learning the Cost of a Wrong Model}
+% Kept short deliberately: the theme's title block has a fixed height, and a
+% longer subtitle runs under the author line rather than wrapping clear of it.
+\subtitle{Adaptive actor--critic MPC for a quadrotor}
+\author{Abdoulaziz Amine Bouzid}
+\institute{Final-year project (PFE)}
+\date{\today}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{Overview}
+  \small
+  \tableofcontents
+\end{frame}
+
+% ==========================================================================
+\section{Context and objective}
+% ==========================================================================
+
+\begin{frame}{The operational problem}
+  \begin{itemize}
+    \item A quadrotor must track an aggressive reference under disturbances
+      it was not designed for: wind, an off-centre payload, a mis-calibrated
+      actuator.
+    \item Model predictive control handles constraints and preview well, but
+      its performance is bounded by the model it predicts with.
+    \item That model is always wrong. On a real airframe the mismatch is not
+      noise: it is structured, persistent, and specific to the vehicle.
+  \end{itemize}
+  \vfill
+  \takeaway{The question is not how to remove model error, but what to do
+    once it is accepted as permanent.}
+\end{frame}
+
+\begin{frame}{The scientific premise}
+  \begin{block}{Gros and Zanon (2020)}
+    For a \emph{wrong} model, the finite-horizon problem solved under that
+    model still returns the optimal policy of the true system, provided its
+    stage and terminal costs are adapted.
+  \end{block}
+  \vfill
+  \begin{itemize}
+    \item The adapted cost is not computable in closed form.
+    \item So it is \emph{learned}, while the optimiser --- and its constraint
+      handling --- is kept.
+    \item This is the whole project: learn inside the optimiser, not around it.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Objective and contributions}
+  \begin{itemize}
+    \item A differentiable MPC layer whose stage cost is produced by a neural
+      actor and trained by policy gradient.
+    \item A causal residual dynamics predictor (RDP) that estimates the
+      disturbance online and writes it into the prediction model.
+    \item An incremental study in which each addition is measured against the
+      one before it, not against a strawman.
+    \item A PX4/Gazebo workspace that flies the result, sharing one
+      implementation of the model with the study.
+  \end{itemize}
+\end{frame}
+
+% ==========================================================================
+\section{Vehicle and control model}
+% ==========================================================================
+
+\begin{frame}{Two models, by design}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \textbf{Plant, $23$ states}
+      \begin{itemize}
+        \footnotesize
+        \item Rigid body, rotors, rate-loop integrator, gyro filter
+        \item True inertia, true rotor constant, true motor lag
+        \item Aerodynamic terms from the SDF
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \textbf{Control model, $17$ states}
+      \begin{itemize}
+        \footnotesize
+        \item Rigid body, rate loop, actuator
+        \item \emph{Nominal} parameters throughout
+        \item No drag, no rolling moment
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \vfill
+  \takeaway{Model error exists by construction rather than by injection.
+    Using true parameters inside the optimiser would delete the object of
+    study.}
+\end{frame}
+
+\begin{frame}{The control model}
+  \[
+    x=[\,\underbrace{p}_{3},\ \underbrace{v}_{3},\ \underbrace{q}_{4},\
+         \underbrace{\omega}_{3},\ \underbrace{\Omega}_{4}\,]\in\mathbb{R}^{17},
+    \qquad
+    u=[\,c,\ \bar\omega_x,\ \bar\omega_y,\ \bar\omega_z\,]\in\mathbb{R}^{4}
+  \]
+  \begin{itemize}
+    \item The input is the CTBR command the autopilot actually exposes, so
+      nothing about the deployment interface is assumed away.
+    \item Carrying $\omega$ and $\Omega$ means the rate loop and the actuator
+      are \emph{predicted}, not taken to be instantaneous.
+    \item The inner loop is reproduced as a pure proportional law, with the
+      mixer and the idle-floor actuator map of the real autopilot.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Dynamics: inner loop and mixer}
+  \small
+  \begin{align*}
+    \omega_c &= \operatorname{clip}\big(\operatorname{diag}(\omega_{\max})\,
+      \bar\omega,\ \pm\omega_{\mathrm{lim}}\big)\\
+    \tau_{\mathrm{cmd}} &= J_n\big(K_r\odot(\omega_c-\omega)\big)
+      +\omega\times J_n\omega\\
+    f_{\mathrm{cmd}} &= \operatorname{clip}\big(M_{\mathrm{ctrl}}^{-1}
+      [\,T(c),\ \tau_{\mathrm{cmd}}\,]^{\!\top},\ 0,\ f_{\max}\big)\\
+    \Omega_{\mathrm{cmd}} &= \operatorname{clip}\big(
+      \sqrt{f_{\mathrm{cmd}}/K_T},\ \Omega_{\min},\ \Omega_{\max}\big)
+  \end{align*}
+  \normalsize
+  \takeaway{The autopilot's allocator and its idle-floor actuator map are
+    reproduced, with the nominal constants a controller would actually hold.}
+\end{frame}
+
+\begin{frame}{Dynamics: rigid body and actuator}
+  \small
+  \begin{align*}
+    \dot p &= v\\
+    \dot v &= \frac{K_T\sum_i\Omega_i^{2}}{m}\,z_b(q)-g\,e_3+a_{\mathrm{res}}\\
+    \dot q &= \tfrac12\,q\otimes[\,0,\ \omega\,]\\
+    \dot\omega &= J_n^{-1}\big(M_\tau^{n}K_T\Omega^{2}
+      -\omega\times J_n\omega\big)+\alpha_{\mathrm{res}}\\
+    \dot\Omega &= (\Omega_{\mathrm{cmd}}-\Omega)/\tau_m
+  \end{align*}
+  \normalsize
+  \takeaway{Integration is RK4 in two sub-steps: the rotor pole is faster
+    than the control period, so one step resolves it only marginally.}
+\end{frame}
+
+\begin{frame}{Two structural properties}
+  \begin{block}{The model is a cascade}
+    The command enters only through $\Omega_{\mathrm{cmd}}$, so
+    $\partial\dot x/\partial u$ is supported on the rotor block alone. The
+    input reaches attitude only through two integrations.
+  \end{block}
+  \begin{block}{The steady-state gains are exact}
+    With the rotors settled, $\omega_\infty
+    =\operatorname{diag}(\omega_{\max})\,\bar\omega$ and
+    $\partial a_z/\partial c|_{\mathrm{hover}}$ recovers the actuator map's
+    value under the PX4 idle floor.
+  \end{block}
+  \vfill
+  \takeaway{The second property is why the inner loop drops $K_i$ and $K_d$
+    \emph{together}: keeping $K_d$ alone leaves a standing gain error, which
+    integrates into attitude rather than decaying.}
+\end{frame}
+
+\begin{frame}{Error coordinates}
+  \[
+    e=\begin{bmatrix}
+      p-p_r\\ v-v_r\\ 2\operatorname{sgn}(q_{e,w})\,q_{e,v}\\
+      \omega-\omega_r\\ (\Omega-\Omega_r)/\Omega_{\mathrm{sc}}
+    \end{bmatrix}\in\mathbb{R}^{16},
+    \qquad q_e=q_r^{*}\otimes q
+  \]
+  \begin{itemize}
+    \item The attitude block removes the quaternion's redundancy and is
+      exactly invertible for tilts below $180^\circ$.
+    \item $\Omega_{\mathrm{sc}}$ is a change of coordinates, not a weight: it
+      cancels between the map and its inverse.
+    \item $\Omega_r$ comes from inverting the nominal allocator at the
+      reference wrench, so $e=0$ holds exactly at the hover trim.
+  \end{itemize}
+\end{frame}
+
+% ==========================================================================
+\section{The predictive control layer}
+% ==========================================================================
+
+\begin{frame}{Error dynamics along a moving reference}
+  \begin{itemize}
+    \item The optimiser plans in error coordinates against a reference that
+      \emph{moves} over the horizon.
+    \item Freezing the reference is a bug, not a simplification: at
+      $1.5\,$m/s over twenty stages the target travels $0.6\,$m.
+    \item Each stage maps $e_k$ back to a state, integrates the model, and
+      re-expresses the result against the next reference point.
+  \end{itemize}
+  \vfill
+  \takeaway{Preview is what an online solve buys over a static feedback law;
+    a frozen reference throws it away.}
+\end{frame}
+
+\begin{frame}{The optimal control problem}
+  With $N_\tau=N_e+N_u=20$, weights $S_k\succeq0$ and linear terms $c_k$:
+  \[
+    \min_{\delta u_{0:N-1}}\ \sum_{k=0}^{N-1}
+      \left(\tfrac12\,\tau_k^{\!\top}S_k\,\tau_k+c_k^{\!\top}\tau_k\right)
+      +\tfrac12\,e_N^{\!\top}P_{\mathrm{term}}\,e_N,
+    \qquad \tau_k=\begin{bmatrix}e_k\\ \delta u_k\end{bmatrix}
+  \]
+  \begin{itemize}
+    \item Subject to the error dynamics and a box on $\delta u$.
+    \item The box is the \emph{reachable} set, not $[-1,1]$: the autopilot
+      clips the rate command well inside the nominal range.
+    \item State constraints, where used, are relaxed so the value stays
+      finite --- an infinite penalty carries no learning signal.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{iLQR and differentiation}
+  \begin{itemize}
+    \item Forward rollout, backward Riccati recursion on the linearised
+      dynamics with Levenberg--Marquardt regularisation, backtracking line
+      search.
+    \item The solve is differentiated so that $\partial u^{\star}/\partial
+      S_k$ and $\partial u^{\star}/\partial c_k$ reach the actor.
+    \item Only the last iterations carry gradient: at a solution the
+      parameter gradient depends on the optimum, not on the path taken to it.
+  \end{itemize}
+  \vfill
+  \takeaway{This is what makes the cost map trainable by policy gradient
+    while the constraint handling is retained.}
+\end{frame}
+
+% ==========================================================================
+\section{Disturbance representation}
+% ==========================================================================
+
+\begin{frame}{Two objects, one disturbance}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \textbf{Model residual}
+      \[
+        d=\begin{bmatrix}
+          a_{\mathrm{plant}}-a_{\mathrm{model}}\\
+          \dot\omega_{\mathrm{plant}}-\dot\omega_{\mathrm{model}}
+        \end{bmatrix}
+      \]
+      \footnotesize What the nominal model fails to explain, in the
+      coordinates the model uses.
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \textbf{External wrench}
+      \[
+        w=\begin{bmatrix}F_{\mathrm{ext}}\\ \tau_{\mathrm{ext}}\end{bmatrix}
+      \]
+      \footnotesize What a force--torque sensor would read, and what the
+      estimator is trained against.
+    \end{column}
+  \end{columns}
+  \vfill
+  \takeaway{Confusing the two is silent: it produces plausible numbers that
+    are wrong in the same direction every time.}
+\end{frame}
+
+\begin{frame}{The conversion is exact}
+  \[
+    d=\begin{bmatrix}m^{-1}I_3 & 0\\ 0 & J_n^{-1}\end{bmatrix} w,
+    \qquad
+    a_{\mathrm{res}}=\frac{F_{\mathrm{ext}}}{m},
+    \qquad
+    \alpha_{\mathrm{res}}=J_n^{-1}\tau_{\mathrm{ext}}
+  \]
+  \begin{itemize}
+    \item Exactness is structural: it holds because the control model carries
+      a torque input.
+    \item A model whose deepest rotational state is attitude has no image for
+      the moment block at all --- a moment could only be represented through
+      the rate offset it eventually produces, which depends on how long it
+      has been acting.
+    \item Measured against the plant, both blocks agree to a ratio of
+      $1.000$ to machine precision.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{What exactness does not buy}
+  \begin{itemize}
+    \item The nominal $m$ and $J_n$ in the conversion are \emph{not} the true
+      ones --- by construction, and the difference is part of what the
+      estimator must learn.
+    \item The prediction is still approximate: the inner loop is a
+      proportional reduction of a PID rate loop, so a moment the autopilot's
+      integrator has absorbed is still predicted as a persistent angular
+      acceleration.
+  \end{itemize}
+  \vfill
+  \takeaway{The conversion removes an \emph{interface} error. It does not
+    remove model error, which is the thing being learned.}
+\end{frame}
+
+% ==========================================================================
+\section{Learning formulation}
+% ==========================================================================
+
+\begin{frame}{Markov decision process}
+  \begin{itemize}
+    \item \textbf{Observation} ($n_o=47$): the error, a three-step reference
+      preview, a clipped position-error integral, and running means of the
+      command increment, velocity error and body rate.
+    \item \textbf{Action}: the CTBR command produced by the differentiable
+      MPC layer, with Gaussian exploration \emph{on the action}.
+    \item \textbf{Reward}: a quadratic tracking term, plus penalties on body
+      rate, command increment, and failure.
+  \end{itemize}
+  \vfill
+  \takeaway{The policy is disturbance-blind by default; the oracle and
+    estimator channels are added deliberately, as separate arms.}
+\end{frame}
+
+\begin{frame}{Policy optimisation}
+  \begin{itemize}
+    \item PPO over the differentiable MPC layer, with generalised advantage
+      estimation.
+    \item An adaptive step size keyed to the measured KL: the MPC mean is far
+      more sensitive to its cost map than an MLP's output is to its weights.
+    \item Model-predictive value expansion prices the trajectory the solver
+      has already produced, rather than discarding it.
+  \end{itemize}
+  \vfill
+  \takeaway{Exploration must be on the action, not on the cost-map
+    parameters --- otherwise the mechanism under study cannot occur.}
+\end{frame}
+
+% ==========================================================================
+\section{The increment chain}
+% ==========================================================================
+
+\begin{frame}{Five increments, each measured against the last}
+  \begin{table}
+    \centering
+    \small
+    \begin{tabular}{clp{0.46\linewidth}}
+      \toprule
+      \# & Increment & What it adds \\
+      \midrule
+      0 & Baselines & LQR, PID, tuned NMPC; the cost of exactness \\
+      1 & LLTC & A learned local terminal cost \\
+      2 & AC-MPC & A learned stage cost map \\
+      3 & Domain randomisation & Robustness by construction \\
+      4 & Adaptive AC-MPC & Online residual estimation \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+  \vfill
+  \takeaway{Each row must beat the row above it on the same protocol, or it
+    does not earn its complexity.}
+\end{frame}
+
+\begin{frame}{Increment 1: learned local terminal cost}
+  \begin{itemize}
+    \item The terminal cost is the horizon's summary of everything beyond it;
+      a Riccati matrix is only correct near the linearisation point.
+    \item A network produces a state-dependent, positive-definite
+      $P_\theta(e)$, fitted to the realised cost-to-go on sampled errors.
+    \item The stage cost is left untouched, so the tuning criticism of the
+      baselines still applies in full.
+  \end{itemize}
+  \vfill
+  \takeaway{This isolates one question: how much does the terminal cost
+    alone matter?}
+\end{frame}
+
+\begin{frame}{Increment 2: the learned cost map}
+  \begin{itemize}
+    \item An actor maps the observation to per-stage $S_k$ and $c_k$,
+      constrained positive-definite by construction.
+    \item Three parametrisations are compared: diagonal, Cholesky, and full.
+    \item The weights span five decades, so they are produced on a
+      logarithmic scale and bounded at both ends.
+  \end{itemize}
+  \vfill
+  \takeaway{The learned cost is a different object from a tuned one, not a
+    rescaling of it --- which is the claim the interpretability figure
+    tests.}
+\end{frame}
+
+\begin{frame}{Increment 4: adaptive AC-MPC}
+  \begin{itemize}
+    \item A causal residual dynamics predictor consumes a window of recent
+      frames and outputs the external wrench.
+    \item Four encoders are compared under a latency budget: CNN, GRU, LSTM,
+      TCN.
+    \item Three ways to use the estimate: observation channel only, model
+      correction only, or both.
+  \end{itemize}
+  \vfill
+  \takeaway{The estimator is trained on position hold, where the disturbance
+    response is not confounded with tracking.}
+\end{frame}
+
+% ==========================================================================
+\section{Results}
+%
+% The protocol opens this section rather than standing alone: the focus
+% theme's contents page sizes its section-number box for a single digit, so a
+% tenth section overflows it by a fraction of a point.
+% ==========================================================================
+
+\begin{frame}{Conditions and metrics}
+  \begin{columns}[T]
+    \begin{column}{0.46\textwidth}
+      \textbf{Conditions}
+      \begin{itemize}
+        \footnotesize
+        \item S1 nominal
+        \item S2 disturbed, moderated
+        \item S3 out of distribution
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.50\textwidth}
+      \textbf{Metrics}
+      \begin{itemize}
+        \footnotesize
+        \item Position RMSE, and its spread over seeds
+        \item Saturation fraction, reported \emph{beside} RMSE
+        \item Crash rate; single-vehicle solve latency
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \vfill
+  \takeaway{Under a severe disturbance every controller reaches the same
+    bound, so RMSE alone is a measurement trap. Saturation is what
+    distinguishes them.}
+\end{frame}
+
+\begin{frame}{The reference must be flyable}
+  \plot{F1_feasibility.png}{Demanded lateral acceleration per reference
+    family, against the budget left once weight is carried.}
+  \takeaway{A reference no controller can fly measures the reference, not the
+    controller. The infeasible families are capped before any comparison.}
+\end{frame}
+
+\begin{frame}{What an online solve buys}
+  \plot{F3_horizon.png}{Tracking error against horizon length, with and
+    without reference preview, and the matching solve latency.}
+  \takeaway{Preview is the mechanism, not horizon length as such: with the
+    reference frozen, a longer horizon makes tracking \emph{worse}.}
+\end{frame}
+
+\begin{frame}{How much of the result is weight tuning}
+  \plot{F5_qr_heatmap.png}{Closed-loop RMSE over the admissible
+    $(Q_{\mathrm{pos}},R)$ grid.}
+  \takeaway{The best-to-worst ratio over this grid is the fraction of
+    ``controller performance'' that is really tuning effort --- and it is
+    what the learned cost is meant to remove.}
+\end{frame}
+
+\begin{frame}{The learned terminal cost}
+  \plot{F6_lltc_fit.png}{Fit quality of $P_\theta$ against the realised
+    cost-to-go, in and out of the sampled shell.}
+  \takeaway{A better fit to a worse controller is the signal that the fit
+    \emph{target}, not the sampling, limits this arm.}
+\end{frame}
+
+\begin{frame}{The learned cost map is not a rescaling}
+  \plot{F12_interpretability.png}{Learned diagonal stage weights against the
+    hand-tuned ones, per channel, on a logarithmic scale.}
+  \takeaway{The ratio spans orders of magnitude and is not uniform across
+    channels, so the learned cost is a distinct object rather than a
+    scaled version of the tuned one.}
+\end{frame}
+
+\begin{frame}{Robustness by randomisation}
+  \plot{F13_axis_competence.png}{Tracking error against each randomised
+    parameter axis, for policies trained nominally and with randomisation.}
+  \takeaway{Randomisation buys robustness where the axis is actually
+    exercised during training; elsewhere it costs nominal performance
+    without return.}
+\end{frame}
+
+\begin{frame}{The residual predictor}
+  \plot{F16_encoder_trade.png}{Prediction quality against $95$th-percentile
+    inference latency, per encoder, marker size proportional to parameter
+    count.}
+  \takeaway{The deadline is $20\,$ms. An encoder that misses it is not a
+    candidate, whatever its accuracy.}
+\end{frame}
+
+\begin{frame}{Adaptive closed loop}
+  \plot{F18_closed_loop.png}{Closed-loop performance across scenarios, for
+    the disturbance-blind, oracle and estimator arms.}
+  \takeaway{The oracle arm bounds what any estimator could deliver; the gap
+    between oracle and estimator is the part that estimation quality still
+    costs.}
+\end{frame}
+
+\begin{frame}{Headline: accuracy against latency}
+  \plot{F21_headline.png}{Every controller class on one plane: tracking
+    accuracy against single-vehicle solve latency, marker size proportional
+    to the number of tuned parameters.}
+  \takeaway{The comparison that matters is not accuracy alone but accuracy
+    per millisecond and per hand-tuned parameter.}
+\end{frame}
+
+\begin{frame}{Summary ledger}
+  \begin{table}
+    \centering
+    \small
+    \begin{tabular}{lrrrr}
+      \toprule
+      Controller & RMSE [m] & Sat. & Crash & Latency [ms] \\
+      \midrule
+      PID              & \BL & \BL & \BL & \BL \\
+      LQR              & \BL & \BL & \BL & \BL \\
+      NMPC (tuned)     & \BL & \BL & \BL & \BL \\
+      LLTC             & \BL & \BL & \BL & \BL \\
+      AC-MPC           & \BL & \BL & \BL & \BL \\
+      Adaptive AC-MPC  & \BL & \BL & \BL & \BL \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+  \vfill
+  \takeaway{Cells marked \BL{} await the full-scale campaign. Smaller scales
+    produce undertrained policies by construction and their rows are not
+    results.}
+\end{frame}
+
+% ==========================================================================
+\section{ROS 2 and Gazebo}
+% ==========================================================================
+
+\begin{frame}{Why a deployment half at all}
+  \begin{itemize}
+    \item A controller that exists only inside its own simulator has not been
+      shown to be a controller.
+    \item The workspace imports the \emph{study module} for the model and the
+      solver rather than carrying a second implementation.
+    \item A duplicated dynamics model would be a second thing to keep in
+      step, with no test able to see the divergence.
+  \end{itemize}
+  \vfill
+  \takeaway{One model, one solver, one set of constants --- asserted by a
+    cross-check rather than by convention.}
+\end{frame}
+
+\begin{frame}{Node graph}
+  \begin{table}
+    \centering
+    \small
+    \begin{tabular}{lp{0.52\linewidth}}
+      \toprule
+      Node & Role \\
+      \midrule
+      \texttt{reference\_generator}  & Lissajous reference and its derivatives \\
+      \texttt{rdp\_estimator}        & Causal wrench estimate, pure NumPy \\
+      \texttt{acmpc\_controller}     & Differentiable MPC, publishes CTBR \\
+      \texttt{disturbance\_manager}  & Scripted scenarios in simulation \\
+      \texttt{state\_logger}         & Ground truth for offline evaluation \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+  \vfill
+  \takeaway{The estimator is deliberately framework-free, so the flight path
+    does not depend on the training stack.}
+\end{frame}
+
+\begin{frame}{Frames and the command interface}
+  \begin{itemize}
+    \item PX4 publishes NED/FRD; the study works in ENU/FLU. Conversion
+      happens \emph{on entry}, once, in one place.
+    \item The controller consumes $[p,v,q,\omega]$ from the EKF and publishes
+      a body-rate setpoint plus a normalised collective.
+    \item The reference is built to the same $17$-state layout the optimiser
+      expects, by the same differencing scheme the study uses.
+  \end{itemize}
+  \vfill
+  \takeaway{Frame errors are silent and systematic. They are handled by
+    construction, not by inspection.}
+\end{frame}
+
+\begin{frame}{The rotor-speed observer}
+  \begin{itemize}
+    \item PX4 publishes no rotor speed, yet the control model carries
+      $\Omega$ as a state.
+    \item The controller therefore propagates its own estimate from the
+      commands it has already sent, through the same integrator the
+      prediction uses.
+    \item The mode is stable and fast, so the estimate converges from a cold
+      start within a few control periods.
+  \end{itemize}
+  \vfill
+  \takeaway{A coarse $\Omega$ is worth more than none: even at cold-start
+    error the prediction improves on a model that omits the actuator.}
+\end{frame}
+
+\begin{frame}{Latency budget}
+  \begin{table}
+    \centering
+    \small
+    \begin{tabular}{lrr}
+      \toprule
+      Stage & Median [ms] & p95 [ms] \\
+      \midrule
+      Residual estimation      & \BL & \BL \\
+      MPC solve                & \BL & \BL \\
+      Total, against $20\,$ms  & \BL & \BL \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+  \vfill
+  \takeaway{Latency is measured on a batch of \emph{one}. Throughput divided
+    by batch size is a different quantity and flatters the learned
+    controllers by orders of magnitude.}
+\end{frame}
+
+\begin{frame}{Gazebo scenarios}
+  \plot{gazebo_scenarios.png}{Screenshots of the PX4/Gazebo x500 under the
+    scripted disturbance scenarios: nominal, wind, centred payload and
+    off-centre payload.}
+  \takeaway{The scenarios mirror the randomisation axes used in training, so
+    the simulated flight tests the same failure modes the study measured.}
+\end{frame}
+
+\begin{frame}{Flight results}
+  \plot{gazebo_tracking.png}{Commanded and realised trajectory in Gazebo,
+    with the estimated wrench overlaid on the applied one.}
+  \takeaway{Placeholder pending the flight campaign. The comparison to make
+    is estimate against applied disturbance, not tracking error alone.}
+\end{frame}
+
+\begin{frame}{What is flown, and what is not}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \textbf{Flown}
+      \begin{itemize}
+        \footnotesize
+        \item Software-in-the-loop, PX4 and Gazebo
+        \item The full node graph at the control rate
+        \item Scripted disturbance scenarios
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \textbf{Not flown}
+      \begin{itemize}
+        \footnotesize
+        \item Hardware in the loop
+        \item A physical airframe
+        \item Outdoor conditions
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \vfill
+  \takeaway{Stating the boundary is part of the result. Simulation-in-the-loop
+    validates the interfaces and the budget, not the aerodynamics.}
+\end{frame}
+
+% ==========================================================================
+\section{Conclusion}
+% ==========================================================================
+
+\begin{frame}{What the study establishes}
+  \begin{itemize}
+    \item A cost learned inside the optimiser is a distinct object from a
+      tuned one, and the tuning spread it removes is measurable.
+    \item Carrying the rate loop and the actuator in the prediction model
+      makes the disturbance interface exact, in both blocks.
+    \item Each increment is reported against the one before it, on one
+      protocol, with saturation beside accuracy.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Limitations}
+  \begin{itemize}
+    \item The rate loop is reduced, not reproduced: a long-standing moment is
+      still predicted as a persistent angular acceleration.
+    \item The cost parametrisation must stay quasi-convex for the inner solve
+      to remain tractable, which bounds its richness.
+    \item Seed counts are small relative to the differences being claimed.
+    \item Validation is simulation-in-the-loop only.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Future work}
+  \begin{itemize}
+    \item Restore the rate-loop integrator and measure whether it earns its
+      states.
+    \item Sum-of-squares cost parametrisations, which stay tractable while
+      being richer than a quadratic.
+    \item Hardware in the loop, then a physical airframe.
+    \item A GPU-resident solver, so horizon length stops trading against
+      control rate.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \centering
+  \Large Thank you
+\end{frame}
+
+\end{document}
