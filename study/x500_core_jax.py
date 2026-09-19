@@ -975,7 +975,15 @@ def external_wrench(s, u, par, sdot=None, v_wind=None):
     sdot = fp(s, u, par, v_wind) if sdot is None else sdot
     q, om = s[..., SQ], s[..., SW]
     m_n, J_n = par["m_ctrl"], par["J_ctrl"]
-    T = thrust_of(u[..., 0:1], par["T_max_ctrl"])
+    # Thrust from the ACTUAL rotor speeds, exactly as the moment line below has
+    # always done -- and exactly as fc() does.  Using the commanded collective
+    # thrust_of(u) here instead makes the two lines of this function disagree
+    # with each other about what the nominal model predicts, and makes the force
+    # block of wrench_to_dmod inexact by the rotor-lag term: measured 2.1e-5 of
+    # the collective in settled flight, which showed up as a 1e-4 relative
+    # disagreement between objects (a) and (b) of §4.3 while the moment block
+    # agreed to 0.  Both blocks are exact with this line.
+    T = P.K_T * jnp.sum(s[..., SO] ** 2, -1, keepdims=True)
     F = m_n * sdot[..., SV] - (T * qzaxis(q) - m_n * P.g * jnp.asarray(E3))   # (4.10)
     tau = (jnp.einsum("bij,bj->bi", J_n, sdot[..., SW])                       # (4.11)
            + jnp.cross(om, jnp.einsum("bij,bj->bi", J_n, om))

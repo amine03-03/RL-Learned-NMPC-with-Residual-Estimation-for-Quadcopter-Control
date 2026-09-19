@@ -337,8 +337,13 @@ for scen, lvl in (("central", 0.15), ("asym", 0.01), ("asym", 0.07)):
                          a_res_true=float(np.linalg.norm(truth[:3])),
                          om_res_conv=float(np.linalg.norm(conv[3:])),
                          om_res_true=float(np.linalg.norm(truth[3:])),
-                         om_ratio=float(np.linalg.norm(conv[3:])
-                                        / max(np.linalg.norm(truth[3:]), 1e-9))))
+                         # a scenario with no moment at all makes the ratio
+                         # undefined; a fixed 1e-9 floor would instead print a
+                         # small number that reads as a disagreement
+                         om_ratio=(float(np.linalg.norm(conv[3:])
+                                         / np.linalg.norm(truth[3:]))
+                                   if np.linalg.norm(truth[3:]) > 1e-9
+                                   else float("nan"))))
 DV = pd.DataFrame(rows)
 S.table(DV, "(4.12) conversion against the true residual (4.9)",
         note="om_ratio = 1 means the conversion is exact.  Under the 17-state "
