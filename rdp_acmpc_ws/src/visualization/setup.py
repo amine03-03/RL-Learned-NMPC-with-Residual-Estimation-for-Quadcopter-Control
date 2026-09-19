@@ -14,11 +14,12 @@ setup(
     zip_safe=True,
     maintainer="Amine Bouzid",
     maintainer_email="bouzid.amine1010@gmail.com",
-    description="Live panel and the offline figures R-F1..R-F12.",
+    description="Live panel, the real-time Z-X demo panel and the offline figures R-F1..R-F13.",
     license="MIT",
     entry_points={
         "console_scripts": [
             'live_panel = visualization.panels:main',
+            'live_zx = visualization.live_zx:main',
         ],
     },
 )

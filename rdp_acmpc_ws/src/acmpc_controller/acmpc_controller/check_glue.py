@@ -99,6 +99,39 @@ def main(argv=None):
     _chk("control state width", X.NX, 17)
     _chk("error width", X.NE, 16)
 
+    print("\nS7 payload demonstration (plant, truth and plot must agree):")
+    sys.path.insert(0, os.path.join(WS, "src", "visualization"))
+    sys.path.insert(0, os.path.join(WS, "tools"))
+    import payload_sdf as PSDF
+    from visualization import estimates as EST
+    from visualization import live_zx as LZX
+    from . import controller_node as CN
+    _chk("payload mass: SDF patch vs scenario", PSDF.DEFAULT_MASS, SC.S7_PAYLOAD_M)
+    _chk("payload offset: SDF patch vs scenario",
+         np.asarray(PSDF.DEFAULT_OFFSET), np.asarray(SC.S7_PAYLOAD_R))
+    _chk("estimates m", EST.M_NOM, X.M_TOT)
+    _chk("estimates g", EST.G, X.P.g)
+    _chk("plotter K_T", LZX.K_T, X.P.K_T)
+    _chk("plotter Om_min", LZX.OM_MIN, X.P.Om_min)
+    _chk("plotter Om_max", LZX.OM_MAX, X.P.Om_max)
+    sc7 = SC.Scenario("S7")
+    F7, tau7 = sc7.wrench(0.0)
+    tr7 = EST.payload_truth(sc7.params["payload_mass"], sc7.params["payload_offset"])
+    _chk("S7 truth force agrees with the plot's truth line", F7[2], tr7["F_z"])
+    _chk("S7 truth moment agrees with the plot's truth line", tau7, tr7["tau"])
+    m7, mp7 = EST.mass_estimate(F7)
+    _chk("mass estimate inverts the S7 residual", mp7, sc7.params["payload_mass"], 1e-9)
+    rx7, ry7 = EST.cg_offset_estimate(tau7, mp7)
+    _chk("CG estimate inverts the S7 moment",
+         np.array([float(rx7), float(ry7)]),
+         np.asarray(sc7.params["payload_offset"])[:2], 1e-9)
+    adaptive = [n for n, v in CN.CONTROLLERS.items() if v["use_d"]]
+    ok_a = adaptive == ["acmpc_adaptive"]
+    print(f"  [{'OK ' if ok_a else 'FAIL'}] exactly one controller is fed d_hat: "
+          f"{adaptive}")
+    if not ok_a:
+        _fail.append("d_hat routing")
+
     print("\nsix channel orderings:")
     from rdp_estimator.ring_buffer import FRAME_DIM
     _chk("frame width", FRAME_DIM, A.FRAME_DIM)

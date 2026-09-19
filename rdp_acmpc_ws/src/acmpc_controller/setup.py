@@ -1,3 +1,5 @@
+from glob import glob
+
 from setuptools import setup
 
 package_name = "acmpc_controller"
@@ -9,6 +11,8 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
+        # installed so `ros2 launch acmpc_controller <file>` finds them
+        ("share/" + package_name + "/launch", glob("launch/*.launch.py")),
     ],
     install_requires=["setuptools", "numpy"],
     zip_safe=True,
@@ -20,6 +24,7 @@ setup(
         "console_scripts": [
             'check_ctbr = acmpc_controller.check_ctbr:main',
             'check_glue = acmpc_controller.check_glue:main',
+            'check_px4 = acmpc_controller.check_px4:main',
             'controller_node = acmpc_controller.controller_node:main',
         ],
     },

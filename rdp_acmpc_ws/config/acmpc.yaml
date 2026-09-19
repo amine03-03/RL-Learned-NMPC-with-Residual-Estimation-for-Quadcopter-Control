@@ -2,15 +2,29 @@
 # `ros2 run acmpc_controller check_glue`; they are NOT a second source of truth.
 /**:
   ros__parameters:
-    mode: acmpc            # acmpc | nmpc1 | pid  (§9.8 incumbents on S0/S1)
+    # `controller` is the name; it fixes both the solver mode and whether the
+    # RDP estimate reaches the model.  ONE table (controller_node.CONTROLLERS)
+    # so the label on a plot cannot disagree with the wiring behind it.
+    controller: acmpc      # nmpc1 | acmpc | acmpc_adaptive | pid
+    mode: ""               # non-empty overrides the table's solver mode (sweeps)
+    reference: hold        # hold | lissajous.  The demo and E-0 fly `hold`.
+    p_hold: [0.0, 0.0, 1.5]
     horizon: 10            # N_p; E-C sweeps {10,20,30,40} and marks (9.4) violations
     n_iter: 10             # iLQR iterations
     control_rate_hz: 50.0
     rate_hz: 50.0
-    use_d: true            # feed the estimate through B_d into the prediction model
-    dmod_mode: closed_loop # (4.13) scaled by the measured closed-loop gain (D3);
-                           # 'first_order' is the t->0 limit and overstates a
-                           # standing moment ~9x; 'none' is the settled limit
+    use_d: true            # feed the estimate through B_d into the prediction
+                           # model.  ANDed with the controller's own entry, so
+                           # it can force the estimate OFF but never ON: only
+                           # acmpc_adaptive ever sees d_hat.
+    dmod_mode: exact       # (4.11) exact in BOTH blocks: d = diag(m^-1 I,
+                           # J_nom^-1) w.  The old 'closed_loop'/'first_order'
+                           # modes were approximations of the moment block and
+                           # are gone; 'none' zeroes it (an ablation).
+    auto_arm: true         # request OFFBOARD and arm after arm_after_s
+    arm_after_s: 1.5       # PX4 needs the setpoint stream BEFORE it accepts
+    px4_namespace: ""      # e.g. /px4_1 for multi-vehicle
+    topic_timeout_s: 30.0  # how long to wait for the graph before giving up
     # reference (9.5); the node REFUSES to fly an infeasible one
     A: 1.2
     B: 0.9

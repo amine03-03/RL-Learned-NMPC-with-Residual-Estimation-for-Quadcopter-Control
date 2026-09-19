@@ -145,7 +145,7 @@ deadline-miss rate per component. `CausalFilter` is the optional first-order
 filter of §9.11 step 4 — first order and causal by construction, so applying it
 cannot violate §9.1.
 
-### `disturbance_manager` — S0…S6
+### `disturbance_manager` — S0…S7
 
 Deterministic and reproducible, seeds recorded per run. `Scenario` returns the
 true external wrench and, separately, the plant-parameter perturbation the ACMPC
@@ -232,7 +232,7 @@ removal marked, R-F5/R-F6 frequency response, R-F8 timing histogram with the
 20 ms deadline and p99 marked, and R-F9 the horizon trade-off with infeasible
 horizons shaded.
 
-## 4. The two check binaries
+## 4. The three check binaries
 
 §11 is explicit that *a green control-law test says nothing about frames or
 constants* — keep them separate. So there are two, and the study has a third
@@ -242,6 +242,7 @@ silently satisfy both sides.
 ```bash
 ros2 run acmpc_controller check_ctbr    # §9.4, four checks, any failure aborts
 ros2 run acmpc_controller check_glue    # constants and the B_d bridge
+ros2 run acmpc_controller check_px4     # PX4 topics and message versions
 ```
 
 **`check_ctbr`** results as measured here:
@@ -270,6 +271,23 @@ module and every consumer is asserted against it.
 study; the two `B_d` bridges agree to **1e-12** on 64 random wrenches; the frame
 width and the six channel names and units match; and every exported `.npz` is
 loaded and run forward.
+
+**`check_px4`** is the newest and guards the failure mode with no symptom. PX4
+1.16 versions its uORB messages (`/fmu/out/vehicle_odometry_v1`), and a
+hard-coded unversioned name gives a subscription that is **never called** — no
+error, no warning, a controller stuck on `state is None` and a plot that stays
+empty. `acmpc_controller/px4_topics.py` therefore hard-codes nothing: it reads
+the live graph, matches `^<base>(_v<digits>)?$`, imports the type string the
+graph reports, and prefers the highest version whose type can actually be
+imported. A present name whose type cannot be imported raises `VersionMismatch`
+naming the wire type and the fix. `check_px4` prints the census and the
+resolution for every topic the workspace uses. See
+[`DEMO_S7_PAYLOAD.md`](DEMO_S7_PAYLOAD.md) §3.
+
+`check_glue` additionally asserts the S7 demonstration's constants: the payload
+mass and offset in the SDF patch equal the scenario's, the plotter's `K_T` and
+rotor limits equal the study's, the mass and CG estimators invert the scenario's
+own truth wrench, and **exactly one** controller is fed `d_hat`.
 
 ## 5. The export bridge
 

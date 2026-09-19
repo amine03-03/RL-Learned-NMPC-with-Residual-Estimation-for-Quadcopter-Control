@@ -1,4 +1,4 @@
-# S0..S6 (§9.7).  Deterministic and reproducible; seeds are recorded per run.
+# S0..S7 (§9.7).  Deterministic and reproducible; seeds are recorded per run.
 /**:
   ros__parameters:
     episode:
@@ -13,3 +13,9 @@
          amplitude_frac_weight: 0.10}
     S5: {motor_effectiveness: 0.90}
     S6: {combined: true}
+    # S7 is the payload demonstration and differs from the others in kind: the
+    # payload is BOLTED ON for the whole episode, not switched on at t_on, and
+    # the PLANT side is attached by tools/payload_sdf.py -- this node only
+    # publishes the analytic truth.  See docs/DEMO_S7_PAYLOAD.md.
+    S7: {payload_mass_kg: 0.30, payload_offset_m: [0.12, 0.06, -0.04],
+         standing: true, applied_by: tools/payload_sdf.py}

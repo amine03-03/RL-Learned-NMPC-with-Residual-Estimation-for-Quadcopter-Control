@@ -9,6 +9,8 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>px4_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
+  <!-- S7 needs the attitude, hence frames.py and px4_topics.py -->
+  <exec_depend>acmpc_controller</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

@@ -7,6 +7,8 @@
   <maintainer email="bouzid.amine1010@gmail.com">Amine Bouzid</maintainer>
   <license>MIT</license>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>launch</exec_depend>
   <exec_depend>px4_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>

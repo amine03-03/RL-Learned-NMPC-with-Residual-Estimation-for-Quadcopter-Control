@@ -107,6 +107,7 @@ docs/CORRECTIONS.md        the eight specification corrections
 docs/AUDIT.md              the audit against PX4 and the two source papers
 docs/ROS2_WORKSPACE.md     what is in the workspace, why, and what is not flown
 docs/CONTROL_MODEL_17.md   the 17-state control model: why, and what it invalidates
+docs/DEMO_S7_PAYLOAD.md    the hover / asymmetric-payload demonstration in SITL
 ```
 
 [`docs/ROS2_WORKSPACE.md`](docs/ROS2_WORKSPACE.md) covers the deployment half in

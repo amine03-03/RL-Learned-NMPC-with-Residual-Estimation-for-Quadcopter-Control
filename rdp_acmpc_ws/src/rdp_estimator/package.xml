@@ -10,6 +10,9 @@
   <exec_depend>px4_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
+  <!-- frames.py and px4_topics.py are owned by acmpc_controller;
+       a second copy would be a second thing to keep in step. -->
+  <exec_depend>acmpc_controller</exec_depend>
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>python3-pytest</test_depend>

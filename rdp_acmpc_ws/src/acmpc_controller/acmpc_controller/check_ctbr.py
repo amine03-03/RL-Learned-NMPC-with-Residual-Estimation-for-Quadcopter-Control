@@ -110,7 +110,8 @@ def check_thrust_calibration(y_measured=None, tol_pct=10.0):
                                       T_max_calibrated=T_MAX * factor)
 
 
-def check_actuator_motors(topic="/fmu/out/actuator_motors", timeout_s=3.0):
+def check_actuator_motors(topic="/fmu/out/actuator_motors", timeout_s=3.0,
+                          namespace=""):
     """Check 4.  ``actuator_motors`` must be publishing.
 
     Per §6.2 the PWM block is the only observable channel for a standing moment:
@@ -118,24 +119,39 @@ def check_actuator_motors(topic="/fmu/out/actuator_motors", timeout_s=3.0):
     error (measured: 7e-11 rad/s) while the mixer output holds its spread
     (0.0437) indefinitely.  **Refuse to start any moment-producing scenario if
     this fails.**
+
+    The topic is resolved through :mod:`px4_topics`, not subscribed by name.  A
+    check that subscribes ``/fmu/out/actuator_motors`` against a PX4 1.16 graph
+    reports FAIL on a topic that is publishing perfectly well under
+    ``_v1`` -- which sends you looking for a mixer problem that does not exist.
     """
     try:
         import rclpy                                      # noqa: F401
         from rclpy.node import Node
-        from px4_msgs.msg import ActuatorMotors
     except Exception as ex:                               # noqa: BLE001
         return None, dict(skipped=True, reason=f"no live ROS graph ({type(ex).__name__})",
                           topic=topic)
     import rclpy
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-    from px4_msgs.msg import ActuatorMotors
+
+    from . import px4_topics as PT
     rclpy.init()
     node = Node("check_actuator_motors")
+    try:
+        spec = PT.resolve(node, topic, timeout_s=timeout_s, namespace=namespace,
+                          required=False)
+    except PT.VersionMismatch as ex:
+        node.destroy_node(); rclpy.shutdown()
+        return False, dict(topic=topic, messages=0, hz=0.0, version_mismatch=str(ex))
+    if spec is None:
+        node.destroy_node(); rclpy.shutdown()
+        return False, dict(topic=topic, messages=0, hz=0.0,
+                           reason="no topic matching this base, versioned or not")
     qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                      history=HistoryPolicy.KEEP_LAST, depth=5)
     got = {"n": 0}
-    node.create_subscription(ActuatorMotors, topic,
+    node.create_subscription(spec.msg_class, spec.topic,
                              lambda _m: got.__setitem__("n", got["n"] + 1), qos)
     t_end = node.get_clock().now().nanoseconds * 1e-9 + timeout_s
     while node.get_clock().now().nanoseconds * 1e-9 < t_end:
@@ -143,7 +159,8 @@ def check_actuator_motors(topic="/fmu/out/actuator_motors", timeout_s=3.0):
     node.destroy_node()
     rclpy.shutdown()
     hz = got["n"] / timeout_s
-    return bool(got["n"] > 0), dict(topic=topic, messages=got["n"], hz=hz)
+    return bool(got["n"] > 0), dict(topic=spec.topic, resolved=str(spec),
+                                    messages=got["n"], hz=hz)
 
 
 def main(argv=None):

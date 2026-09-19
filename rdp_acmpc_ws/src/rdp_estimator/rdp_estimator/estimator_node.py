@@ -72,7 +72,9 @@ def main(args=None):                                       # pragma: no cover
     try:
         import rclpy
         from rclpy.node import Node
+        from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
         from geometry_msgs.msg import WrenchStamped
+        from std_msgs.msg import Float64MultiArray
     except Exception as ex:                               # noqa: BLE001
         print(f"rdp_estimator: no ROS 2 environment ({type(ex).__name__}). "
               f"The core is importable and testable without one; see "
@@ -80,26 +82,92 @@ def main(args=None):                                       # pragma: no cover
         return 1
     import rclpy
     from rclpy.node import Node
+    from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
     from geometry_msgs.msg import WrenchStamped
+    from std_msgs.msg import Float64MultiArray
+    from acmpc_controller import frames as F
+    from acmpc_controller import px4_topics as PT
 
     class RDPNode(Node):
+        """Feeds the causal buffer from state and actuator topics, and ONLY those.
+
+        The window is assembled here, in the odometry callback, from:
+
+            p, R, v, omega   <- /fmu/out/vehicle_odometry   (converted to ENU/FLU)
+            PWM              <- /fmu/out/actuator_motors
+            u_prev, u_ref,
+            p_ref            <- /controller/frame_aux
+
+        ``/disturbance/ground_truth`` is deliberately absent from that list and
+        there is no code path by which it could enter (§9.1).  The buffer is
+        pushed at the odometry rate rather than on a timer, so a frame is a
+        genuine sample of the vehicle and not the last one repeated.
+        """
+
         def __init__(self):
             super().__init__("rdp_estimator")
-            self.declare_parameter("model_path", "models/rdp_gru.npz")
-            self.declare_parameter("rate_hz", 50.0)
-            self.declare_parameter("filter_alpha", 0.0)
-            self.declare_parameter("budget_ms", 8.0)
-            mp = self.get_parameter("model_path").value
-            self.core = EstimatorCore(mp,
-                                      filt=self.get_parameter("filter_alpha").value,
-                                      budget_ms=self.get_parameter("budget_ms").value)
+            for k, v in (("model_path", "models/rdp_gru.npz"), ("rate_hz", 50.0),
+                         ("filter_alpha", 0.0), ("budget_ms", 8.0),
+                         ("px4_namespace", ""), ("topic_timeout_s", 30.0),
+                         ("require_actuator_motors", True)):
+                self.declare_parameter(k, v)
+            g = lambda k: self.get_parameter(k).value
+            self.core = EstimatorCore(g("model_path"), filt=g("filter_alpha"),
+                                      budget_ms=g("budget_ms"))
+            ns, tmo = g("px4_namespace"), float(g("topic_timeout_s"))
+            odom = PT.resolve(self, "/fmu/out/vehicle_odometry", tmo, ns)
+            am = PT.resolve(self, "/fmu/out/actuator_motors", 5.0, ns,
+                            required=bool(g("require_actuator_motors")))
+            qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                             history=HistoryPolicy.KEEP_LAST, depth=5)
+            self.pwm = np.zeros(4)
+            self.u_prev = np.zeros(4)
+            self.u_ref = np.zeros(4)
+            self.p_ref = np.zeros(3)
+            self.n_push = 0
+            self.create_subscription(odom.msg_class, odom.topic, self.on_odom, qos)
+            self.get_logger().info(f"state from {odom}")
+            if am is not None:
+                self.create_subscription(am.msg_class, am.topic, self.on_motors, qos)
+                self.get_logger().info(f"PWM from {am}")
+            else:
+                self.get_logger().error(
+                    "actuator_motors is NOT publishing.  Per §6.2 the PWM block "
+                    "is the only observable channel for a STANDING moment, so "
+                    "the moment outputs of this estimator are unobservable "
+                    "without it.  Proceeding because require_actuator_motors is "
+                    "false; the moment channels should not be believed.")
+            self.create_subscription(Float64MultiArray, "/controller/frame_aux",
+                                     self.on_aux, 10)
             self.pub = self.create_publisher(WrenchStamped,
                                              "/rdp/disturbance_estimate", 10)
-            hz = float(self.get_parameter("rate_hz").value)
-            self.create_timer(1.0 / hz, self.tick)
+            self.create_timer(1.0 / float(g("rate_hz")), self.tick)
             self.get_logger().info(
                 f"RDP up: {self.core.rdp.kind}, H={self.core.H}, "
                 f"channels={self.core.rdp.channels}")
+
+        def on_motors(self, m):
+            self.pwm = np.asarray(m.control, float)[:4]
+
+        def on_aux(self, m):
+            d = np.asarray(m.data, float)
+            if d.size >= 11:
+                self.u_prev, self.u_ref, self.p_ref = d[0:4], d[4:8], d[8:11]
+
+        def on_odom(self, m):
+            p = F.ned_to_enu_vec(np.asarray(m.position, float))
+            v = F.ned_to_enu_vec(np.asarray(m.velocity, float))
+            q = F.px4_quat_to_enu_flu(np.asarray(m.q, float))
+            om = F.frd_to_flu_vec(np.asarray(m.angular_velocity, float))
+            R = F.qrotmat(q[None])[0]
+            stamp = float(getattr(m, "timestamp_sample", m.timestamp)) * 1e-6
+            self.core.push(p, self.p_ref, R, v, om, self.u_prev, self.u_ref,
+                           self.pwm, stamp=stamp)
+            self.n_push += 1
+            if self.n_push == self.core.H:
+                self.get_logger().info(
+                    f"causal window full after {self.n_push} frames "
+                    f"({self.core.buf.span_s():.2f} s); estimates are live")
 
         def tick(self):
             d, info = self.core.estimate()
