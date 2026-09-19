@@ -1,18 +1,18 @@
 {
-  "scale": "smoke",
+  "scale": "medium",
   "dr_budget": "reduced",
   "budget": {
-    "iters": 6,
-    "seq_iters": 3,
+    "iters": 200,
+    "seq_iters": 60,
     "seeds": 2,
-    "bins": 3,
-    "eval_ep": 8,
-    "eval_T": 100
+    "bins": 4,
+    "eval_ep": 16,
+    "eval_T": 200
   },
   "seeds": [
     5,
     200
   ],
-  "conservatism_premium_pct": 5.384266361646809,
-  "total_wall_s": 1811.3647229650032
+  "conservatism_premium_pct": 0.6993648268959494,
+  "total_wall_s": 7316.960915791991
 }

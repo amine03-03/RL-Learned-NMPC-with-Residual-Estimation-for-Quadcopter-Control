@@ -113,7 +113,7 @@
     "fig8",
     "square"
   ],
-  "n_eval": 8,
-  "T_eval": 250,
-  "scale": "smoke"
+  "n_eval": 64,
+  "T_eval": 600,
+  "scale": "medium"
 }
