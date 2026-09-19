@@ -250,3 +250,40 @@ def as_floats(value, n=None, name="parameter"):
     if n is not None and len(out) != n:
         raise ValueError(f"{name} must have {n} elements, got {len(out)}: {value!r}")
     return np.asarray(out, dtype=float)
+
+
+def add_study_to_path():
+    """Put the repository's ``study/`` directory on ``sys.path``.
+
+    ``rdp_infer`` and ``x500_core_jax`` live there, outside the ROS workspace,
+    and are imported by three packages.  Each was computing the path by
+    counting ``..`` from ``__file__`` -- which is fragile, because with
+    ``colcon build --symlink-install`` the module that actually runs lives
+    under ``build/<pkg>/`` and the count only happens to come out the same.
+    Search upward for the directory instead, and say so when it is not there:
+    ``ModuleNotFoundError: No module named 'rdp_infer'`` names the symptom and
+    not the cause.
+    """
+    import os
+    import sys
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    tried = []
+    d = here
+    for _ in range(8):
+        cand = os.path.join(d, "study")
+        tried.append(cand)
+        if os.path.isfile(os.path.join(cand, "rdp_infer.py")):
+            if cand not in sys.path:
+                sys.path.insert(0, cand)
+            return cand
+        nxt = os.path.dirname(d)
+        if nxt == d:
+            break
+        d = nxt
+    raise ImportError(
+        "cannot find the repository's study/ directory, which holds rdp_infer "
+        "and x500_core_jax.\nSearched upward from " + here + ":\n  "
+        + "\n  ".join(tried)
+        + "\nThe ROS workspace is meant to sit inside the repository, beside "
+          "study/.  If it was copied out, set PYTHONPATH to the study directory.")

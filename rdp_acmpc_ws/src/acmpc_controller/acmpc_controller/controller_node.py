@@ -68,8 +68,27 @@ def main(args=None):                                       # pragma: no cover
     from geometry_msgs.msg import WrenchStamped
     from std_msgs.msg import Float64MultiArray, String
 
-    sys.path.insert(0, "src/reference_generator")
-    from reference_generator import lissajous as L
+    #  reference_generator is a built ROS package, so the plain import is what
+    #  should work.  The fallback existed as `sys.path.insert(0,
+    #  "src/reference_generator")` -- a RELATIVE path, which only resolves when
+    #  the process happens to have been started from the workspace root.  Under
+    #  `ros2 launch` the working directory is wherever the user ran the command,
+    #  so that worked by luck.  Compute it instead, and only if needed.
+    try:
+        from reference_generator import lissajous as L
+    except ImportError:
+        import os as _os
+        _here = _os.path.dirname(_os.path.abspath(__file__))
+        for _ in range(8):
+            _c = _os.path.join(_here, "src", "reference_generator")
+            if _os.path.isdir(_os.path.join(_c, "reference_generator")):
+                sys.path.insert(0, _c)
+                break
+            _nxt = _os.path.dirname(_here)
+            if _nxt == _here:
+                break
+            _here = _nxt
+        from reference_generator import lissajous as L
 
     class ControllerNode(Node):
         def __init__(self):
@@ -117,6 +136,19 @@ def main(args=None):                                       # pragma: no cover
                    else f"feasible: peak_a {pa:.3f} <= {budget:.4f} m/s^2"))
             self.ctrl = ACMPCController(horizon=int(g("horizon")),
                                         n_iter=int(g("n_iter")), **spec)
+            #  Taken from the study, not retyped: the preview geometry is part
+            #  of the observation the cost map was trained on, and a local copy
+            #  that drifted would be silent.
+            X = self.ctrl.X
+            self.PREVIEW_H = tuple(X.PREVIEW_H)
+            self.PREVIEW_STRIDE = int(X.PREVIEW_STRIDE)
+            if getattr(self.ctrl, "ckpt_src", None):
+                self.get_logger().info(
+                    f"checkpoint {self.ctrl.ckpt_src}; it expects a "
+                    f"{self.ctrl.obs_w}-wide observation"
+                    + (f" (OBS_DIM + {self.ctrl.oracle_n} oracle channels, fed "
+                       f"the {self.ctrl.oracle_target} estimate)"
+                       if self.ctrl.oracle_n else ""))
 
             # -- PX4 topics, resolved from the live graph ------------------- #
             ns, tmo = g("px4_namespace"), float(g("topic_timeout_s"))
@@ -262,7 +294,25 @@ def main(args=None):                                       # pragma: no cover
                     return p[0], v[0], a[0]
 
             xr, ur = RG.ref_traj(pva, t, N, dt)
-            u, info = self.ctrl.step(self.state, xr, ur, d_hat=self.d_hat)
+
+            #  The (5.3) preview block the cost map was trained on: the
+            #  reference position error and velocity at three lookaheads of
+            #  PREVIEW_STRIDE control steps.  Under a hold every lookahead is
+            #  the same setpoint, which is exactly the information a hold task
+            #  carries; under a tracking reference it is not, and supplying a
+            #  frozen preview would evaluate the learned cost somewhere it was
+            #  never trained.
+            p_now = np.asarray(self.state[0:3], float)
+            hold = self.ref_mode == "hold"
+            preview = np.empty((3, 6))
+            for i, h in enumerate(self.PREVIEW_H):
+                t_h = t if hold else t + h * self.PREVIEW_STRIDE * dt
+                pr, vr, _ = pva(t_h)
+                preview[i, 0:3] = np.asarray(pr, float) - p_now
+                preview[i, 3:6] = np.asarray(vr, float)
+
+            u, info = self.ctrl.step(self.state, xr, ur, d_hat=self.d_hat,
+                                     preview=preview)
 
             # OffboardControlMode must stream BEFORE and DURING offboard
             mm = self.OffboardMode()

@@ -468,3 +468,136 @@ def test_V3_vector_parameter_names_itself_in_the_error():
     with pytest.raises(ValueError) as ex:
         PT.as_floats("[1,2]", 3, "payload_offset")
     assert "payload_offset" in str(ex.value)
+
+
+# --------------------------------------------------------------------------- #
+#  O1..O5  the observation the cost map is actually handed
+# --------------------------------------------------------------------------- #
+import copy
+import pickle
+
+import x500_core_jax as X
+
+
+def _ckpt():
+    import os
+    p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "..", "artifacts", "acmpc", "model.pkl")
+    if not os.path.exists(p):
+        pytest.skip("no AC-MPC checkpoint in artifacts/")
+    return pickle.load(open(p, "rb"))
+
+
+def _widen(ck, extra=6):
+    """The 53-wide layout nb5's variant C produces: OBS_DIM + the 6 oracle
+    channels, with the trunk's first layer widened to match."""
+    import jax.numpy as jnp
+    a = copy.deepcopy(ck["actor"])
+    W, b = a["trunk"][0]
+    a["trunk"][0] = (jnp.asarray(np.vstack([np.asarray(W),
+                                            np.zeros((extra, W.shape[1]))])), b)
+    for k, fill in (("mu", 0.0), ("var", 1.0)):
+        v = np.asarray(a["obs_norm"][k])
+        a["obs_norm"][k] = jnp.asarray(np.concatenate([v, np.full(extra, fill)]))
+    return dict(ck, actor=a, cfg=dict(ck["cfg"], oracle=True))
+
+
+def _ctrl(**kw):
+    from acmpc_controller.controller import ACMPCController
+    return ACMPCController(mode="acmpc", horizon=1, n_iter=5, use_d=True, **kw)
+
+
+def _stage(c, d_hat=None, x=(0.1, 0.0, 1.4)):
+    from acmpc_controller import refgen as RG
+    xr, ur = RG.ref_traj(lambda t: (np.array([0.0, 0.0, 1.5]), np.zeros(3),
+                                    np.zeros(3)), 0.0, 1, 0.02)
+    x13 = np.concatenate([x, np.zeros(3), [1, 0, 0, 0], np.zeros(3)])
+    prev = np.tile(np.concatenate([np.array([0.0, 0.0, 1.5]) - np.asarray(x),
+                                   np.zeros(3)]), (3, 1))
+    return c.step(x13, xr, ur, d_hat=d_hat, preview=prev)
+
+
+def test_O1_observation_is_built_not_zeroed():
+    """The cost map is a FUNCTION of the observation.  Handing it zeros
+    evaluates the learned cost at a point that never occurs in training, and
+    nothing raises -- the widths match."""
+    c = _ctrl(ckpt=_ckpt())
+    _, info = _stage(c, np.zeros(6))
+    assert info["obs"] is not None
+    assert info["obs"].size == X.OBS_DIM
+    assert np.abs(info["obs"]).max() > 0.0
+
+
+def test_O2_error_and_preview_blocks_land_where_5_3_puts_them():
+    c = _ctrl(ckpt=_ckpt())
+    _, info = _stage(c, np.zeros(6), x=(0.1, 0.0, 1.4))
+    o = info["obs"]
+    assert o[:X.NE] == pytest.approx(info["e"], abs=1e-12)     # e first
+    pv = o[X.NE:X.NE + 18].reshape(3, 6)
+    for row in pv:                                            # p_ref - p, v_ref
+        assert row[0:3] == pytest.approx([-0.1, 0.0, 0.1], abs=1e-12)
+        assert row[3:6] == pytest.approx([0.0, 0.0, 0.0], abs=1e-12)
+
+
+def test_O3_observation_memory_advances_like_the_training_env():
+    """int_ep integrates the position error and the EMAs move; a controller
+    that never advances them hands the cost map four blocks of zeros for the
+    whole flight."""
+    c = _ctrl(ckpt=_ckpt())
+    for _ in range(10):
+        _stage(c, np.zeros(6))
+    assert np.abs(c.int_ep).max() > 0.0
+    assert np.abs(c.du_bar).max() > 0.0
+    # the integral of a constant 0.1 m error over 10 steps of 20 ms.  The
+    # error block is x - x_ref, so holding 0.1 m PAST the setpoint integrates
+    # POSITIVE -- while the preview block is p_ref - p and is negative.  The
+    # two sign conventions are the study's and sit side by side in (5.3).
+    assert c.int_ep[0] == pytest.approx(+0.1 * 10 * X.P.dt_c, rel=1e-9)
+
+
+def test_O4_a_variant_C_checkpoint_gets_its_six_oracle_channels():
+    """The crash this fixes: variant C was trained with the residual in the
+    observation too, so its actor expects OBS_DIM + 6.  Handing it OBS_DIM is
+    a broadcasting error inside the cost map, a long way from its cause."""
+    ck = _widen(_ckpt())
+    c = _ctrl(ckpt=ck)
+    assert c.obs_w == X.OBS_DIM + 6 and c.oracle_n == 6
+    d = np.array([0.0, 0.0, -2.942, -0.1765, 0.3530, 0.0])
+    _, info = _stage(c, d)
+    assert info["obs"].size == X.OBS_DIM + 6
+    assert info["obs"][-6:] == pytest.approx(d, abs=1e-12)     # raw wrench
+
+
+def test_O5_oracle_target_residual_converts_instead_of_passing_raw():
+    """'wrench' and 'residual' have the same width, so choosing wrongly is
+    silent.  The training config says which."""
+    ck = _widen(_ckpt())
+    ck = dict(ck, cfg=dict(ck["cfg"], oracle_target="residual"))
+    c = _ctrl(ckpt=ck)
+    d = np.array([0.0, 0.0, -2.942, -0.1765, 0.3530, 0.0])
+    _, info = _stage(c, d)
+    assert info["obs"][-6:] == pytest.approx(
+        np.asarray(X.wrench_to_dmod(d[None]))[0], rel=1e-9)
+
+
+def test_O6_an_unrecognisable_observation_width_is_refused_at_construction():
+    import jax.numpy as jnp
+    ck = _ckpt()
+    a = copy.deepcopy(ck["actor"])
+    for k in ("mu", "var"):
+        v = np.asarray(a["obs_norm"][k])
+        a["obs_norm"][k] = jnp.asarray(np.concatenate([v, np.zeros(3)]))
+    with pytest.raises(ValueError) as ex:
+        _ctrl(ckpt=dict(ck, actor=a))
+    assert "50-wide" in str(ex.value)
+
+
+def test_O7_study_directory_is_found_by_search_not_by_counting_dots():
+    """With `colcon build --symlink-install` the module that runs lives under
+    build/, at a different depth from src/.  Counting `..` worked by
+    coincidence; the estimator's copy did not exist at all, which is why
+    rdp_infer was missing."""
+    import os
+    d = PT.add_study_to_path()
+    assert os.path.isfile(os.path.join(d, "rdp_infer.py"))
+    assert os.path.isfile(os.path.join(d, "x500_core_jax.py"))

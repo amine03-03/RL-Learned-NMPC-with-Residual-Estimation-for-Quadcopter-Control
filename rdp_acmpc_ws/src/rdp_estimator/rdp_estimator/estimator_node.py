@@ -24,6 +24,9 @@ class EstimatorCore:
     """ROS-free core, so the whole data path can be tested without a graph."""
 
     def __init__(self, model_path, H=None, filt=0.0, budget_ms=8.0):
+        # rdp_infer lives in the repository's study/, outside this workspace.
+        from acmpc_controller.px4_topics import add_study_to_path
+        add_study_to_path()
         import rdp_infer
         self.rdp = rdp_infer.load(model_path)
         self.H = int(H or self.rdp.H)

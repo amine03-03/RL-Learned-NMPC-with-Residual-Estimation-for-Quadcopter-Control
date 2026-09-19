@@ -19,12 +19,13 @@ import time
 
 import numpy as np
 
-_STUDY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                      "..", "..", "..", "..", "study")
-if os.path.isdir(_STUDY) and _STUDY not in sys.path:
-    sys.path.insert(0, os.path.abspath(_STUDY))
-
 from . import bd_bridge                                    # noqa: E402
+from .px4_topics import add_study_to_path                  # noqa: E402
+
+#  Counting `..` from __file__ worked only by coincidence: with
+#  `colcon build --symlink-install` the module that runs lives under build/,
+#  at a different depth from src/.  Search for the directory instead.
+add_study_to_path()
 
 
 class ACMPCController:
@@ -54,14 +55,53 @@ class ACMPCController:
         self.use_d = bool(use_d)
         self.actor = None
         if mode == "acmpc":
-            ck = (X.load_ckpt("acmpc_adaptive", "variants", "C.pkl")
-                  or X.load_ckpt("acmpc", "model.pkl")) if ckpt is None else ckpt
+            #  Preference order, and the reason for it.  Variant B routes the
+            #  residual into the MODEL and leaves the cost map
+            #  disturbance-blind; variant C routes it into both.  The scenario
+            #  sweep puts B ahead of C everywhere, so B is what this flies when
+            #  it is available -- and B needs no oracle observation channel,
+            #  which makes its observation the plain OBS_DIM one.  C is kept as
+            #  a fallback because it is still an adaptive policy; the plain
+            #  Notebook-3 model is the last resort and is not adaptive at all.
+            self.ckpt_src = None
+            if ckpt is None:
+                for src in (("acmpc_adaptive", "variants", "B.pkl"),
+                            ("acmpc_adaptive", "variants", "C.pkl"),
+                            ("acmpc", "model.pkl")):
+                    ck = X.load_ckpt(*src)
+                    if ck is not None:
+                        self.ckpt_src = "/".join(src)
+                        break
+            else:
+                ck, self.ckpt_src = ckpt, "caller-supplied"
             if ck is None:
                 raise FileNotFoundError(
                     "no AC-MPC checkpoint found; run Notebooks 3 and 5, or pass "
                     "mode='nmpc1' to fly the incumbent")
             self.actor = ck["actor"]
             self.cfg = dict(ck["cfg"], N=self.N, n_iter=self.n_iter, n_diff=1)
+
+            #  What observation width was this actor TRAINED with?  Read it off
+            #  the normaliser rather than assuming X.OBS_DIM: the adaptive
+            #  variants that route the residual into the observation as well as
+            #  the model (variant C) were trained with the six oracle channels
+            #  on, so their actor expects OBS_DIM + 6.  Handing such an actor a
+            #  47-wide vector is a broadcasting error inside the cost map --
+            #  loud, but a long way from its cause.
+            mu = (self.actor.get("obs_norm") or {}).get("mu")
+            self.obs_w = int(mu.shape[-1]) if mu is not None else int(X.OBS_DIM)
+            self.oracle_n = self.obs_w - int(X.OBS_DIM)
+            if self.oracle_n not in (0, 6):
+                raise ValueError(
+                    f"this checkpoint expects a {self.obs_w}-wide observation, "
+                    f"which is neither OBS_DIM ({X.OBS_DIM}) nor OBS_DIM + 6. "
+                    f"It was trained against a different observation layout, so "
+                    f"flying it here would evaluate the learned cost at points "
+                    f"it never saw. Re-export it, or pass mode='nmpc1'.")
+            #  'wrench' feeds the raw estimate in [N, N.m]; 'residual' feeds it
+            #  converted.  The training config says which, and getting it wrong
+            #  is silent -- the widths match either way.
+            self.oracle_target = self.cfg.get("oracle_target", "wrench")
         elif mode == "pid":
             self.pid = X.make_pid_ctrl()
         elif mode != "nmpc1":
@@ -69,11 +109,73 @@ class ACMPCController:
         self.last_u = np.array([X.U_HOVER, 0.0, 0.0, 0.0])
         self.solve_ms = []
         self.Om_hat = None
+        #  (5.3) carries memory: an integral of the position error and three
+        #  exponential means.  The training environment keeps it per vehicle
+        #  and advances it every step; a controller that does not is handing
+        #  the cost map four blocks of zeros for the whole flight.
+        self._ema_a = float(np.exp(-X.P.dt_c / X.EMA_TAU))
+        self._warned_preview = False
         self.reset()
 
     def reset(self):
-        """Cold-start the rotor observer at the hover trim."""
+        """Cold-start the rotor observer and the observation memory."""
         self.Om_hat = np.full(4, float(self.X.OM_HOVER))
+        self.int_ep = np.zeros(3)
+        self.du_bar = np.zeros(4)
+        self.ev_bar = np.zeros(3)
+        self.om_bar = np.zeros(3)
+        self.last_u = np.array([self.X.U_HOVER, 0.0, 0.0, 0.0])
+
+    def _build_obs(self, e, x17, xr_seq, preview, d_hat):
+        """(5.3): the 47 channels the cost map was trained on, plus the oracle.
+
+            e (16) | 3 x [p_ref(t+h) - p, v_ref(t+h)] (18) | int_ep (3)
+                   | du_bar (4) | ev_bar (3) | om_bar (3)
+
+        ``preview`` is (3, 6) built by the caller from the reference it is
+        flying.  Under a position hold every lookahead is the same fixed
+        setpoint, so it can be derived from ``xr_seq[0]`` -- but only under a
+        hold, and a tracking reference that relies on that silently trains the
+        cost map on a preview that does not move.  So the fallback says so
+        once.
+        """
+        X, np_ = self.X, np
+        p = np_.asarray(x17[0:3], float)
+        if preview is None:
+            if not self._warned_preview:
+                self._warned_preview = True
+                print("ACMPCController: no reference preview supplied; assuming "
+                      "a position hold, where every lookahead is the same "
+                      "setpoint. Pass preview= for a moving reference.",
+                      file=sys.stderr)
+            pr, vr = np_.asarray(xr_seq[0][0:3], float), np_.asarray(xr_seq[0][3:6], float)
+            preview = np_.tile(np_.concatenate([pr - p, vr]), (3, 1))
+        preview = np_.asarray(preview, float).reshape(3, 6)
+
+        o = np_.concatenate([
+            np_.asarray(e, float).reshape(-1),
+            preview.reshape(-1),
+            np_.clip(self.int_ep, -5.0, 5.0),
+            self.du_bar, self.ev_bar, self.om_bar])
+
+        if self.oracle_n == 6:
+            w = np_.zeros(6) if d_hat is None else np_.asarray(d_hat, float).reshape(6)
+            o = np_.concatenate([o, w if self.oracle_target == "wrench"
+                                 else bd_bridge.wrench_to_dmod(w, self.dmod_mode)])
+        if o.size != self.obs_w:
+            raise ValueError(f"built a {o.size}-wide observation for an actor "
+                             f"expecting {self.obs_w}")
+        return o
+
+    def _advance_obs(self, e, u, om):
+        """The per-step update of (5.3)'s memory, as the training env does it."""
+        a, dt = self._ema_a, float(self.X.P.dt_c)
+        e = np.asarray(e, float).reshape(-1)
+        du = np.asarray(u, float) - np.asarray(self.last_u, float)
+        self.int_ep = np.clip(self.int_ep + e[0:3] * dt, -5.0, 5.0)
+        self.du_bar = a * self.du_bar + (1 - a) * du
+        self.ev_bar = a * self.ev_bar + (1 - a) * e[3:6]
+        self.om_bar = a * self.om_bar + (1 - a) * np.asarray(om, float).reshape(3)
 
     def _solver(self, no_d):
         """The jitted solve, compiled once per (mode, horizon, d-present).
@@ -125,11 +227,14 @@ class ACMPCController:
                 f"expected a 13-element [p,v,q,om] state (or 17 with Omega), got {x13.size}")
         return np.concatenate([x13, self.Om_hat])
 
-    def step(self, x13, xr_seq, uref_seq, obs=None, d_hat=None):
+    def step(self, x13, xr_seq, uref_seq, obs=None, d_hat=None, preview=None):
         """x13 = [p, v, q, om] ENU/FLU; xr_seq (N+1,17); uref_seq (N,4).
 
         ``xr_seq`` comes from :mod:`refgen`, which mirrors the study's
-        ``ref_state``.  Returns ``(u_ctbr (4,), info)``.
+        ``ref_state``.  ``preview`` is the (3, 6) reference lookahead block of
+        (5.3); when it is None a position hold is assumed.  ``obs`` overrides
+        the built observation entirely, for tests.  Returns
+        ``(u_ctbr (4,), info)``.
         """
         jnp, X = self.jnp, self.X
         t0 = time.perf_counter()
@@ -146,20 +251,30 @@ class ACMPCController:
                                                      self.dmod_mode))[None]
         xs = jnp.asarray(xr_seq)[None]
         us = jnp.asarray(uref_seq)[None]
+        o_np = None
         if self.mode == "pid":
             u, _ = self.pid(None, jnp.asarray(e), jnp.asarray(xr_seq[0])[None],
                             uref=us[:, 0])
         else:
-            o = (jnp.asarray(obs)[None] if obs is not None
-                 else jnp.zeros((1, X.OBS_DIM)))
+            #  Only the learned cost map reads the observation.  nmpc1 solves a
+            #  fixed quadratic and ignores it, so do not pay to build one.
+            if self.mode == "acmpc":
+                o_np = (np.asarray(obs, float).reshape(-1) if obs is not None
+                        else self._build_obs(e[0], x17, xr_seq, preview, d_hat))
+                o = jnp.asarray(o_np)[None]
+            else:
+                o = jnp.zeros((1, X.OBS_DIM))
             u = self._solver(d is None)(jnp.asarray(e), xs, us, d, o)
         u = np.asarray(u)[0]
         # advance the rotor observer with the command actually issued, through
         # the same model the solver predicted with
         self.Om_hat = np.asarray(
             X.step_c(jnp.asarray(x17)[None], jnp.asarray(u)[None]))[0, 13:17]
+        #  Advance (5.3)'s memory with the command actually issued, BEFORE
+        #  last_u is overwritten -- du_bar is a mean of u - u_prev.
+        self._advance_obs(e[0], u, x17[10:13])
         ms = 1e3 * (time.perf_counter() - t0)
         self.solve_ms.append(ms)
         self.last_u = u
         return u, dict(solve_ms=ms, e=e[0], d_used=None if d is None else np.asarray(d)[0],
-                       Om_hat=self.Om_hat.copy())
+                       Om_hat=self.Om_hat.copy(), obs=o_np)

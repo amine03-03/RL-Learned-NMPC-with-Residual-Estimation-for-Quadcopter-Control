@@ -203,7 +203,39 @@ silently make every plotted truth wrong.
 
 ---
 
-## 6. Known limits
+## 6. What the controller is actually handed
+
+Two things about the learned controller are easy to get wrong and silent when
+you do.
+
+**The observation is not decoration.** The cost map is a *function* of the
+47-channel observation of (5.3):
+
+```
+e (16) | 3 x [p_ref(t+h) - p, v_ref(t+h)] (18) | int_ep (3) | du_bar (4)
+       | ev_bar (3) | om_bar (3)
+```
+
+Four of those blocks carry **memory** — an integral of the position error and
+three exponential means — which the controller advances every step exactly as
+the training environment does. A controller that passes zeros, or that never
+advances the memory, evaluates the learned cost at a point that never occurs
+in training. Nothing raises: the widths match.
+
+**Checkpoints do not all want the same width.** Variant C was trained with the
+residual routed into the observation as well as the model, so its actor expects
+`OBS_DIM + 6 = 53`. Handing it 47 is a broadcasting error deep inside the cost
+map. The controller reads the width off the checkpoint's own normaliser and
+builds to match, appending the estimate as the raw wrench or as the converted
+residual according to the training config's `oracle_target` — the two have the
+same width, so choosing wrongly would be silent too.
+
+The checkpoint preference is **B, then C, then the plain Notebook-3 model**, and
+the node logs which it loaded. B routes the residual into the model only and
+wins the scenario sweep; C routes it into both; the plain model is not adaptive
+at all and is the last resort.
+
+## 7. Known limits
 
 * **`actuator_motors` is not optional for the moment channels.** Per §6.2 the
   PWM block is the only observable channel for a *standing* moment: an

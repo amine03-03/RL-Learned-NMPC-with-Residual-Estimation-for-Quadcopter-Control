@@ -201,6 +201,19 @@ for C in "${CONTROLLERS[@]}"; do
     exit 1
   fi
 
+  #  A node that dies mid-flight leaves the launch up for the full duration, so
+  #  `timeout` still reports the expected 124 and the leg LOOKS like it ran.
+  #  The only trace is a line in the log.
+  DEAD=$(grep -c "process has died" "$LOG" || true)
+  if [[ "${DEAD:-0}" -gt 0 ]]; then
+    echo >&2
+    echo "$DEAD node(s) died during '$C'.  The first traceback:" >&2
+    sed -n '/Traceback/,/^\[ERROR\]/p' "$LOG" | head -n 25 | sed 's/^/    /' >&2
+    echo >&2
+    echo "Stopping: the remaining legs would fail the same way." >&2
+    exit 1
+  fi
+
   #  A leg that launched, ran its ${DURATION}s and recorded NOTHING is the
   #  quiet failure this demo is most exposed to: the vehicle never armed, or
   #  the plotter never saw a pose.  Say so now, next to the log that explains
