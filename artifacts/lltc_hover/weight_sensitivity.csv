@@ -1,0 +1,17 @@
+kind,value,R2_test,C_dom,C_dec,cost
+lambda,0,0.988621,4,1242,47729.4
+lambda,0.1,0.989804,3,70,8.38388
+lambda,1,0.988433,1,25,8.25692
+lambda,10,0.984803,2,14,8.37951
+lambda,100,0.972662,3,19,8.23741
+lambda,1000,0.810421,3,14,14.5773
+Qx_scale,0.25,nan,nan,nan,8.36898
+Qx_scale,0.5,nan,nan,nan,8.36898
+Qx_scale,1,nan,nan,nan,8.36898
+Qx_scale,2,nan,nan,nan,8.36898
+Qx_scale,4,nan,nan,nan,8.36898
+Qu_scale,0.25,nan,nan,nan,12.1738
+Qu_scale,0.5,nan,nan,nan,9.72807
+Qu_scale,1,nan,nan,nan,8.36898
+Qu_scale,2,nan,nan,nan,8.36482
+Qu_scale,4,nan,nan,nan,10.8278

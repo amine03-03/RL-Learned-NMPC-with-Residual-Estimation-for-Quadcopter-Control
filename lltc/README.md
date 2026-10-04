@@ -104,8 +104,8 @@ core) and will differ on yours. The closed-loop cost is
 | closed-loop cost, NMPC / LLTC (mean of 4 states) | 10.17 / 11.17 (+9.9 %) |
 | control effort Σ‖u−u_r‖²_Qu, NMPC / LLTC | 2.57 / 3.16 |
 | decision variables / equality constraints | NMPC 334 / 234, LLTC 22 / 18 |
-| mean solve time T_a, NMPC / LLTC | 8.4 ms / 2.9 ms (**2.9×**) |
-| worst-case solve time T_w, NMPC / LLTC | 21.7 ms / 12.7 ms (1.7×) |
+| mean solve time T_a, NMPC / LLTC | 8.6 ms / 2.6 ms (**3.3×**) |
+| worst-case solve time T_w, NMPC / LLTC | 21.8 ms / 9.9 ms (2.2×) |
 
 ### Figures
 
