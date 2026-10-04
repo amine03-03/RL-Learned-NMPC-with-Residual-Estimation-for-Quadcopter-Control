@@ -1,0 +1,13 @@
+# study/ (JAX training pipeline, tests, notebooks) and the Python side of the
+# ROS 2 nodes (acmpc_controller imports study/x500_core_jax.py).
+# Verified: Python 3.11 / 3.12, `pytest tests/` -> 101 passed.
+jax==0.10.2
+jaxlib==0.10.2
+optax
+numpy
+scipy
+pandas
+matplotlib
+pyyaml
+nbformat
+pytest

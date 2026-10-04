@@ -84,7 +84,7 @@ There are ~44 `jnp.concatenate` calls in the study and several have
 non-power-of-two operand widths, so another one could trip the same emitter on
 a code path that is not yet exercised. The fix is mechanical: replace the
 concatenate with `_assemble(...)`, and add the numbers to the `test_D8_*`
-checks. `study/notebooks/xla_probe3.py` bisects which call is responsible.
+checks.
 
 ### Escape hatch
 
@@ -97,15 +97,6 @@ JAX_PLATFORMS=cpu python nb1_control_problem.py
 
 This is a workaround, not a fix — it gives up the GPU, which is a large
 slowdown for the training notebooks.
-
-## Diagnostics
-
-- `study/notebooks/xla_probe.py` — dumps environment and CPU, then tries each
-  accepted `XLA_FLAGS` candidate. Useful only for genuine CPU-backend issues.
-- `study/notebooks/xla_probe2.py` — minimal reproducers plus a core-count sweep.
-- `study/notebooks/xla_probe3.py` — bisection ladder from `fc` up to a full
-  rollout, reporting the smallest failing unit, and a decisive test of whether
-  removing concatenates fixes a given failure. Start here.
 
 ## Versions
 

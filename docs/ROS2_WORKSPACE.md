@@ -335,39 +335,31 @@ disturbance-off instant, because without that bound a predictor stuck at zero
   measured here is `rdp_infer` p95 at 1.44 ms on this container, recorded in the
   `.npz` metadata, which is the estimator's share of the budget and not the loop.
 
-The node wrappers are written against the PX4 message interfaces and will need
-the usual first-run shakedown against a real graph. Nothing in this section is
+**Not yet wired in the node wrappers** (the cores exist and are tested; the
+ROS plumbing does not):
+
+- `rdp_estimator` has no subscriptions to `/fmu/out/vehicle_odometry` and
+  `/fmu/out/actuator_motors`, so its `RingBuffer` is never fed, `ready()` stays
+  False and the node publishes the designed fallback `d̂ = 0`.
+- `disturbance_manager` publishes `/disturbance/ground_truth` only; nothing
+  applies that wrench to the Gazebo model, so S1–S6 are not physically realised.
+- `state_logger` logs the two wrench topics; state, reference and command
+  columns are written as zeros.
+- Stock PX4 v1.16 does not publish `/fmu/out/actuator_motors`; it must be added
+  to `dds_topics.yaml` (exact commands in the main README §5.1).
+
+A Gazebo run today is therefore a nominal (S0) flight of `controller_node`. The
+node wrappers are written against the PX4 message interfaces and will need the
+usual first-run shakedown against a real graph. Nothing in this section is
 claimed as flown.
 
 ## 8. Building and running
 
-```bash
-# the estimator must be exported before the node can load it
-cd study && python export_estimator.py --arch GRU --out ../rdp_acmpc_ws/models/rdp_gru.npz
-
-cd ../rdp_acmpc_ws && colcon build && source install/setup.bash
-
-# preflight -- any failure aborts the run
-ros2 run acmpc_controller check_ctbr --moment-scenario
-ros2 run acmpc_controller check_glue
-
-# the nodes
-ros2 run reference_generator  reference_node  --ros-args --params-file config/acmpc.yaml
-ros2 run rdp_estimator        estimator_node  --ros-args --params-file config/rdp.yaml
-ros2 run acmpc_controller     controller_node --ros-args --params-file config/acmpc.yaml
-ros2 run disturbance_manager  manager_node    --ros-args --params-file config/disturbances.yaml
-ros2 run state_logger         logger_node     --ros-args -p run_dir:=runs/experiment_0
-
-# offline figures from a finished run
-ros2 run visualization live_panel runs/experiment_0
-```
-
-Without a ROS environment the cores still run directly:
-
-```bash
-PYTHONPATH="rdp_acmpc_ws/src/acmpc_controller:rdp_acmpc_ws/src/rdp_estimator:study" \
-  python -m acmpc_controller.check_ctbr
-```
+The complete, tested command sequence (PX4 v1.16.2 + Gazebo Harmonic, ROS 2
+Jazzy, `px4_msgs`, the Micro XRCE-DDS Agent, the Python venv, `colcon build`,
+the preflight checks, and one terminal per node) is in the main
+[README §5](../README.md#5-part-3-ros-2--px4--gazebo-simulation). It is kept in
+one place so the two cannot drift apart.
 
 ## 9. Position-hold RDP training (E-0)
 

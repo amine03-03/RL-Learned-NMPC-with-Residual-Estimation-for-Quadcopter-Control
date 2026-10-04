@@ -1,206 +1,551 @@
-# Adaptive AC-MPC for a quadrotor, with a residual dynamics predictor
+# RL-Learned NMPC with Residual Estimation for Quadcopter Control
 
-An implementation of `AGENTS_SPEC_Adaptive_ACMPC.md`: a model predictive
-controller whose **stage cost is learned** rather than tuned, extended with a
-causal **residual dynamics predictor** (RDP) that estimates the disturbance
-online, plus the PX4/Gazebo workspace that flies it.
+A model predictive controller for a quadrotor (PX4 **Holybro X500**) whose cost is
+**learned** instead of hand-tuned, extended with a causal **residual dynamics
+predictor (RDP)** that estimates the disturbance online. It also contains a
+standalone study of the **learned Lyapunov terminal cost (LLTC)** that lets a
+one-step NMPC replace a long-horizon one.
 
-The licence for the idea is Gros & Zanon (2020): for a *wrong* model, the
-finite-horizon problem solved under that model returns the optimal policy of the
-true system once its stage and terminal costs are adapted. Equation (1.1) is not
-computable, so it is learned. That is the whole project.
+The project has three parts:
 
----
-
-## Read this first: two rounds of corrections
-
-Two independent passes, both recorded with the measurements that drove them:
-
-- [`docs/CORRECTIONS.md`](docs/CORRECTIONS.md) — **eight errors in the build
-  specification**, found while implementing it.
-- [`docs/AUDIT.md`](docs/AUDIT.md) — a later audit against the **real PX4 x500**
-  (SDF at `bb0b9cf` + the `gz_x500` airframe file) and the **two source papers**
-  (arXiv:2306.09852 for AC-MPC, arXiv:2605.16015 for the adaptive mechanism).
-  Fourteen further corrections, including three that changed results.
-
-The audit's headline findings: PX4's `SIM_GZ_EC_MIN = 150` idle floor was
-ignored, making hover control effectiveness **17.65 % optimistic**; exploration
-noise was on the cost-map parameters rather than the action, so §8.3's
-exploration mechanism **could not occur**; and MPVE was a config flag nothing
-read, so that whole sweep returned **bit-identical rows**. The RDP now trains on
-**position hold**, as its paper specifies.
-
-## The eight specification errors
-
-The specification says *"never let a claim outrun a measurement"*. Applying that
-to the specification itself, **eight of its statements do not survive checking**.
-Each is recorded in [`docs/CORRECTIONS.md`](docs/CORRECTIONS.md) with the
-derivation and the measurement that refutes it, and each is asserted by a test in
-`study/tests/test_spec_corrections.py`, so a correction cannot quietly rot.
-
-| id | what the spec says | what is true | how it was caught |
+| part | folder | what it does | needs |
 |---|---|---|---|
-| **C-1** | (5.6) `A_c` attitude block is `−g·Ξ` | `+g·Ξ` | the spec's sign gives an LQR gain with closed-loop spectral radius **1.1807 — unstable** |
-| **C-2** | (5.6) `B_c` attitude block is `½·diag(ω_max)` | `diag(ω_max)` | autodiff gives (10, 10, 4), not (5, 5, 2); the ½ is already consumed by `e₇..₉ = 2q_v` |
-| **C-3** | (6.1) `F_ten = m_ℓ(g·n̂·e₃ + L‖ṅ̂‖²)` | the sign of the gravity term is `−` | as written, a hanging load pushes the airframe **up** (−3.0163 N against +3.0163 N) |
-| **C-4** | §7.2 suites are "disjoint on drag, lag, thrust and wind" | disjoint on drag, lag and **wind only** | thrust, mass, `K_w` and inertia all overlap: the raw S3 band is a superset, and contraction preserves inclusion |
-| **C-5** | §4.2 the (4.5) sign slip gives `κ_a = 4.6464` | it gives **6.8602** | dense sampling; the `+` sign and `κ_a = 9.077877` are confirmed |
-| **C-6** | T-12 accepts on `‖τ_ext‖` being 5× larger under the nominal mixer | `τ_ext` is the **one quantity the mixer does not change** | at equilibrium it reduces to `−m_p g(0.174,−0.174,0)`; measured, the mixers agree to 2–8 %. What differs without bound is the rate-loop effort |
-| **C-7** | §5.9 maps the cost range linearly, starting at ≈5×10⁴ | that is **660× the terminal matrix** | at `N=1` the solver returns `\|δu\| = 1.9e-5`: AC-MPC degenerates to pure feed-forward and **every row of every sweep in Notebook 3 came out identical** |
-| **N-7** | §6.1's `asym` levels go to `f = 0.11` | the trim limit is **`f = 0.0812`** | holding the standing moment needs `J·K_i·I_lim = 0.286 N·m`; at 0.11 the integrator pins at 3.00, tilt reaches 48° and the vehicle cannot hover |
+| **1. Study** | `study/` | model, iLQR-MPC, LLTC, AC-MPC (RL-learned cost map), domain randomisation, RDP; tests and 8 notebooks | Python + JAX |
+| **2. LLTC hover study** | `lltc/` | one script: LLTC-NMPC (N = 1) vs NMPC (N set by you) on hover, six figures | Python + CasADi + PyTorch |
+| **3. Deployment** | `rdp_acmpc_ws/` | ROS 2 workspace that flies the controller on PX4 SITL + Gazebo | Ubuntu 24.04, ROS 2 Jazzy, PX4, Gazebo Harmonic |
 
-C-1 and C-7 are the two that matter most: the first makes the classical baseline
-unstable, the second makes the learned controller inert while raising no error
-anywhere. Both were found by measurement, not by reading.
-
-Four implementation bugs of the same character were found and fixed while
-testing; they are listed at the end of this file.
+Parts 1 and 2 run on any Linux/macOS machine with Python ≥ 3.11. Part 3 needs
+the ROS 2 / PX4 / Gazebo stack described in [§5](#5-part-3-ros-2--px4--gazebo-simulation).
 
 ---
 
-## Layout
+## Contents
+
+1. [Repository layout](#1-repository-layout)
+2. [Installation (Python)](#2-installation-python)
+3. [Part 1: the study (`study/`)](#3-part-1-the-study-study)
+4. [Part 2: LLTC hover study (`lltc/`)](#4-part-2-lltc-hover-study-lltc)
+5. [Part 3: ROS 2 / PX4 / Gazebo simulation](#5-part-3-ros-2--px4--gazebo-simulation)
+6. [Configuration files](#6-configuration-files)
+7. [Documentation index](#7-documentation-index)
+8. [References](#8-references)
+
+---
+
+## 1. Repository layout
 
 ```
-study/                     pure JAX, no ROS, no PyTorch, float64 throughout
-  x500_core_jax.py         §2-§5  model, error coordinates, iLQR, Env, PPO/TRPO
-  adaptive_core_jax.py     §6     scenarios, the four RDP encoders, AdaptEnv
-  study_prelude.py         §7.1   scale table and notebook furniture
-  study_moderate.py        §7.2   disturbance moderation, the fixed-pilot start
-  viz.py                   §7.3   flight recording, clips, the manifest
-  export_estimator.py      §9.5   the export bridge (fails on parity failure)
-  rdp_infer.py             §9.5   pure-NumPy forward pass, shipped to the node
-  check_consistency.py     §11    study <-> workspace constants
-  tests/                   §11    T-1..T-20 and every correction above
-  notebooks/nb1..nb7       §8     percent-format sources; build_notebooks.py -> .ipynb
-rdp_acmpc_ws/              §9     ROS 2 / PX4 / Gazebo
-  src/acmpc_controller/      control node, PX4 frames, B_d bridge, preflight
-  src/rdp_estimator/         ring buffer, NumPy inference, watchdog, timing
-  src/disturbance_manager/   S0..S6, publishes ground truth (evaluator only)
-  src/reference_generator/   Lissajous (9.5) with its feasibility gate
-  src/experiment_manager/    E-A..E-D sweeps, run dirs, config capture
-  src/state_logger/          50 Hz synchronised CSV
-  src/visualization/         live panel R-F1 and offline R-F2..R-F12
-  config/                    acmpc, rdp, disturbances, experiments
-artifacts/                 every CSV, figure and checkpoint the notebooks write
-docs/CORRECTIONS.md        the eight specification corrections
-docs/AUDIT.md              the audit against PX4 and the two source papers
-docs/ROS2_WORKSPACE.md     what is in the workspace, why, and what is not flown
+.
+├── README.md                    this file
+├── requirements.txt             Python deps for study/ and the ROS 2 nodes
+├── study/                       Part 1, pure JAX, float64, no ROS
+│   ├── x500_core_jax.py           model, error coordinates, iLQR, Env, PPO/TRPO
+│   ├── adaptive_core_jax.py       disturbance scenarios, the four RDP encoders, AdaptEnv
+│   ├── study_prelude.py           scale table (smoke | medium | full) and helpers
+│   ├── study_moderate.py          disturbance moderation, LLTC controller factory
+│   ├── viz.py                     flight recording, clips, manifest
+│   ├── export_estimator.py        trained RDP -> framework-free .npz (parity-checked)
+│   ├── rdp_infer.py               pure-NumPy RDP forward pass used by the ROS node
+│   ├── check_consistency.py       study <-> workspace constants check
+│   ├── tests/                     pytest suite (101 tests)
+│   └── notebooks/                 nb1..nb8 as runnable .py (+ generated .ipynb)
+├── lltc/                        Part 2
+│   ├── lltc_hover.py              LLTC-NMPC vs NMPC on hover, CTBR, CasADi/IPOPT
+│   ├── requirements.txt
+│   └── README.md                  method, settings and results of the script
+├── rdp_acmpc_ws/                Part 3, ROS 2 workspace (ament_python)
+│   ├── src/acmpc_controller/      control node, PX4 frames, B_d bridge, preflight checks
+│   ├── src/rdp_estimator/         ring buffer, NumPy inference, watchdog
+│   ├── src/disturbance_manager/   scenarios S0..S6 (ground-truth wrench)
+│   ├── src/reference_generator/   Lissajous / hold reference with feasibility gate
+│   ├── src/experiment_manager/    experiment plan and config capture
+│   ├── src/state_logger/          50 Hz CSV logger
+│   ├── src/visualization/         offline figures from a run directory
+│   ├── config/                    acmpc.yaml, rdp.yaml, disturbances.yaml, experiments.yaml
+│   └── models/                    exported RDP weights (.npz), ready to use
+├── artifacts/                   every CSV / figure the notebooks and lltc/ write
+└── docs/
+    ├── ROS2_WORKSPACE.md          design of the deployment workspace
+    ├── CORRECTIONS.md             8 corrections to the build specification
+    ├── AUDIT.md                   audit against the real PX4 x500 and source papers
+    └── TROUBLESHOOTING.md         known JAX/XLA issue and its fix
 ```
 
-[`docs/ROS2_WORKSPACE.md`](docs/ROS2_WORKSPACE.md) covers the deployment half in
-detail: the pure-core / thin-wrapper split and the reason for it, how causality
-is enforced structurally rather than by convention, each package and the trap it
-guards, the two check binaries with their measured results, and an explicit list
-of what is verified here against what needs a live PX4/Gazebo graph.
+---
 
-## Running it
+## 2. Installation (Python)
+
+### 2.1 System packages
+
+Ubuntu 22.04 / 24.04 (Debian-like):
 
 ```bash
-pip install numpy scipy jax jaxlib optax pandas matplotlib pytest pyyaml nbformat
-
-# the test suite -- every one of these exists because the error it catches is silent
-cd study && python -m pytest tests/ -x -q && python check_consistency.py
-
-# the notebooks, in order (each consumes the ones before it)
-export X500_SCALE=smoke          # smoke | medium | full
-cd notebooks && for n in nb?_*.py; do python "$n" || break; done
-python build_notebooks.py        # -> .ipynb
-
-# the deployment bridge, then the workspace checks
-cd .. && python export_estimator.py --arch GRU --out ../rdp_acmpc_ws/models/rdp_gru.npz
-cd ../rdp_acmpc_ws && colcon build && source install/setup.bash
-ros2 run acmpc_controller check_ctbr && ros2 run acmpc_controller check_glue
+sudo apt update
+sudo apt install -y git python3 python3-venv python3-pip ffmpeg
 ```
 
-### Scale discipline — read before quoting any number
+`ffmpeg` is only used by Notebook 7 to write `.mp4` flight clips. Without it,
+the notebook writes PNG frames instead.
 
-`X500_SCALE` selects §7.1's table. **`smoke` produces undertrained policies by
-design**; its learned-controller numbers are not results, and the reporting layer
-detects the signature (hand-built controllers unaffected, every learned
-controller diverging) and prints a warning naming the table. `medium` is an
-addition of this repository, for verifying a build without paying for `full`.
+JAX 0.10 needs **Python ≥ 3.11**. Ubuntu 24.04 ships 3.12. On 22.04, install
+3.11 first:
+`sudo apt install -y software-properties-common && sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt install -y python3.11 python3.11-venv`,
+then use `python3.11` instead of `python3` below.
 
-**The artefacts committed here are from a `smoke` run.** They demonstrate that
-the pipeline executes end to end and that every gate fires when it should; they
-are not the study's results. §13 requires that every learned-controller number in
-a write-up come from a `full` run.
+### 2.2 Clone
 
-Three gates fire at `smoke`, correctly, and each reports rather than hides:
+```bash
+git clone https://github.com/amine03-03/RL-Learned-NMPC-with-Residual-Estimation-for-Quadcopter-Control.git
+cd RL-Learned-NMPC-with-Residual-Estimation-for-Quadcopter-Control
+export REPO=$PWD                      # used by every command below
+```
 
-- Notebook 2's fit gate: `R² = −0.80 ≤ 0`, so the terminal-cost fit is worse than
-  predicting a constant and the horizon-equivalence claim is reported as
-  **unsupported** — not tuned until it passes.
-- Notebook 4 reports the conservatism premium **sign first** (−0.7 %, negative:
-  no premium in this run) and gives both explanations two seeds cannot separate.
-- Notebook 5's precondition gate: the Oracle arm saturates at 14.5 % against the
-  5 % limit, so the closed-loop numbers are declared **not readable** as a
-  decomposition into value-of-information and cost-of-estimation.
+### 2.3 Virtual environment for Part 1 (study)
 
-## What the pipeline produces at `smoke`
+```bash
+cd $REPO
+python3 -m venv .venv-study
+source .venv-study/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+python -c "import jax; jax.config.update('jax_enable_x64', True); print(jax.__version__, jax.devices())"
+```
 
-Hand-built controllers are scale-independent, so these are meaningful:
+For an NVIDIA GPU, replace the `jax`/`jaxlib` lines with
+`pip install "jax[cuda13]==0.10.2"`. Everything also runs on CPU.
 
-- **§2 constants** reproduce to 1e-6 against the real PX4 SDF, all derived, none
-  pasted — including `u_hover = 0.728742` and `∂a_z/∂c = 21.6670` under PX4's
-  actual actuator map.
-- **T-8**, the most valuable test: residual and wrench are **identically zero**
-  (< 1.2e-16) on the undisturbed plant.
-- **Reference feasibility**: the superellipse at R = 0.5 demands 40.85 m/s²
-  uncapped against a 13.35 m/s² envelope — 3.1×. With (4.6) no path exceeds
-  8.0098 m/s².
-- **The preview is not optional**: with the reference frozen, error grows with the
-  horizon on every smooth path (circle 0.078 → 0.411 m over N = 1 → 20) while the
-  preview column falls and saturates.
-- **Weight tuning moves the answer** by 20.8× over the admissible (Q, R) grid —
-  the measurement that motivates the whole study. The operating point
-  (`Q_pos = 10`, `R = 5`) is the argmin of that grid, re-derived after the
-  physics corrections.
-- **Does the online solve earn its compute?** On smooth paths, barely: LQR is
-  6–8 % *better* than NMPC N=1. On the superellipse it is 78 % worse. That split
-  is the honest answer to §8.6's first question.
-- **The learned cost removes all 13 hand weights.** `diag` wins 3/3 tasks (the
-  published finding reproduces) and AC-MPC reaches 0.137 m against tuned NMPC's
-  0.111 m with `tuned = 0`.
-- **The RDP is admissible.** All four encoders run under 2 ms single-window in
-  NumPy against the 20 ms period, with JAX↔NumPy parity ≤ 1.1e-14.
+### 2.4 Virtual environment for Part 2 (LLTC)
 
-## Things this implementation is careful about
+This is kept separate because PyTorch is large and the study does not need it.
 
-- **Latency has one definition.** `ms_per_step / batch` is throughput; only
-  `solve_latency_ms`, on a batch of one, may be compared to 20 ms.
-- **Ground truth never reaches the controller.** The RDP's window comes from a
-  ring buffer the disturbance manager cannot write to. The oracle observation
-  channel is routed through `d_channel()`, so an attached RDP makes it carry the
-  *prediction* — the earlier version handed truth to the controller, and a
-  regression test now pins the behaviour.
-- **Saturation is reported beside every RMSE.** When a controller is pinned
-  against its input box the path has stopped mattering and the number describes
-  the disturbance.
-- **`T_max` is derived in one module** and every consumer is asserted against it;
-  `check_glue` and `check_consistency.py` are deliberately independent so one
-  edit cannot satisfy both.
-- **Windows never straddle an episode boundary**, and splits are by complete
-  episode.
-- **Adaptation time is bounded by the disturbance-off instant.** Without that, a
-  predictor stuck at zero "converges" the moment the disturbance stops and scores
-  7.0 s instead of the NaN it deserves.
+```bash
+cd $REPO
+python3 -m venv .venv-lltc
+source .venv-lltc/bin/activate
+pip install --upgrade pip
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU-only torch (~200 MB)
+pip install -r lltc/requirements.txt
+```
 
-## Bugs found while testing
+Leave a venv with `deactivate`.
 
-| where | bug | consequence |
+---
+
+## 3. Part 1: the study (`study/`)
+
+```bash
+cd $REPO && source .venv-study/bin/activate
+```
+
+### 3.1 Tests and consistency check (run these first)
+
+```bash
+cd $REPO/study
+python -m pytest tests/ -q            # 101 passed, about 10 min on CPU
+python check_consistency.py           # -> "all consistency checks passed"
+```
+
+### 3.2 Notebooks
+
+The notebooks are stored as runnable percent-format `.py` files. They must run
+**in order**, because each one consumes the artifacts of the ones before it:
+
+| # | file | establishes | writes to `artifacts/` |
+|---|---|---|---|
+| 1 | `nb1_control_problem.py` | model self-test, LQR / NMPC baselines, horizon and weight sweeps | `common/`, `lltc/nb1_classical.csv` |
+| 2 | `nb2_lltc.py` | learned terminal cost inside the iLQR-MPC | `lltc/model.pkl` |
+| 3 | `nb3_acmpc.py` | AC-MPC: RL-learned cost map | `acmpc/model.pkl` |
+| 4 | `nb4_domain_randomisation.py` | domain randomisation | `domrand/*.pkl` |
+| 5 | `nb5_adaptive.py` | adaptive AC-MPC + RDP encoders | `acmpc_adaptive/` |
+| 6 | `nb6_comparison.py` | all controllers on all scenarios | `common/ledger.csv` |
+| 7 | `nb7_flight_visualisation.py` | flight clips | `videos/*.mp4` |
+| 8 | `nb8_sensitivity.py` | sensitivity and stress | `sensitivity/` |
+
+The scale is chosen with `X500_SCALE`:
+
+| scale | purpose | time |
 |---|---|---|
-| `lin_traj` | differentiated the batched map | built a (B,9,B,4) cross-Jacobian, B× too large and zero off the diagonal |
-| CNN encoder | decimated with `x[:, ::2]` | dropped the **most recent** frame at even lengths — the predictor was blind to the sample it must react to |
-| `Env` | applied `fixed=` overrides *after* ω was derived from R | a controlled experiment silently varied the quantity it pinned |
-| `Env._oracle` | returned `d_truth()` with an RDP attached | every "RDP" row was secretly an oracle row |
+| `smoke` (default) | checks that the pipeline runs end to end. **Learned-controller numbers are not results** | minutes |
+| `medium` | verifies a build | ~1–2 h |
+| `full` | the only scale whose numbers may be quoted | ~10 h (GPU recommended) |
 
-## References
+```bash
+cd $REPO/study/notebooks
+export X500_SCALE=smoke                     # smoke | medium | full
+for n in nb?_*.py; do echo "== $n"; python "$n" || break; done
+python build_notebooks.py                   # regenerate the .ipynb files from the .py sources
+```
 
-The full bibliography is §12 of the specification. The load-bearing ones are
-Gros & Zanon (IEEE TAC 2020, arXiv:1904.04152) for the licence to learn the
-cost; Romero, Song & Scaramuzza (ICRA 2024, arXiv:2306.09852) for the
-cost-map-over-short-MPC architecture; Büskens & Maurer (2001) for why the
-parameter gradient is a by-product of the solve; and Li & Todorov (2004) with
-Tassa et al. (2012) for the iLQR and its regularisation. The identifier
-`arXiv:2605.16015` that the deployment specification cites has **not** been
-verified here and is not relied on anywhere in this code.
+To run one notebook interactively instead: `pip install jupyter`, then
+`jupyter notebook nb1_control_problem.ipynb`.
+
+If JAX aborts with `tile size ... 3 % 4 != 0`, see
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). The quick workaround is
+`JAX_PLATFORMS=cpu python <notebook>.py`.
+
+### 3.3 Export the residual predictor for the ROS node (optional)
+
+The RDP weights already exported are committed in `rdp_acmpc_ws/models/`. To
+re-export from your own Notebook 5 run (this needs
+`artifacts/acmpc_adaptive/estimators/all.pkl`):
+
+```bash
+cd $REPO/study
+python export_estimator.py --arch GRU --out ../rdp_acmpc_ws/models/rdp_gru.npz
+```
+
+The export **fails** if the NumPy forward pass differs from the JAX one.
+
+---
+
+## 4. Part 2: LLTC hover study (`lltc/`)
+
+This is a standalone re-implementation of *Abdufattokhov, Zanon & Bemporad,
+"Learning Lyapunov terminal costs from data for complexity reduction in NMPC",
+IJRNC 2024*. It covers hover stabilisation with collective-thrust/body-rate
+(CTBR) inputs and a simple disturbance-free model.
+
+```bash
+cd $REPO && source .venv-lltc/bin/activate
+python lltc/lltc_hover.py              # full run, ~15 min on a laptop CPU
+python lltc/lltc_hover.py --quick      # smoke run, ~2 min (numbers are NOT results)
+python lltc/lltc_hover.py --M 3000 --epochs 6000 --n-ic 6 --seed 1   # other settings
+```
+
+**Set the NMPC horizon** at the top of `lltc/lltc_hover.py`:
+
+```python
+N_MPC = 25            # <<< prediction horizon N of the baseline NMPC
+```
+
+Outputs go to `artifacts/lltc_hover/`:
+
+| figure | content |
+|---|---|
+| `fig1_fit_quality.png` | R² of the learned cost-to-go, train / test |
+| `fig2_altitude.png` | altitude tracking, LLTC vs NMPC |
+| `fig3_control_effort.png` | thrust, body rates and total control effort, LLTC vs NMPC |
+| `fig4_ood.png` | out-of-distribution initial states, LLTC vs NMPC |
+| `fig5_weight_sensitivity.png` | sensitivity to the Lyapunov penalty λ and to the stage weights, LLTC only |
+| `fig6_computation.png` | solve time (average, worst case, histogram, vs horizon), LLTC vs NMPC |
+
+Each figure has a companion `.csv`, and `summary.csv` holds the headline
+numbers. The method, every setting and the measured results are described in
+[lltc/README.md](lltc/README.md).
+
+---
+
+## 5. Part 3: ROS 2 / PX4 / Gazebo simulation
+
+**Tested stack:** Ubuntu **24.04**, ROS 2 **Jazzy**, Gazebo **Harmonic**, PX4
+**v1.16.2**, `px4_msgs` **release/1.16**, Micro XRCE-DDS Agent **v2.4.3**. This
+matches the PX4 recommendation for ROS 2. JAX 0.10 does not install on 22.04's
+Python 3.10, so Humble on 22.04 is not supported here.
+
+What follows uses three directories. Adapt the paths if you like.
+
+| path | content |
+|---|---|
+| `~/PX4-Autopilot` | PX4 firmware + Gazebo SITL |
+| `~/ros2_px4_ws` | `px4_msgs` + Micro XRCE-DDS Agent |
+| `$REPO/rdp_acmpc_ws` | this project's ROS 2 packages |
+
+### 5.1 Install PX4 and Gazebo Harmonic
+
+```bash
+cd ~
+git clone -b v1.16.2 --recursive https://github.com/PX4/PX4-Autopilot.git
+bash ./PX4-Autopilot/Tools/setup/ubuntu.sh          # installs toolchain + Gazebo Harmonic
+# log out and back in (or reboot) once, as ubuntu.sh asks
+```
+
+Stock PX4 v1.16.2 does **not** publish `/fmu/out/actuator_motors`, but the RDP
+needs it: it is the only observable channel for a standing moment, and preflight
+check 4 refuses moment scenarios without it. Add it to the uXRCE-DDS topic list,
+then build:
+
+```bash
+cd ~/PX4-Autopilot
+python3 - <<'EOF'
+p = "src/modules/uxrce_dds_client/dds_topics.yaml"
+s = open(p).read()
+entry = "  - topic: /fmu/out/actuator_motors\n    type: px4_msgs::msg::ActuatorMotors\n\n"
+if "/fmu/out/actuator_motors" not in s:
+    s = s.replace("subscriptions:\n", entry + "subscriptions:\n", 1)   # append to publications
+open(p, "w").write(s)
+EOF
+grep -n "fmu/out/actuator_motors" src/modules/uxrce_dds_client/dds_topics.yaml   # must print one line
+make px4_sitl                                       # first build, ~5-10 min
+```
+
+### 5.2 Install ROS 2 Jazzy
+
+```bash
+sudo apt update && sudo apt install -y locales
+sudo locale-gen en_US en_US.UTF-8
+sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+export LANG=en_US.UTF-8
+sudo apt install -y software-properties-common
+sudo add-apt-repository -y universe
+sudo apt update && sudo apt install -y curl
+export ROS_APT_SOURCE_VERSION=$(curl -s https://api.github.com/repos/ros-infrastructure/ros-apt-source/releases/latest | grep -F "tag_name" | awk -F'"' '{print $4}')
+curl -L -o /tmp/ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.$(. /etc/os-release && echo ${UBUNTU_CODENAME:-${VERSION_CODENAME}})_all.deb"
+sudo dpkg -i /tmp/ros2-apt-source.deb
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y ros-jazzy-desktop ros-dev-tools
+echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc
+source /opt/ros/jazzy/setup.bash
+```
+
+### 5.3 Build `px4_msgs` and the Micro XRCE-DDS Agent
+
+`px4_msgs` **must match the PX4 version** (release/1.16 for PX4 v1.16.x).
+
+```bash
+mkdir -p ~/ros2_px4_ws/src && cd ~/ros2_px4_ws/src
+git clone -b release/1.16 https://github.com/PX4/px4_msgs.git
+git clone -b v2.4.3 https://github.com/eProsima/Micro-XRCE-DDS-Agent.git
+cd ~/ros2_px4_ws
+source /opt/ros/jazzy/setup.bash
+colcon build                                        # ~5 min
+source ~/ros2_px4_ws/install/setup.bash
+ros2 interface show px4_msgs/msg/VehicleOdometry | head -3   # sanity check
+```
+
+### 5.4 Python environment for the nodes
+
+The nodes run on ROS's Python (3.12) **and** import JAX (the controller uses
+`study/x500_core_jax.py`). Create a venv that can also see the ROS packages.
+Do **not** activate `.venv-study` here.
+
+```bash
+source /opt/ros/jazzy/setup.bash
+cd $REPO
+python3 -m venv --system-site-packages .venv-ros
+touch .venv-ros/COLCON_IGNORE
+source .venv-ros/bin/activate
+pip install -r requirements.txt
+python -c "import rclpy, jax; print('rclpy + jax OK')"
+```
+
+### 5.5 Build this workspace
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/ros2_px4_ws/install/setup.bash
+source $REPO/.venv-ros/bin/activate
+cd $REPO/rdp_acmpc_ws
+python -m colcon build --symlink-install
+```
+
+`python -m colcon` (instead of plain `colcon`) makes the node entry points use
+the venv's Python, which has JAX. `--symlink-install` lets the controller find
+`study/` relative to its source file.
+
+### 5.6 Environment for every new terminal
+
+Every terminal that runs a node needs the same environment. Create it once
+(with `$REPO` set as in §2.2):
+
+```bash
+cat > ~/acmpc_env.sh <<EOF
+export REPO=$REPO
+source /opt/ros/jazzy/setup.bash
+source ~/ros2_px4_ws/install/setup.bash
+source \$REPO/.venv-ros/bin/activate
+source \$REPO/rdp_acmpc_ws/install/setup.bash
+export PYTHONPATH=\$REPO/study:\$PYTHONPATH
+cd \$REPO/rdp_acmpc_ws        # nodes resolve config/ and models/ relative to here
+EOF
+cat ~/acmpc_env.sh             # the first line must show your absolute repo path
+```
+
+Then start every node terminal with `source ~/acmpc_env.sh`.
+
+### 5.7 Offline preflight (no simulator needed)
+
+```bash
+source ~/acmpc_env.sh
+ros2 run acmpc_controller check_glue        # constants + B_d bridge + .npz models -> "check_glue PASSED"
+ros2 run acmpc_controller check_ctbr        # frames + CTBR mapping; checks 3-4 SKIP until a sim is up
+ros2 run experiment_manager run_experiments # prints the 134-run experiment plan (dry run)
+```
+
+### 5.8 Run the simulation
+
+Open **one terminal per step**.
+
+**Terminal 1: DDS agent** (the bridge between PX4 and ROS 2)
+
+```bash
+source ~/ros2_px4_ws/install/setup.bash
+MicroXRCEAgent udp4 -p 8888
+```
+
+**Terminal 2: PX4 SITL + Gazebo with the x500**
+
+```bash
+cd ~/PX4-Autopilot
+make px4_sitl gz_x500
+```
+
+Gazebo opens with the x500 on the ground, and the `pxh>` shell appears in this
+terminal. SITL has no RC and no ground station, so allow offboard flight
+without them (once per fresh SITL; the values persist in the SITL parameter file):
+
+```
+pxh> param set NAV_DLL_ACT 0
+pxh> param set NAV_RCL_ACT 0
+pxh> param set COM_RCL_EXCEPT 4
+```
+
+Check that PX4 topics reach ROS. In another terminal,
+`source ~/acmpc_env.sh && ros2 topic list | grep fmu` must list
+`/fmu/out/vehicle_odometry`, `/fmu/out/actuator_motors`,
+`/fmu/in/vehicle_rates_setpoint` and `/fmu/in/offboard_control_mode`.
+
+**Take off** (in the `pxh>` shell of terminal 2)
+
+```
+pxh> commander takeoff
+```
+
+Wait until the vehicle hovers (≈ 2.5 m).
+
+**Terminal 3: live preflight, including calibration**
+
+```bash
+source ~/acmpc_env.sh
+ros2 run acmpc_controller check_ctbr --moment-scenario
+```
+
+Check 4 (`actuator_motors` publishing) must now **PASS**. For check 3,
+read the hover motor command in the `pxh>` shell with `listener actuator_motors`
+(the steady `control[0..3]` value, about 0.73) and pass it:
+`ros2 run acmpc_controller check_ctbr --y-measured 0.73`.
+
+**Terminals 4–8: the project nodes**
+
+```bash
+# T4  reference (Lissajous; level: gentle | moderate | aggressive | hold)
+source ~/acmpc_env.sh && ros2 run reference_generator reference_node --ros-args -p level:=moderate
+
+# T5  residual predictor
+source ~/acmpc_env.sh && ros2 run rdp_estimator estimator_node --ros-args --params-file config/rdp.yaml
+
+# T6  disturbance scenario ground truth (S0..S6)
+source ~/acmpc_env.sh && ros2 run disturbance_manager manager_node --ros-args -p scenario:=S0
+
+# T7  logger -> runs/experiment_0/states.csv
+source ~/acmpc_env.sh && ros2 run state_logger logger_node --ros-args -p run_dir:=runs/experiment_0
+
+# T8  the controller (mode: acmpc | nmpc1 | pid), started LAST, right before offboard
+source ~/acmpc_env.sh && ros2 run acmpc_controller controller_node --ros-args --params-file config/acmpc.yaml
+```
+
+The controller computes its reference **internally** from `A`, `B`, `omega`,
+`z0` in `config/acmpc.yaml`. `reference_node` publishes the same curve on
+`/reference/trajectory` for logging and plotting, so keep `omega` consistent with
+`level` (gentle 0.60, moderate 1.00, aggressive 1.45 rad/s).
+
+**Hand control to the controller** (in `pxh>`). The controller streams
+`/fmu/in/offboard_control_mode` + `/fmu/in/vehicle_rates_setpoint` at 50 Hz, so
+PX4 accepts the switch:
+
+```
+pxh> commander mode offboard
+```
+
+The vehicle now flies the Lissajous reference under the MPC. To stop:
+`pxh> commander land`, then `Ctrl-C` every
+terminal, then `shutdown` in `pxh>`.
+
+**Plots of a finished run**
+
+```bash
+source ~/acmpc_env.sh
+ros2 run visualization live_panel runs/experiment_0     # -> runs/experiment_0/plots/
+```
+
+### 5.9 Status of the deployment workspace: read before quoting results
+
+Verified in this repository: every module imports, `check_glue` passes,
+`check_ctbr` checks 1–2 pass, the B_d bridge matches the study to 1e-12, and
+JAX↔NumPy parity holds for all exported encoders. **Nothing has been flown**
+in this repository. The following parts are not yet wired, so a Gazebo run
+today is a **nominal (S0) flight of the controller**:
+
+- `controller_node` is complete: PX4 odometry → MPC → rate setpoints.
+- `rdp_estimator` does not yet subscribe to `/fmu/out/vehicle_odometry` and
+  `/fmu/out/actuator_motors`. Its ring buffer is never filled, so it publishes
+  `d̂ = 0` (its designed not-ready fallback).
+- `disturbance_manager` publishes the scenario's ground-truth wrench on
+  `/disturbance/ground_truth` for logging only. It does **not** apply the wrench
+  to the Gazebo model, so S1–S6 are not physically realised in the simulator.
+- `state_logger` records the two wrench topics. Its state, reference and
+  command columns are written as zeros.
+
+Design details and the full verified / not-verified list:
+[docs/ROS2_WORKSPACE.md](docs/ROS2_WORKSPACE.md).
+
+### 5.10 Without ROS
+
+The algorithmic cores run without ROS, from the study venv:
+
+```bash
+cd $REPO && source .venv-study/bin/activate
+PYTHONPATH="rdp_acmpc_ws/src/acmpc_controller:rdp_acmpc_ws/src/rdp_estimator:study" python -m acmpc_controller.check_ctbr
+PYTHONPATH="rdp_acmpc_ws/src/acmpc_controller:rdp_acmpc_ws/src/rdp_estimator:study" python -m acmpc_controller.check_glue
+PYTHONPATH="rdp_acmpc_ws/src/experiment_manager:study" python -m experiment_manager.runner
+```
+
+---
+
+## 6. Configuration files
+
+| file | content |
+|---|---|
+| `rdp_acmpc_ws/config/acmpc.yaml` | controller mode (`acmpc`/`nmpc1`/`pid`), horizon, iLQR iterations, reference A/B/ω/z₀, vehicle constants (asserted against the study by `check_glue`) |
+| `rdp_acmpc_ws/config/rdp.yaml` | RDP model path, window H = 64, smoothing, watchdog budget |
+| `rdp_acmpc_ws/config/disturbances.yaml` | scenario parameters S0–S6, timeline (on at 5 s, off at 12 s) |
+| `rdp_acmpc_ws/config/experiments.yaml` | experiment matrix E-0, E-A … E-D and metric thresholds |
+| `study/study_prelude.py` | `X500_SCALE` table (`smoke`/`medium`/`full`) |
+| `lltc/lltc_hover.py` (top block) | `N_MPC`, sampling time, weights, bounds, sampling box, penalties |
+
+---
+
+## 7. Documentation index
+
+| document | read it for |
+|---|---|
+| [lltc/README.md](lltc/README.md) | the LLTC hover study: method, settings, results |
+| [docs/ROS2_WORKSPACE.md](docs/ROS2_WORKSPACE.md) | architecture of the ROS 2 workspace, data flow, each package, check binaries |
+| [docs/CORRECTIONS.md](docs/CORRECTIONS.md) | the 8 errors found in the build specification, each with its measurement and test |
+| [docs/AUDIT.md](docs/AUDIT.md) | audit against the real PX4 x500 (SDF + airframe) and the two source papers |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | JAX/XLA `tile size` crash, verified versions |
+
+Key facts these documents establish, so that you do not have to rediscover them:
+
+- PX4's `SIM_GZ_EC_MIN = 150` idle floor gives `u_hover = 0.7287`, not 0.7694.
+  Ignoring it makes hover control effectiveness 17.65 % optimistic.
+- The allocator's `CA_ROTORn_KM = 0.05` differs from the rotors' 0.016. This is
+  a real 3.125× yaw-authority mismatch, and it is modelled.
+- Ground truth never reaches the controller. The RDP window is fed only from
+  state and actuator topics.
+- Latency is quoted only as `solve_latency_ms` on a batch of one, against the
+  20 ms period.
+
+## 8. References
+
+- S. Abdufattokhov, M. Zanon, A. Bemporad, *Learning Lyapunov terminal costs from
+  data for complexity reduction in nonlinear MPC*, Int. J. Robust Nonlinear
+  Control 34(13), 2024. doi:10.1002/rnc.7411
+- S. Gros, M. Zanon, *Data-driven economic NMPC using reinforcement learning*,
+  IEEE TAC 2020, arXiv:1904.04152. This is the licence to learn the cost.
+- A. Romero, Y. Song, D. Scaramuzza, *Actor-Critic Model Predictive Control*,
+  ICRA 2024, arXiv:2306.09852. This is the cost-map-over-short-MPC architecture.
+- C. Büskens, H. Maurer, *Sensitivity analysis and real-time optimization of
+  parametric nonlinear programming problems*, 2001.
+- W. Li, E. Todorov (2004) and Y. Tassa et al. (2012): iLQR and its
+  regularisation.
+- PX4 ROS 2 user guide: https://docs.px4.io/main/en/ros2/user_guide
