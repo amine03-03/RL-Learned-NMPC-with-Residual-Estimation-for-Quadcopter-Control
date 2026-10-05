@@ -1,83 +1,142 @@
 """ACMPC controller node (§9.11).
 
-One 50 Hz tick: read state, update the causal history, run RDP inference
-(watchdog armed), optionally filter, convert through B_d, solve, publish the PX4
-setpoint, log timing.  Frame conversion happens at this boundary and nowhere
-else: everything inside the package is ENU/FLU.
+One 50 Hz tick: read the latest PX4 odometry, build the reference and the
+observation with the study's functions, solve, publish the PX4 rate setpoint,
+and publish ``/acmpc/status`` (state, reference, command of this tick) for the
+estimator and the logger.  Frame conversion happens at this boundary and
+nowhere else: everything inside the package is ENU/FLU.
+
+Subscribes  /fmu/out/vehicle_odometry      px4_msgs/VehicleOdometry
+            /fmu/out/vehicle_status_v1     px4_msgs/VehicleStatus (nav_state)
+            /rdp/disturbance_estimate      geometry_msgs/WrenchStamped
+Publishes   /fmu/in/offboard_control_mode  px4_msgs/OffboardControlMode
+            /fmu/in/vehicle_rates_setpoint px4_msgs/VehicleRatesSetpoint
+            /acmpc/status                  std_msgs/Float64MultiArray (status_msg)
+
+The reference clock starts when PX4 reports OFFBOARD (``start_on_offboard``):
+until then the setpoints PX4 needs before it accepts the switch are computed
+against the reference at t = 0, so the flight starts at the beginning of the
+path rather than wherever a free-running clock happens to be.  PX4 v1.16
+publishes VehicleStatus (MESSAGE_VERSION 1) as ``vehicle_status_v1``.
 """
 from __future__ import annotations
 
+import os
 import sys
+import time
 
 import numpy as np
 
 from . import frames as F
+from . import status_msg
 from .controller import ACMPCController
+
+
+def _lissajous():
+    try:
+        from reference_generator import lissajous as L
+    except ImportError:                  # source tree without a colcon install
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "..", "..", "reference_generator"))
+        from reference_generator import lissajous as L
+    return L
+
+
+def make_reference(level, A, B, z0):
+    """-> (pva(t), hold).  Refuses an infeasible reference."""
+    L = _lissajous()
+    if level != L.HOLD and level not in L.LEVELS:
+        raise ValueError(f"level must be one of {sorted(L.LEVELS)} or 'hold', "
+                         f"got {level!r}")
+    ok, _, pa, budget = L.check_feasible(A, B, L.LEVELS.get(level, 0.0), mode=level)
+    if not ok:
+        raise SystemExit(
+            f"reference {level!r} is INFEASIBLE: peak demand {pa:.3f} m/s^2 exceeds "
+            f"alpha*a_lat_max = {budget:.4f}.  Refusing to fly it; a benchmark built "
+            f"on an infeasible reference measures the reference, not the controller.")
+    return (lambda t: L.reference(t, level, A, B, z0)), level == L.HOLD
 
 
 def main(args=None):                                       # pragma: no cover
     try:
         import rclpy
         from rclpy.node import Node
-        from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+        from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
+                               ReliabilityPolicy)
         from px4_msgs.msg import (OffboardControlMode, VehicleOdometry,
-                                  VehicleRatesSetpoint)
+                                  VehicleRatesSetpoint, VehicleStatus)
         from geometry_msgs.msg import WrenchStamped
+        from std_msgs.msg import Float64MultiArray
     except Exception as ex:                               # noqa: BLE001
         print(f"acmpc_controller: no ROS 2 / px4_msgs environment "
               f"({type(ex).__name__}).  The control core is importable and "
               f"testable without one; see ACMPCController.", file=sys.stderr)
         return 1
-    import rclpy
-    from rclpy.node import Node
-    from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-    from px4_msgs.msg import (OffboardControlMode, VehicleOdometry,
-                              VehicleRatesSetpoint)
-    from geometry_msgs.msg import WrenchStamped
-
-    sys.path.insert(0, "src/reference_generator")
-    from reference_generator import lissajous as L
 
     class ControllerNode(Node):
         def __init__(self):
             super().__init__("acmpc_controller")
-            for k, v in (("mode", "acmpc"), ("horizon", 10), ("n_iter", 10),
-                         ("rate_hz", 50.0), ("use_d", True), ("A", 1.2),
-                         ("B", 0.9), ("omega", 1.0), ("z0", 1.5)):
+            for k, v in (("mode", "nmpc1"), ("horizon", 10), ("n_iter", 10),
+                         ("rate_hz", 50.0), ("use_d", True),
+                         ("dmod_mode", "closed_loop"), ("level", "moderate"),
+                         ("A", 1.2), ("B", 0.9), ("z0", 1.5),
+                         ("odom_timeout_s", 0.5), ("start_on_offboard", True),
+                         ("status_topic", "/fmu/out/vehicle_status_v1")):
                 self.declare_parameter(k, v)
             g = lambda k: self.get_parameter(k).value
-            ok, pv, pa, budget = L.check_feasible(g("A"), g("B"), g("omega"))
-            if not ok:
-                raise SystemExit(
-                    f"reference is INFEASIBLE: peak demand {pa:.3f} m/s^2 "
-                    f"exceeds alpha*a_lat_max = {budget:.4f}.  Refusing to fly "
-                    f"it; a benchmark built on an infeasible reference measures "
-                    f"the reference, not the controller.")
-            self.get_logger().info(f"reference feasible: peak_a {pa:.3f} <= "
-                                   f"{budget:.4f} m/s^2")
+            self.pva, self.hold = make_reference(g("level"), float(g("A")),
+                                                 float(g("B")), float(g("z0")))
             self.ctrl = ACMPCController(mode=g("mode"), horizon=int(g("horizon")),
-                                        n_iter=int(g("n_iter")), use_d=g("use_d"))
-            qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
-                             history=HistoryPolicy.KEEP_LAST, depth=5)
-            self.state = None
-            self.d_hat = np.zeros(6)
+                                        n_iter=int(g("n_iter")), use_d=g("use_d"),
+                                        dmod_mode=g("dmod_mode"))
+            self._warm_up()
+            self.get_logger().info(
+                f"mode={g('mode')} N={g('horizon')} reference={g('level')} "
+                f"(A={g('A')}, B={g('B')}, z0={g('z0')})  oracle_obs={self.ctrl.oracle}")
+
+            qos_px4 = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                                 history=HistoryPolicy.KEEP_LAST, depth=1)
+            self.odom = None
+            self.odom_stamp = None
+            self.odom_timeout_us = int(1e6 * float(g("odom_timeout_s")))
+            self.d_hat = None
             self.create_subscription(VehicleOdometry, "/fmu/out/vehicle_odometry",
-                                     self.on_odom, qos)
+                                     self.on_odom, qos_px4)
             self.create_subscription(WrenchStamped, "/rdp/disturbance_estimate",
                                      self.on_d, 10)
+            self.start_on_offboard = bool(g("start_on_offboard"))
+            self.offboard = False
+            self.create_subscription(VehicleStatus, g("status_topic"),
+                                     self.on_status_px4, qos_px4)
             self.pub_rates = self.create_publisher(
-                VehicleRatesSetpoint, "/fmu/in/vehicle_rates_setpoint", 10)
+                VehicleRatesSetpoint, "/fmu/in/vehicle_rates_setpoint", qos_px4)
             self.pub_mode = self.create_publisher(
-                OffboardControlMode, "/fmu/in/offboard_control_mode", 10)
+                OffboardControlMode, "/fmu/in/offboard_control_mode", qos_px4)
+            self.pub_status = self.create_publisher(Float64MultiArray,
+                                                    "/acmpc/status", 10)
             self.t0 = None
             self.create_timer(1.0 / float(g("rate_hz")), self.tick)
 
+        def _warm_up(self):
+            """JIT-compile the solve before the first real tick, so the first
+            setpoints are not late enough to trip PX4's offboard-loss timeout."""
+            p0 = np.asarray(self.pva(np.zeros(1))[0])[0]
+            x10 = np.concatenate([p0, np.zeros(3), [1.0, 0, 0, 0]])
+            self.ctrl.set_reference(self.pva, self.hold)
+            for _ in range(2):
+                self.ctrl.tick(x10, np.zeros(3), 0.0)
+            self.ctrl.set_reference(self.pva, self.hold)      # reset the running state
+            self.ctrl.last_u = np.array([self.ctrl.X.U_HOVER, 0.0, 0.0, 0.0])
+
         def on_odom(self, m):
-            """Convert NED/FRD -> ENU/FLU **on entry** (§9.4)."""
-            p = F.ned_to_enu_vec(np.asarray(m.position, float))
-            v = F.ned_to_enu_vec(np.asarray(m.velocity, float))
-            q = F.px4_quat_to_enu_flu(np.asarray(m.q, float))
-            self.state = np.concatenate([p, v, q])
+            """NED/FRD -> ENU/FLU **on entry** (§9.4)."""
+            self.odom = F.odometry_to_enu_flu(m.position, m.q, m.velocity,
+                                              m.angular_velocity, m.velocity_frame)
+            self.odom_stamp = self.get_clock().now().nanoseconds // 1000
+
+        def on_status_px4(self, m):
+            self.offboard = m.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD
 
         def on_d(self, m):
             self.d_hat = np.array([m.wrench.force.x, m.wrench.force.y,
@@ -85,47 +144,71 @@ def main(args=None):                                       # pragma: no cover
                                    m.wrench.torque.y, m.wrench.torque.z])
 
         def tick(self):
-            if self.state is None:
+            try:
+                self._tick()
+            except Exception:                             # noqa: BLE001
+                if rclpy.ok():                            # a real error: surface it
+                    raise                                 # (else Ctrl-C mid-tick)
+
+        def _tick(self):
+            if self.odom is None:
                 return
-            now = self.get_clock().now().nanoseconds * 1e-9
-            self.t0 = self.t0 if self.t0 is not None else now
-            t = now - self.t0
-            g = lambda k: self.get_parameter(k).value
-            N = int(g("horizon"))
-            dt = 1.0 / float(g("rate_hz"))
-            xr, ur = [], []
-            for k in range(N + 1):
-                p, v, a = L.lissajous(t + k * dt, g("A"), g("B"), g("omega"), g("z0"))
-                zb = a[0] + np.array([0, 0, 9.8066])
-                nz = np.linalg.norm(zb)
-                ax = np.cross([0, 0, 1.0], zb / nz)
-                ang = np.arccos(np.clip(zb[2] / nz, -1, 1))
-                s = np.linalg.norm(ax)
-                qr = (np.array([1.0, 0, 0, 0]) if s < 1e-12 else
-                      np.concatenate([[np.cos(ang / 2)], ax / s * np.sin(ang / 2)]))
-                xr.append(np.concatenate([p[0], v[0], qr]))
-                if k < N:
-                    ur.append(np.array([np.sqrt(min(2.0643076923076924 * nz
-                                                    / 34.19432, 1.0)), 0, 0, 0]))
-            u, info = self.ctrl.step(self.state, np.array(xr), np.array(ur),
-                                     d_hat=self.d_hat)
-            om = F.ctbr_to_px4_rates(u[1:4] * np.array([10.0, 10.0, 4.0]))
+            t_start = time.perf_counter()
+            now_us = self.get_clock().now().nanoseconds // 1000
+            if now_us - self.odom_stamp > self.odom_timeout_us:
+                # stale state: stop streaming, so PX4's offboard-loss failsafe
+                # (COM_OF_LOSS_T) takes over instead of us flying blind
+                self.get_logger().error("odometry stale -- not publishing setpoints",
+                                        throttle_duration_sec=1.0)
+                return
+            if self.t0 is None and (self.offboard or not self.start_on_offboard):
+                self.t0 = now_us
+                self.get_logger().info("reference clock started")
+            if self.t0 is None:
+                self.get_logger().info("streaming setpoints for t = 0; waiting for "
+                                       "PX4 OFFBOARD to start the reference",
+                                       throttle_duration_sec=10.0)
+            t = 0.0 if self.t0 is None else (now_us - self.t0) * 1e-6
+            p, v, q, om = self.odom
+            x10 = np.concatenate([p, v, q])
+            u, info = self.ctrl.tick(x10, om, t, d_hat=self.d_hat)
+
             mm = OffboardControlMode()
-            mm.timestamp = int(now * 1e6); mm.body_rate = True
+            mm.timestamp = int(now_us)
+            mm.position = mm.velocity = mm.acceleration = mm.attitude = False
+            mm.body_rate = True
             self.pub_mode.publish(mm)
+
+            om_px4 = F.ctbr_to_px4_rates(u[1:4] * np.asarray(self.ctrl.X.OM_MAX))
             r = VehicleRatesSetpoint()
-            r.timestamp = int(now * 1e6)
-            r.roll, r.pitch, r.yaw = float(om[0]), float(om[1]), float(om[2])
+            r.timestamp = int(now_us)
+            r.roll, r.pitch, r.yaw = (float(z) for z in om_px4)
             r.thrust_body = [0.0, 0.0, float(-u[0])]       # FRD, down-positive
             self.pub_rates.publish(r)
 
+            xr = info["x_ref"]
+            st = Float64MultiArray()
+            st.data = status_msg.pack(
+                t=t, p=p, v=v, q=q, om=om, p_ref=xr[0:3], v_ref=xr[3:6],
+                q_ref=xr[6:10], u_prev=info["u_prev"], u_ref=info["u_ref"], u=u,
+                solve_ms=info["solve_ms"],
+                loop_ms=1e3 * (time.perf_counter() - t_start))
+            self.pub_status.publish(st)
+
+    from rclpy.executors import ExternalShutdownException
     rclpy.init(args=args)
     node = ControllerNode()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    except Exception:                                     # noqa: BLE001
+        if rclpy.ok():                                    # not a shutdown race
+            raise
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
     return 0
 
 

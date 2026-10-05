@@ -2,7 +2,8 @@
 /**:
   ros__parameters:
     model_path: models/rdp_gru.npz   # written by study/export_estimator.py
-    rate_hz: 50.0
+    # no rate: one frame is pushed per /acmpc/status, i.e. at the controller's
+    # 50 Hz and on its clock, exactly as the study's _frame26
     H: 64                  # 1.28 s at 50 Hz, per arXiv:2605.16015 (C5)
     filter_alpha: 0.0      # optional first-order causal filter (§9.11 step 4)
     smooth_n: 32           # rolling MEAN over 32 frames, the paper's smoothing

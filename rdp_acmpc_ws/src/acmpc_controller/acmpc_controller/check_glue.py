@@ -61,6 +61,17 @@ def main(argv=None):
     from disturbance_manager import scenarios as SC
     _chk("scenario m", SC.M_NOM, X.M_TOT)
     _chk("scenario arm", SC.ARM, float(abs(X.R_ROTOR[0, 0])))
+    _chk("scenario K_T (S5 lost thrust)", SC.K_T, X.P.K_T)
+    _chk("scenario k_m (rotor truth)", SC.K_M, X.P.k_m)
+    _chk("scenario Om_min", SC.OM_MIN, X.P.Om_min)
+    _chk("scenario Om_max", SC.OM_MAX, X.P.Om_max)
+    _chk("scenario rotor positions = PX4 motor order", SC.R_ROTOR, X.R_ROTOR)
+    _chk("scenario rotor spin signs", SC.SIGMA, X.SIGMA)
+    from .reference import ref_sequence
+    hold = lambda t: (np.tile([0.0, 0.0, 1.5], (np.size(t), 1)),
+                      np.zeros((np.size(t), 3)), np.zeros((np.size(t), 3)))
+    _chk("controller u_ref at hover = U_HOVER (idle floor, A2)",
+         float(ref_sequence(hold, np.zeros(1), hold=True)[1][0, 0]), X.U_HOVER, 1e-9)
 
     print("\nB_d bridge (§4.4), against the study's wrench_to_dmod:")
     rng = np.random.default_rng(0)

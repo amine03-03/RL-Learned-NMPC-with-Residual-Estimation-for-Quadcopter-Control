@@ -19,11 +19,7 @@ import time
 
 import numpy as np
 
-_STUDY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                      "..", "..", "..", "..", "study")
-if os.path.isdir(_STUDY) and _STUDY not in sys.path:
-    sys.path.insert(0, os.path.abspath(_STUDY))
-
+from . import _study_path                                 # noqa: E402,F401
 from . import bd_bridge                                    # noqa: E402
 
 
@@ -56,12 +52,70 @@ class ACMPCController:
                     "mode='nmpc1' to fly the incumbent")
             self.actor = ck["actor"]
             self.cfg = dict(ck["cfg"], N=self.N, n_iter=self.n_iter, n_diff=1)
+            # variant C was trained with the 6-D wrench channel appended to its
+            # observation (EnvCfg.oracle, target 'wrench'); A/B and the nominal
+            # AC-MPC were not
+            self.oracle = bool(ck.get("to_obs", False))
         elif mode == "pid":
             self.pid = X.make_pid_ctrl()
         elif mode != "nmpc1":
             raise ValueError(f"unknown mode {mode!r}")
+        self.oracle = getattr(self, "oracle", False)
+        # jit each solve ONCE (as make_nmpc_ctrl does in the study): traced
+        # per call, one N=10 iLQR solve costs ~6 s instead of ~15 ms
+        import jax
+        if mode == "nmpc1":
+            Pt = jnp.broadcast_to(X.PTt, (1, X.NE, X.NE))
+            N, it = self.N, self.n_iter
+            self._solve = jax.jit(lambda o, e, xs, us, d: X.solve_quad(
+                e, xs, N, Pt, d, None, it, uref_seq=us))
+        elif mode == "acmpc":
+            actor, cfg = self.actor, self.cfg
+            self._solve = jax.jit(lambda o, e, xs, us, d: X.mpc_layer(
+                o, e, xs, actor, cfg, d, us)[0])
         self.last_u = np.array([X.U_HOVER, 0.0, 0.0, 0.0])
         self.solve_ms = []
+        self.ref = None
+
+    def set_reference(self, pva, hold=False):
+        """Attach the analytic reference ``pva(t) -> (p, v, a)`` used by :meth:`tick`."""
+        from .reference import ObsBuilder
+        self.ref = (pva, bool(hold))
+        self.obs_builder = ObsBuilder(pva, hold, u0=self.last_u)
+        self.u_ref_prev = np.array([self.X.U_HOVER, 0.0, 0.0, 0.0])
+        self.n_tick = 0
+
+    def tick(self, x10, om, t, d_hat=None):
+        """One control period, everything built with the study's functions.
+
+        x10 = [p, v, q] ENU/FLU, om = body rate FLU, t = reference time [s].
+        Returns ``(u (4,), info)``; ``u`` is clipped to the study's input box
+        and info carries the reference and ``u_prev`` for ``/acmpc/status``.
+        """
+        from .reference import ref_sequence
+        X, jnp = self.X, self.jnp
+        if self.ref is None:
+            raise RuntimeError("call set_reference() before tick()")
+        pva, hold = self.ref
+        ts = t + np.arange(self.N + 1) * X.P.dt_c
+        xr, ur = ref_sequence(pva, ts, hold)
+        e = np.asarray(X.err(jnp.asarray(x10)[None], jnp.asarray(xr[0])[None]))[0]
+        u_prev = self.last_u.copy()
+        if self.n_tick > 0:          # at reset the study observes prev as initialised
+            self.obs_builder.update(e, om, u_prev - self.u_ref_prev, u_prev)
+        self.n_tick += 1
+        obs = None
+        if self.mode == "acmpc":
+            oracle = None
+            if self.oracle:
+                oracle = np.zeros(6) if d_hat is None else np.asarray(d_hat, float)
+            obs = self.obs_builder.obs(e, x10[0:3], t, oracle)
+        u, info = self.step(x10, xr, ur[:self.N], obs=obs, d_hat=d_hat)
+        u = np.clip(u, X.U_LO, X.U_HI)
+        self.last_u = u
+        self.u_ref_prev = ur[0]
+        info.update(x_ref=xr[0], u_ref=ur[0], u_prev=u_prev, obs=obs)
+        return u, info
 
     def step(self, x10, xr_seq, uref_seq, obs=None, d_hat=None):
         """x10 = [p, v, q] ENU/FLU; xr_seq (N+1,10); uref_seq (N,4).
@@ -72,18 +126,17 @@ class ACMPCController:
         t0 = time.perf_counter()
         e = np.asarray(X.err(jnp.asarray(x10)[None], jnp.asarray(xr_seq[0])[None]))
         d = None
-        if self.use_d and d_hat is not None:
-            d = jnp.asarray(bd_bridge.wrench_to_dmod(np.asarray(d_hat),
-                                                     self.dmod_mode))[None]
+        if self.use_d:                   # zeros until an estimate arrives: one trace
+            d_hat = np.zeros(6) if d_hat is None else np.asarray(d_hat, float)
+            d = jnp.asarray(bd_bridge.wrench_to_dmod(d_hat, self.dmod_mode))[None]
         xs = jnp.asarray(xr_seq)[None]
         us = jnp.asarray(uref_seq)[None]
         if self.mode == "acmpc":
-            o = jnp.asarray(obs)[None] if obs is not None else jnp.zeros((1, X.OBS_DIM))
-            u, _ = X.mpc_layer(o, jnp.asarray(e), xs, self.actor, self.cfg, d, us)
+            if obs is None:
+                raise ValueError("acmpc needs the (5.3) observation; use tick()")
+            u = self._solve(jnp.asarray(obs)[None], jnp.asarray(e), xs, us, d)
         elif self.mode == "nmpc1":
-            Pt = jnp.broadcast_to(X.PTt, (1, X.NE, X.NE))
-            u = X.solve_quad(jnp.asarray(e), xs, self.N, Pt, d, None, self.n_iter,
-                             uref_seq=us)
+            u = self._solve(None, jnp.asarray(e), xs, us, d)
         else:
             u, _ = self.pid(None, jnp.asarray(e), jnp.asarray(xr_seq[0])[None],
                             uref=us[:, 0])

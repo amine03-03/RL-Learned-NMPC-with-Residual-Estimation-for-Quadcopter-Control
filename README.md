@@ -47,19 +47,21 @@ the ROS 2 / PX4 / Gazebo stack described in [§5](#5-part-3-ros-2--px4--gazebo-s
 │   ├── export_estimator.py        trained RDP -> framework-free .npz (parity-checked)
 │   ├── rdp_infer.py               pure-NumPy RDP forward pass used by the ROS node
 │   ├── check_consistency.py       study <-> workspace constants check
-│   ├── tests/                     pytest suite (101 tests)
+│   ├── tests/                     pytest suite (116 tests, incl. the ROS-node wiring)
 │   └── notebooks/                 nb1..nb8 as runnable .py (+ generated .ipynb)
 ├── lltc/                        Part 2
 │   ├── lltc_hover.py              LLTC-NMPC vs NMPC on hover, CTBR, CasADi/IPOPT
 │   ├── requirements.txt
 │   └── README.md                  method, settings and results of the script
 ├── rdp_acmpc_ws/                Part 3, ROS 2 workspace (ament_python)
-│   ├── src/acmpc_controller/      control node, PX4 frames, B_d bridge, preflight checks
-│   ├── src/rdp_estimator/         ring buffer, NumPy inference, watchdog
-│   ├── src/disturbance_manager/   scenarios S0..S6 (ground-truth wrench)
+│   ├── src/acmpc_controller/      control node, study-exact reference/observation,
+│   │                              PX4 frames, B_d bridge, /acmpc/status, preflight checks
+│   ├── src/rdp_estimator/         ring buffer fed from /acmpc/status + actuator_motors,
+│   │                              NumPy inference, watchdog, smoothing
+│   ├── src/disturbance_manager/   scenarios S0..S6 -> ground truth + applied in Gazebo
 │   ├── src/reference_generator/   Lissajous / hold reference with feasibility gate
 │   ├── src/experiment_manager/    experiment plan and config capture
-│   ├── src/state_logger/          50 Hz CSV logger
+│   ├── src/state_logger/          50 Hz CSV logger (one row per controller tick)
 │   ├── src/visualization/         offline figures from a run directory
 │   ├── config/                    acmpc.yaml, rdp.yaml, disturbances.yaml, experiments.yaml
 │   └── models/                    exported RDP weights (.npz), ready to use
@@ -293,6 +295,7 @@ curl -L -o /tmp/ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-a
 sudo dpkg -i /tmp/ros2-apt-source.deb
 sudo apt update && sudo apt upgrade -y
 sudo apt install -y ros-jazzy-desktop ros-dev-tools
+sudo apt install -y ros-jazzy-ros-gzharmonic     # ros_gz_bridge + ros_gz_interfaces (disturbances)
 echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc
 source /opt/ros/jazzy/setup.bash
 ```
@@ -325,7 +328,8 @@ python3 -m venv --system-site-packages .venv-ros
 touch .venv-ros/COLCON_IGNORE
 source .venv-ros/bin/activate
 pip install -r requirements.txt
-python -c "import rclpy, jax; print('rclpy + jax OK')"
+pip install "setuptools<80"     # colcon --symlink-install fails with setuptools >= 80
+python -c "import rclpy, jax, ros_gz_interfaces; print('rclpy + jax + ros_gz OK')"
 ```
 
 ### 5.5 Build this workspace
@@ -389,9 +393,10 @@ cd ~/PX4-Autopilot
 make px4_sitl gz_x500
 ```
 
-Gazebo opens with the x500 on the ground, and the `pxh>` shell appears in this
-terminal. SITL has no RC and no ground station, so allow offboard flight
-without them (once per fresh SITL; the values persist in the SITL parameter file):
+Gazebo opens with the x500 (model `x500_0`, world `default`) on the ground, and
+the `pxh>` shell appears in this terminal. SITL has no RC and no ground station,
+so allow offboard flight without them (once; the values persist in the SITL
+parameter file):
 
 ```
 pxh> param set NAV_DLL_ACT 0
@@ -399,94 +404,132 @@ pxh> param set NAV_RCL_ACT 0
 pxh> param set COM_RCL_EXCEPT 4
 ```
 
-Check that PX4 topics reach ROS. In another terminal,
+Check that PX4 reaches ROS. In another terminal,
 `source ~/acmpc_env.sh && ros2 topic list | grep fmu` must list
-`/fmu/out/vehicle_odometry`, `/fmu/out/actuator_motors`,
+`/fmu/out/vehicle_odometry`, `/fmu/out/actuator_motors` (only after the §5.1
+patch), `/fmu/out/vehicle_status_v1` (PX4 v1.16 suffixes versioned messages),
 `/fmu/in/vehicle_rates_setpoint` and `/fmu/in/offboard_control_mode`.
 
-**Take off** (in the `pxh>` shell of terminal 2)
+**Terminal 3: Gazebo wrench bridge** (lets `disturbance_manager` push forces
+into Gazebo's `ApplyLinkWrench` system, which PX4's server.config loads)
+
+```bash
+source ~/acmpc_env.sh
+ros2 run ros_gz_bridge parameter_bridge \
+  "/world/default/wrench/persistent@ros_gz_interfaces/msg/EntityWrench]gz.msgs.EntityWrench" \
+  "/world/default/wrench/clear@ros_gz_interfaces/msg/Entity]gz.msgs.Entity"
+```
+
+**Take off** (in the `pxh>` shell of terminal 2), and wait until it hovers (≈ 2.5 m):
 
 ```
 pxh> commander takeoff
 ```
 
-Wait until the vehicle hovers (≈ 2.5 m).
-
-**Terminal 3: live preflight, including calibration**
+**Terminal 4: live preflight, including calibration**
 
 ```bash
 source ~/acmpc_env.sh
 ros2 run acmpc_controller check_ctbr --moment-scenario
 ```
 
-Check 4 (`actuator_motors` publishing) must now **PASS**. For check 3,
-read the hover motor command in the `pxh>` shell with `listener actuator_motors`
-(the steady `control[0..3]` value, about 0.73) and pass it:
-`ros2 run acmpc_controller check_ctbr --y-measured 0.73`.
+Check 4 (`actuator_motors` publishing) must now **PASS**. For check 3, read the
+hover motor command in `pxh>` with `listener actuator_motors` (the steady
+`control[0..3]`, about 0.73) and pass it: `ros2 run acmpc_controller check_ctbr --y-measured 0.73`.
 
-**Terminals 4–8: the project nodes**
+**Terminals 5–7: controller, estimator, logger**
 
 ```bash
-# T4  reference (Lissajous; level: gentle | moderate | aggressive | hold)
-source ~/acmpc_env.sh && ros2 run reference_generator reference_node --ros-args -p level:=moderate
+# T5  controller.  Start it first: it JIT-compiles the solve (~10-30 s) and is
+#     ready when it logs "mode=... N=...".  It streams setpoints for t = 0 and
+#     starts the reference clock when PX4 reports OFFBOARD.
+source ~/acmpc_env.sh && ros2 run acmpc_controller controller_node --ros-args --params-file config/acmpc.yaml
 
-# T5  residual predictor
+# T6  residual predictor (pushes one frame per controller tick; ready after 64)
 source ~/acmpc_env.sh && ros2 run rdp_estimator estimator_node --ros-args --params-file config/rdp.yaml
 
-# T6  disturbance scenario ground truth (S0..S6)
-source ~/acmpc_env.sh && ros2 run disturbance_manager manager_node --ros-args -p scenario:=S0
-
-# T7  logger -> runs/experiment_0/states.csv
+# T7  logger -> runs/experiment_0/states.csv (one row per controller tick)
 source ~/acmpc_env.sh && ros2 run state_logger logger_node --ros-args -p run_dir:=runs/experiment_0
-
-# T8  the controller (mode: acmpc | nmpc1 | pid), started LAST, right before offboard
-source ~/acmpc_env.sh && ros2 run acmpc_controller controller_node --ros-args --params-file config/acmpc.yaml
 ```
 
-The controller computes its reference **internally** from `A`, `B`, `omega`,
-`z0` in `config/acmpc.yaml`. `reference_node` publishes the same curve on
-`/reference/trajectory` for logging and plotting, so keep `omega` consistent with
-`level` (gentle 0.60, moderate 1.00, aggressive 1.45 rad/s).
+Controller options (`-p name:=value` or edit `config/acmpc.yaml`):
 
-**Hand control to the controller** (in `pxh>`). The controller streams
-`/fmu/in/offboard_control_mode` + `/fmu/in/vehicle_rates_setpoint` at 50 Hz, so
-PX4 accepts the switch:
+| parameter | values |
+|---|---|
+| `mode` | `nmpc1` (default: hand-tuned NMPC, no checkpoint needed), `pid`, `acmpc` (the learned cost map; needs `artifacts/acmpc_adaptive/variants/C.pkl` from Notebook 5 or `artifacts/acmpc/model.pkl` from Notebook 3) |
+| `level` | `gentle`, `moderate`, `aggressive` (Lissajous (9.5)), `hold` (fixed point `(0, 0, z0)`) |
+| `horizon`, `n_iter` | MPC horizon and iLQR iterations (10, 10: ~13 ms per solve) |
+| `use_d`, `dmod_mode` | feed the RDP estimate into the prediction model, and how (§4.4) |
+
+**Hand control to the controller** (in `pxh>`):
 
 ```
 pxh> commander mode offboard
 ```
 
-The vehicle now flies the Lissajous reference under the MPC. To stop:
-`pxh> commander land`, then `Ctrl-C` every
-terminal, then `shutdown` in `pxh>`.
+**Terminal 8: start the disturbance episode** (immediately after the switch)
+
+```bash
+source ~/acmpc_env.sh && ros2 run disturbance_manager manager_node --ros-args \
+     --params-file config/disturbances.yaml -p scenario:=S2
+```
+
+It waits for the bridge of terminal 3, then runs the episode: 0–5 s nominal,
+5–12 s scenario active (applied to `x500_0` in Gazebo and published as ground
+truth), then recovery. Scenarios S0–S6 are listed in `config/disturbances.yaml`.
+To stop: `pxh> commander land`, then `Ctrl-C` every terminal (the manager clears
+its Gazebo wrench on exit), then `shutdown` in `pxh>`.
 
 **Plots of a finished run**
 
 ```bash
 source ~/acmpc_env.sh
-ros2 run visualization live_panel runs/experiment_0     # -> runs/experiment_0/plots/
+ros2 run visualization live_panel runs/experiment_0     # -> runs/experiment_0/plots/R-F1, R-F2, R-F8
 ```
+
+**Topics** (all ENU world / FLU body inside the workspace; PX4's NED/FRD is
+converted at the controller boundary):
+
+| topic | type | from → to |
+|---|---|---|
+| `/fmu/out/vehicle_odometry` | px4_msgs/VehicleOdometry | PX4 → controller, manager |
+| `/fmu/out/actuator_motors` | px4_msgs/ActuatorMotors | PX4 → estimator, manager, logger |
+| `/fmu/out/vehicle_status_v1` | px4_msgs/VehicleStatus | PX4 → controller (OFFBOARD starts the clock) |
+| `/fmu/in/vehicle_rates_setpoint`, `/fmu/in/offboard_control_mode` | px4_msgs | controller → PX4 |
+| `/acmpc/status` | std_msgs/Float64MultiArray (layout in `status_msg.py`) | controller → estimator, logger |
+| `/rdp/disturbance_estimate` | geometry_msgs/WrenchStamped [N world, N·m body] | estimator → controller, logger |
+| `/rdp/status` | std_msgs/Float64MultiArray [ms, fault, ready] | estimator → logger |
+| `/disturbance/ground_truth`, `/disturbance/phase` | WrenchStamped, String | manager → logger (**never** the controller) |
+| `/world/default/wrench/persistent`, `.../clear` | ros_gz_interfaces | manager → bridge → Gazebo |
 
 ### 5.9 Status of the deployment workspace: read before quoting results
 
-Verified in this repository: every module imports, `check_glue` passes,
-`check_ctbr` checks 1–2 pass, the B_d bridge matches the study to 1e-12, and
-JAX↔NumPy parity holds for all exported encoders. **Nothing has been flown**
-in this repository. The following parts are not yet wired, so a Gazebo run
-today is a **nominal (S0) flight of the controller**:
+Verified in this repository by running it (details in
+[docs/ROS2_WORKSPACE.md §7](docs/ROS2_WORKSPACE.md)):
 
-- `controller_node` is complete: PX4 odometry → MPC → rate setpoints.
-- `rdp_estimator` does not yet subscribe to `/fmu/out/vehicle_odometry` and
-  `/fmu/out/actuator_motors`. Its ring buffer is never filled, so it publishes
-  `d̂ = 0` (its designed not-ready fallback).
-- `disturbance_manager` publishes the scenario's ground-truth wrench on
-  `/disturbance/ground_truth` for logging only. It does **not** apply the wrench
-  to the Gazebo model, so S1–S6 are not physically realised in the simulator.
-- `state_logger` records the two wrench topics. Its state, reference and
-  command columns are written as zeros.
+- **Wiring, against the study:** `study/tests/test_ros_wiring.py` (15 tests)
+  proves that the controller's reference, `u_ref` and AC-MPC observation equal
+  the study's `ref_state` and `Env.obs()`; that the estimator's input frame
+  equals the study's `_frame26`; that PX4 odometry converts correctly; and
+  that the S1/S5 wrenches are physically right.
+- **All nodes in a real ROS 2 Jazzy graph** against a PX4 stand-in:
+  - 50 Hz held, with the solve at ~13–16 ms and the full loop at ~18 ms;
+  - the estimator becomes ready after 64 frames;
+  - real data in `states.csv`;
+  - clean shutdown.
+- **Disturbances in Gazebo** (gz-sim 8.10, through `ros_gz_bridge`): a step
+  force is reproduced exactly (0.00 %), and a 0.5 Hz sinusoid to −0.7 %.
 
-Design details and the full verified / not-verified list:
-[docs/ROS2_WORKSPACE.md](docs/ROS2_WORKSPACE.md).
+Limitations you need to know:
+
+- **RDP accuracy depends on the exported model.** The committed `.npz` files come
+  from a `smoke` training run (§3.2), so retrain at `full` scale and re-export
+  (§3.3) before reading anything into the estimate. The estimate reaches the
+  controller one tick (20 ms) after the state it was built from.
+- **S1 is quasi-static.** The payload's gravity and CG moment are applied; its
+  inertial force and `inertia_scale` are not realised in Gazebo.
+- `mode: acmpc` needs a trained checkpoint (§3.2, Notebooks 3/5). Without one,
+  fly `nmpc1` (the default).
 
 ### 5.10 Without ROS
 

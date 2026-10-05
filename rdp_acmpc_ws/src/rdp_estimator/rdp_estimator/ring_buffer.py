@@ -29,6 +29,14 @@ def build_frame(p, p_ref, R, v, omega, u_prev, u_ref, pwm):
     return f
 
 
+def quat_to_R(q):
+    """Scalar-first unit quaternion (body FLU -> world ENU) -> 3x3 rotation."""
+    w, x, y, z = np.asarray(q, dtype=float) / np.linalg.norm(q)
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                     [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                     [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
+
+
 class RingBuffer:
     """Fixed-length causal history.  ``ready()`` is False until H real frames
     have been pushed; before that the window is zero-padded and the estimate is
