@@ -91,6 +91,33 @@ def ctbr_to_px4_thrust(collective):
     return np.stack([np.zeros_like(c), np.zeros_like(c), -c], -1)
 
 
+#: ``px4_msgs/VehicleOdometry.velocity_frame`` values.
+VELOCITY_FRAME_NED = 1
+VELOCITY_FRAME_BODY_FRD = 3
+
+
+def odometry_to_enu_flu(position, q, velocity, angular_velocity,
+                        velocity_frame=VELOCITY_FRAME_NED):
+    """``VehicleOdometry`` fields -> (p, v, q, om) in ENU/FLU.
+
+    PX4 publishes position and (by default) velocity in NED, the attitude as
+    the FRD->NED quaternion and the body rate in FRD.  A body-frame velocity is
+    rotated to the world with the converted attitude.  Any other velocity frame
+    is refused rather than guessed.
+    """
+    p = ned_to_enu_vec(np.asarray(position, float))
+    qe = px4_quat_to_enu_flu(np.asarray(q, float))
+    if int(velocity_frame) == VELOCITY_FRAME_NED:
+        v = ned_to_enu_vec(np.asarray(velocity, float))
+    elif int(velocity_frame) == VELOCITY_FRAME_BODY_FRD:
+        v = qrot(qe, frd_to_flu_vec(np.asarray(velocity, float)))
+    else:
+        raise ValueError(f"unsupported VehicleOdometry.velocity_frame "
+                         f"{velocity_frame}; expected NED (1) or BODY_FRD (3)")
+    om = frd_to_flu_vec(np.asarray(angular_velocity, float))
+    return p, v, qe, om
+
+
 def tilt_angle(q):
     """Angle between the body-up axis and world up.  Heading-independent."""
     zb = qrotmat(np.atleast_2d(q))[..., :, 2]

@@ -132,7 +132,7 @@ def plan_EB(freqs=(0.1, 0.25, 0.5, 1.0, 2.0, 4.0), seeds=(0,)):
 def plan_EC(horizons=(10, 20, 30, 40), seeds=(0,)):
     """E-C MPC horizon interaction, under identical disturbances.
 
-    The report must **mark which horizons violate (9.4)**, which is why the
+    The results must **mark which horizons violate (9.4)**, which is why the
     horizon is a planned axis rather than a fixed choice.
     """
     return [dict(exp="E-C", scenario="S3", controller=c, seed=k, horizon=N,

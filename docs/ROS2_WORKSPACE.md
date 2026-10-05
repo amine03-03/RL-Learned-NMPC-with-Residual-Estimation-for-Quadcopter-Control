@@ -47,21 +47,30 @@ framework-free estimator.**
 ## 2. Data flow, and how causality is enforced
 
 ```
-reference_generator ──/reference/trajectory──┐
-                                             v
-  PX4 ──/fmu/out/vehicle_odometry──►  acmpc_controller  ──/fmu/in/vehicle_rates_setpoint──► PX4
-       ──/fmu/out/actuator_motors──►         ▲                /fmu/in/offboard_control_mode
-                     │                       │
-                     v                       │
-              rdp_estimator ──/rdp/disturbance_estimate──┘
-                     │
-disturbance_manager ─┴──/disturbance/ground_truth──► state_logger, visualization  (ONLY)
+                 /fmu/out/vehicle_odometry, /fmu/out/vehicle_status_v1
+  PX4 SITL ─────────────────────────────────────────────►  acmpc_controller ──/fmu/in/vehicle_rates_setpoint──► PX4
+    │  ▲                                                     │      ▲           /fmu/in/offboard_control_mode
+    │  └── /fmu/out/actuator_motors ──┐                      │      │
+    │                                 ▼                      │      │ /rdp/disturbance_estimate
+    │                           rdp_estimator ◄──/acmpc/status      │
+    │                                 └──────────────────────┼──────┘
+    │                                                        ▼
+    │                                                   state_logger ◄── /disturbance/ground_truth, /phase
+    │                                                                        ▲
+  Gazebo ◄── ApplyLinkWrench ◄── ros_gz_bridge ◄── /world/default/wrench/* ── disturbance_manager
+  (x500_0)                                                                   (reads odometry + actuator_motors)
 ```
+
+`/acmpc/status` (layout in `acmpc_controller/status_msg.py`) carries the state,
+reference, previous command, `u_ref` and new command **of one controller tick**,
+so the estimator's frame (6.2) and the logger's row are evaluated on the
+controller's clock -- exactly as the study's `_frame26` -- instead of on a
+separately clocked reference.
 
 **Ground truth never reaches the online controller.** §9.1 requires this, and it
 is enforced structurally rather than by convention: the RDP's window is built by
-`rdp_estimator.ring_buffer.RingBuffer`, which is fed only from state and actuator
-topics. The disturbance manager has no handle on it, so there is no call by which
+`rdp_estimator.ring_buffer.RingBuffer`, which is fed only from `/acmpc/status`
+(state and commands) and `actuator_motors`. The disturbance manager has no handle on it, so there is no call by which
 an injected disturbance value could enter a window. `/disturbance/ground_truth`
 is subscribed by the logger and the evaluator and by nothing else.
 
@@ -78,7 +87,9 @@ correction **N-8** in `CORRECTIONS.md`, and a regression test now pins it.
 |---|---|
 | `frames.py` | PX4 ↔ study frame conversions and the CTBR exit mapping |
 | `bd_bridge.py` | §4.4's wrench → model-residual conversion, **implemented once** |
-| `controller.py` | the ROS-free control core; modes `acmpc`, `nmpc1`, `pid` |
+| `controller.py` | the ROS-free control core; modes `acmpc`, `nmpc1`, `pid`; solves jitted once |
+| `reference.py` | reference + `u_ref` and the (5.3) observation, built with the study's functions |
+| `status_msg.py` | layout of `/acmpc/status` (state, reference, commands of one tick) |
 | `controller_node.py` | the 50 Hz `rclpy` wrapper |
 | `metrics.py` | §9.12: RDP accuracy, adaptation time, closed loop, timing |
 | `check_ctbr.py` | the four preflight checks of §9.4 |
@@ -89,6 +100,36 @@ wire, and the conversion happens at the node boundary and nowhere else.
 `q_ENU/FLU = q_NED→ENU ⊗ q_PX4 ⊗ q_FRD→FLU`, rates exit as
 `roll = ω_x, pitch = −ω_y, yaw = −ω_z`, and `thrust_body` is FRD down-positive,
 so a positive collective is `[0, 0, −c]`.
+
+**Reference and observation are the study's, not a copy.** `reference.py`
+rebuilds `x500_core_jax.ref_state` for the Lissajous/hold path -- attitude by
+flatness (4.7), `ω_ref` by centred difference, and the (4.8) collective **with
+the idle floor** -- and `ObsBuilder` reproduces `Env.obs()` (error, three preview
+blocks, position integral, three running means, plus the 6-D wrench channel for
+variant C).  Both are asserted equal to the study in `study/tests/test_ros_wiring.py`.
+Two earlier node bugs this removed: `u_ref = sqrt(m|a+g|/T_max)` without the idle
+floor (0.769 instead of 0.729 at hover, AUDIT A2) and an all-zero AC-MPC
+observation.  The solves are `jax.jit`-ed once (un-jitted, one N = 10 solve took
+~6 s).  Odometry older than 0.5 s stops the setpoint stream so PX4's
+offboard-loss failsafe takes over.
+
+**Three things only flying it revealed** (PX4 v1.16.2 SITL + Gazebo):
+
+1. *Hand-over.* The study's episodes start on the path. Handed straight to the
+   Lissajous from the take-off hover point (a 1.6 m / 1.8 m/s step), the NMPC
+   commands zero collective with saturated rates, and the vehicle flips in
+   0.7 s. `reference.entry_reference` starts the reference at the measured
+   (p, v) when PX4 reports OFFBOARD. It follows a minimum-jerk quintic that
+   joins the path's (p, v, a), stretched until its peak acceleration fits
+   `entry_a_max`.
+2. *Latency.* The study applies each command at the step it was computed. On
+   the study plant, a single uncompensated 20 ms step of delay makes the N = 10
+   NMPC diverge (error 2.3 m, 77° tilt). `delay_steps` propagates the measured
+   state through the commands in flight with the controller's own `step_c`
+   and solves from there: 9 cm max error at 1 step, 14 cm at 2 steps.
+3. *CPU.* Under SITL load on 4 cores, the N = 10 / 10-iteration solve grows
+   from 13 ms to 23 ms, the 50 Hz loop slips to ~30 ms, and the vehicle flips.
+   The defaults N = 5, 5 iterations, `delay_steps` 2 solve in ~10 ms and fly.
 
 `QuaternionDifferentiator` is the `ω̇` source of last resort: it uses
 `timestamp_sample` and **not** the wall clock, keeps the quaternion hemisphere
@@ -147,15 +188,30 @@ cannot violate §9.1.
 
 ### `disturbance_manager` — S0…S6
 
-Deterministic and reproducible, seeds recorded per run. `Scenario` returns the
-true external wrench and, separately, the plant-parameter perturbation the ACMPC
-is **not** told about (it keeps nominal parameters — that mismatch is the thing
-to be estimated).
+Deterministic and reproducible, seeds recorded per run. `Scenario.wrench(t, R,
+pwm)` returns the true external wrench `[N world, N·m body]` relative to the
+nominal model -- the RDP's target -- including the parameter scenarios: S1 as the
+gravity wrench of a point payload at the CG offset (at hover the C-6 moment
+`−m_p g (d_y, −d_x, 0)`), S5 as the thrust and reaction torque the degraded
+rotor no longer delivers at its current `actuator_motors` command. Rotor
+constants and order (PX4 motor order) are asserted against the study.
+
+**Applied in Gazebo.** `manager_node` publishes the wrench to gz-sim's
+`ApplyLinkWrench` (loaded by PX4's server.config) through `ros_gz_bridge`, on
+the model's canonical link, force and torque in the world frame. That system
+*appends* persistent wrenches and applies their sum, so the node sends
+**increments** (`PersistentWrench`), re-syncing the absolute value every 5 s so
+a lost message cannot leave a permanent offset; the episode clock starts only
+after the bridge has subscribed. Measured in gz-sim 8.10 on a free body of the
+x500's mass: a 2.43 N step gives 1.1768 m/s² against F/m = 1.1768 (0.00 %), on
+for 2.98 s of 3.00 s and fully removed; a 0.5 Hz sinusoid is reproduced to
+−0.7 % in amplitude. Not realised: S1's `inertia_scale` and the payload's own
+inertial force `−m_p a` (quasi-static payload).
 
 | id | scenario | purpose |
 |---|---|---|
 | S0 | nominal | baseline stability and tracking |
-| S1 | parameter mismatch: mass +10…20 %, inertia ±5…15 %, CG offset 2–5 cm | residual-model learning |
+| S1 | payload: mass +10…20 % at a 2–5 cm CG offset (inertia ±5…15 % recorded only) | residual-model learning |
 | S2 | bounded force/moment step over a finite interval | adaptation time `T_adapt` |
 | S3 | finite-duration time-varying gust, smooth at both ends | transient estimation |
 | S4 | periodic `F_x = A sin(2πft)`, f ∈ {0.1…4} Hz, plus a chirp | prediction bandwidth |
@@ -166,6 +222,10 @@ Episode timeline: 0–5 s nominal, 5–12 s disturbance active, 12–15 s recove
 the onset is visible.
 
 ### `reference_generator` — (9.5) with a feasibility gate
+
+`lissajous.py` is the reference the controller flies (it calls
+`reference()` and `check_feasible()` directly). `reference_node` is an optional
+standalone publisher of the same curve on `/reference/trajectory`.
 
 `x_d = A cos(ωt)`, `y_d = B sin(2ωt)`, `z_d = z₀`, at three aggressiveness
 levels. **The node refuses to publish an infeasible reference.** Measured against
@@ -185,8 +245,9 @@ the study, where the uncapped superellipse demanded 40.85 m/s² against a
 
 ### `state_logger` — 50 Hz synchronised CSV
 
-47 columns per sample: time, episode, phase, state, reference, command, motor
-commands, true disturbance, predicted disturbance, the three timings, the RDP
+One row per `/acmpc/status`, i.e. per controller tick. 47 columns: time,
+episode, phase, state, reference, command, motor commands, true disturbance,
+predicted disturbance, the three timings (RDP, solve, complete loop), the RDP
 fault flag and its ready flag. The explicit `episode` column is what lets
 training split **by complete episode, never by shuffled samples**, and lets
 `split_frames` drop windows that would straddle a boundary.
@@ -314,60 +375,55 @@ disturbance-off instant, because without that bound a predictor stuck at zero
 
 **Verified in this repository, by running it:**
 
+- **flights in PX4 v1.16.2 SITL + Gazebo (gz-sim 8, x500, headless)**,
+  following the README §5.8 procedure:
+  - live `check_ctbr` checks 1, 2 and 4 pass, with `actuator_motors` at 98 Hz
+    after the `dds_topics.yaml` patch;
+  - the loop holds 50 Hz (20.1 ms period, 10.5 ms solve, 17.3 ms complete loop);
+  - on S0 / moderate Lissajous, the error is 6–19 cm mean (26 cm max) over 27 s;
+  - on S2, applied in Gazebo, the error is 13 cm → 25 cm mean / 46 cm max
+    during the step → 17 cm after;
+  - no failsafe;
 - every module imports and every algorithmic core runs;
-- `check_ctbr` checks 1 and 2, and `check_glue` in full;
+- `check_ctbr` checks 1 and 2, and `check_glue` in full (including the scenario
+  rotor constants and the controller's hover `u_ref`);
 - the `B_d` bridge against the study's, to 1e-12;
-- the RDP data path end to end: frame → ring buffer → NumPy inference →
-  watchdog → filter, including fault injection and the zero fallback;
-- the S0…S6 definitions, the reference feasibility gate, all the metrics
-  (including the adaptation-time edge case above), and every offline figure;
+- `study/tests/test_ros_wiring.py` (19 tests):
+  - the controller's reference and `u_ref` equal `ref_state`;
+  - its AC-MPC observation equals `Env.obs()` over 25 driven steps;
+  - its delay prediction equals `step_c`;
+  - the entry trajectory joins the path C² and fixes the hand-over;
+  - the estimator frame built from `/acmpc/status` equals `_frame26`;
+  - PX4 odometry (NED and body-FRD velocity) round-trips to ENU/FLU;
+  - S1/S5 wrenches match the C-6 moment and the allocation column;
+  - the increment scheme always sums to the target;
+- all nodes in a real ROS 2 Jazzy graph against a PX4 stand-in:
+  - the estimator is ready after exactly 64 frames;
+  - the logger writes real rows;
+  - every node shuts down cleanly on `Ctrl-C`;
+- **the disturbance path in gz-sim 8.10** through `ros_gz_bridge` and
+  `ApplyLinkWrench`: step force exact to 0.00 %, sinusoid to −0.7 % (§3);
 - JAX ↔ NumPy parity for all four exported encoders;
-- the 118-run experiment plan and the config capture, including its warning path.
+- the 134-run experiment plan and the config capture, including its warning path.
 
-**Not verified here, because it needs a live PX4 SITL + Gazebo graph:**
+**Not verified here:**
 
-- `check_ctbr` checks 3 and 4 — thrust calibration needs a measured hover
-  collective, and `actuator_motors` needs a publisher;
+- RDP *accuracy* in the loop. The committed `.npz` encoders come from a `smoke`
+  training run on position hold. In the SITL S2 flight the estimate rose
+  during the step (~1.8 of 2.43 N) but was dominated by an oscillation at the
+  Lissajous period. Retrain at `full` scale and re-export;
 - §9.15's S0 zero-check (`|F_z| < 0.3 N`, `‖τ‖ < 0.05 N·m` in steady hover) and
   the analytic steady-state check within 10 %;
 - the E-A…E-D runs and therefore tables R-T1…R-T5;
-- measured timing against the 20 ms deadline *on the target machine* — what is
-  measured here is `rdp_infer` p95 at 1.44 ms on this container, recorded in the
-  `.npz` metadata, which is the estimator's share of the budget and not the loop.
-
-The node wrappers are written against the PX4 message interfaces and will need
-the usual first-run shakedown against a real graph. Nothing in this section is
-claimed as flown.
+- timing on the target machine.
 
 ## 8. Building and running
 
-```bash
-# the estimator must be exported before the node can load it
-cd study && python export_estimator.py --arch GRU --out ../rdp_acmpc_ws/models/rdp_gru.npz
-
-cd ../rdp_acmpc_ws && colcon build && source install/setup.bash
-
-# preflight -- any failure aborts the run
-ros2 run acmpc_controller check_ctbr --moment-scenario
-ros2 run acmpc_controller check_glue
-
-# the nodes
-ros2 run reference_generator  reference_node  --ros-args --params-file config/acmpc.yaml
-ros2 run rdp_estimator        estimator_node  --ros-args --params-file config/rdp.yaml
-ros2 run acmpc_controller     controller_node --ros-args --params-file config/acmpc.yaml
-ros2 run disturbance_manager  manager_node    --ros-args --params-file config/disturbances.yaml
-ros2 run state_logger         logger_node     --ros-args -p run_dir:=runs/experiment_0
-
-# offline figures from a finished run
-ros2 run visualization live_panel runs/experiment_0
-```
-
-Without a ROS environment the cores still run directly:
-
-```bash
-PYTHONPATH="rdp_acmpc_ws/src/acmpc_controller:rdp_acmpc_ws/src/rdp_estimator:study" \
-  python -m acmpc_controller.check_ctbr
-```
+The complete, tested command sequence (PX4 v1.16.2 + Gazebo Harmonic, ROS 2
+Jazzy, `px4_msgs`, the Micro XRCE-DDS Agent, the Python venv, `colcon build`,
+the preflight checks, and one terminal per node) is in the main
+[README §5](../README.md#5-part-3-ros-2--px4--gazebo-simulation). It is kept in
+one place so the two cannot drift apart.
 
 ## 9. Position-hold RDP training (E-0)
 

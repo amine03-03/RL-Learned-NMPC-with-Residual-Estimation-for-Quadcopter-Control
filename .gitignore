@@ -7,3 +7,6 @@ artifacts/videos/
 build/
 install/
 log/
+.venv*/
+runs/
+.pytest_cache/

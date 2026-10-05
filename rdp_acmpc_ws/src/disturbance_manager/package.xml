@@ -8,6 +8,9 @@
   <license>MIT</license>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>px4_msgs</exec_depend>
+  <exec_depend>ros_gz_interfaces</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>acmpc_controller</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <test_depend>ament_copyright</test_depend>
