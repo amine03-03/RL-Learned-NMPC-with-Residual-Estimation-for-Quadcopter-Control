@@ -2,9 +2,20 @@
 # `ros2 run acmpc_controller check_glue`; they are NOT a second source of truth.
 /**:
   ros__parameters:
-    mode: acmpc            # acmpc | nmpc1 | pid  (§9.8 incumbents on S0/S1)
-    horizon: 10            # N_p; E-C sweeps {10,20,30,40} and marks (9.4) violations
-    n_iter: 10             # iLQR iterations
+    mode: nmpc1            # nmpc1 | pid | acmpc.  acmpc needs a trained checkpoint
+                           # (artifacts/acmpc_adaptive/variants/C.pkl from Notebook 5,
+                           # else artifacts/acmpc/model.pkl from Notebook 3)
+    # Flight-verified in PX4 v1.16.2 SITL + Gazebo (4-core machine): N=5 and 5
+    # iLQR iterations solve in ~10 ms and hold 50 Hz.  N=10/10 solves in ~13 ms
+    # alone but ~23 ms under SITL load, the loop slips to ~30 ms and the vehicle
+    # flips -- raise them only if the logged loop_ms stays well under 20 ms.
+    horizon: 5             # N_p; E-C sweeps {10,20,30,40} and marks (9.4) violations
+    n_iter: 5              # iLQR iterations
+    delay_steps: 2         # latency compensation in control periods (odometry ->
+                           # PX4 applying the command).  The NMPC tuned without
+                           # delay diverges with ONE uncompensated 20 ms step.
+    entry_s: 4.0           # hand-over: min-jerk transfer to the path start [s]
+    entry_a_max: 3.0       # ... stretched until its peak accel fits [m/s^2]
     control_rate_hz: 50.0
     rate_hz: 50.0
     use_d: true            # feed the estimate through B_d into the prediction model
@@ -12,10 +23,10 @@
                            # 'first_order' is the t->0 limit and overstates a
                            # standing moment ~9x; 'none' is the settled limit
     # reference (9.5); the node REFUSES to fly an infeasible one
+    level: moderate        # gentle (0.60 rad/s) | moderate (1.00) | aggressive (1.45) | hold
     A: 1.2
     B: 0.9
-    omega: 1.0             # gentle 0.60 | moderate 1.00 | aggressive 1.45
-    z0: 1.5
+    z0: 1.5                # hold flies the fixed point (0, 0, z0)
     vehicle:
       m: 2.064308
       T_max: 34.19432      # the ONE definition; recalibrate via check_ctbr --y-measured

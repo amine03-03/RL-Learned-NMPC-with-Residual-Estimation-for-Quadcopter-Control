@@ -1,0 +1,9 @@
+# lltc/lltc_hover.py -- standalone LLTC-NMPC vs NMPC study (no JAX, no ROS).
+# Verified: Python 3.11, casadi 3.8.1, torch 2.14.0, numpy 2.4.6, scipy 1.17.1,
+# matplotlib 3.11.2.  For a CPU-only (much smaller) torch, install it first with
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+casadi>=3.6
+torch>=2.2
+numpy
+scipy
+matplotlib

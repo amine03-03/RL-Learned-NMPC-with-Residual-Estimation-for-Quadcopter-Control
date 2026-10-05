@@ -179,7 +179,10 @@ def timing_histogram(rdp_ms, acmpc_ms, loop_ms, out=None, deadline=DEADLINE_MS):
     fig, ax = plt.subplots(figsize=(7.0, 3.4))
     for v, lb, c in ((rdp_ms, "RDP", "C0"), (acmpc_ms, "ACMPC", "C1"),
                      (loop_ms, "complete loop", "C2")):
-        v = np.asarray(v)
+        v = np.asarray(v, float)
+        v = v[np.isfinite(v)]                # e.g. RDP before its window is full
+        if v.size == 0:
+            continue
         ax.hist(v, bins=60, histtype="step", lw=1.4, color=c,
                 label=f"{lb}  p99 {np.percentile(v,99):.2f} ms")
         ax.axvline(np.percentile(v, 99), color=c, ls=":", lw=1)
