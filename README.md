@@ -143,7 +143,7 @@ cd $REPO && source .venv-study/bin/activate
 
 ```bash
 cd $REPO/study
-python -m pytest tests/ -q            # 101 passed, about 10 min on CPU
+python -m pytest tests/ -q            # 120 passed, about 10-15 min on CPU
 python check_consistency.py           # -> "all consistency checks passed"
 ```
 
