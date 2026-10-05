@@ -226,3 +226,64 @@ def test_controller_on_reference_returns_u_ref():
     # iLQR stops after n_iter iterations, so "exactly" means to ~1e-3
     np.testing.assert_allclose(u, ur[0], atol=2e-3)
     np.testing.assert_allclose(info["u_ref"], ur[0], atol=1e-12)
+
+
+# --------------------------------------------------------------------------- #
+# the hand-over entry trajectory
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("level", ["moderate", "hold"])
+def test_entry_reference_joins_the_path_smoothly(level):
+    from acmpc_controller.reference import entry_reference
+    from reference_generator import lissajous as L
+    base = lambda t: L.reference(t, level, 1.2, 0.9, 1.5)
+    p0, v0 = np.array([0.1, -0.2, 2.5]), np.array([0.05, 0.0, -0.1])
+    pva, T = entry_reference(base, p0, v0, T=4.0, a_max=3.0)
+    p, v, a = pva(np.array([0.0]))
+    np.testing.assert_allclose(p[0], p0, atol=1e-12)
+    np.testing.assert_allclose(v[0], v0, atol=1e-12)
+    np.testing.assert_allclose(a[0], 0.0, atol=1e-12)
+    for x_e, x_b in zip(pva(np.array([T - 1e-9])), base(np.zeros(1))):
+        np.testing.assert_allclose(x_e[0], x_b[0], atol=1e-6)     # C2 at the join
+    ts = np.array([T, T + 0.7, T + 3.1])
+    for x_e, x_b in zip(pva(ts), base(ts - T)):
+        np.testing.assert_allclose(x_e, x_b, atol=1e-12)          # then the path
+    acc = pva(np.linspace(0, T, 400))[2]
+    assert np.linalg.norm(acc, axis=1).max() <= 3.0 + 1e-9         # within budget
+
+
+def test_entry_reference_starts_at_the_vehicle_so_the_first_command_is_benign():
+    """The SITL failure: handed straight to the path, NMPC commanded zero
+    collective.  From the entry reference the first command is near hover."""
+    from acmpc_controller.controller import ACMPCController
+    from acmpc_controller.reference import entry_reference
+    from reference_generator import lissajous as L
+    base = lambda t: L.reference(t, "moderate", 1.2, 0.9, 1.5)
+    x10 = np.array([0.0, 0.0, 2.5, 0, 0, 0, 1, 0, 0, 0])
+    c = ACMPCController(mode="nmpc1", horizon=10, n_iter=10, dmod_mode="closed_loop")
+    c.set_reference(base, False)
+    u_step, _ = c.tick(x10, np.zeros(3), 0.0)
+    pva, _ = entry_reference(base, x10[0:3], np.zeros(3))
+    c.set_reference(pva, False)
+    c.last_u = np.array([X.U_HOVER, 0.0, 0.0, 0.0])
+    u_entry, _ = c.tick(x10, np.zeros(3), 0.0)
+    assert u_step[0] < 0.1                         # the failure mode, reproduced
+    assert abs(u_entry[0] - X.U_HOVER) < 0.05      # hover-like collective
+    assert np.all(np.abs(u_entry[1:]) < 0.05)      # no saturated rates
+
+
+def test_delay_compensation_predicts_with_the_study_model():
+    """delay_steps = k propagates the measured state through the k commands in
+    flight with x500_core_jax.step_c, and shifts the reference by k periods."""
+    import jax.numpy as jnp
+    from acmpc_controller.controller import ACMPCController
+    c = ACMPCController(mode="nmpc1", horizon=5, n_iter=5, dmod_mode="closed_loop",
+                        use_d=False, delay_steps=2)
+    x = np.array([0.1, -0.2, 1.4, 0.3, 0.0, -0.1, 0.995, 0.05, -0.03, 0.08])
+    x = np.concatenate([x[:6], x[6:] / np.linalg.norm(x[6:])])
+    u1, u2 = np.array([0.75, 0.02, -0.01, 0.0]), np.array([0.70, -0.03, 0.02, 0.01])
+    c._inflight = [u1, u2]
+    want = X.step_c(X.step_c(jnp.asarray(x)[None], jnp.asarray(u1)[None]),
+                    jnp.asarray(u2)[None])
+    np.testing.assert_allclose(c.predict(x), np.asarray(want)[0], atol=1e-12)
+    c0 = ACMPCController(mode="nmpc1", horizon=5, n_iter=5, dmod_mode="closed_loop")
+    np.testing.assert_array_equal(c0.predict(x), x)                # off by default

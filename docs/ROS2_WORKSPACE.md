@@ -110,9 +110,26 @@ variant C).  Both are asserted equal to the study in `study/tests/test_ros_wirin
 Two earlier node bugs this removed: `u_ref = sqrt(m|a+g|/T_max)` without the idle
 floor (0.769 instead of 0.729 at hover, AUDIT A2) and an all-zero AC-MPC
 observation.  The solves are `jax.jit`-ed once (un-jitted, one N = 10 solve took
-~6 s); a tick costs ~13 ms.  The reference clock starts when PX4 reports
-OFFBOARD; odometry older than 0.5 s stops the setpoint stream so PX4's
+~6 s).  Odometry older than 0.5 s stops the setpoint stream so PX4's
 offboard-loss failsafe takes over.
+
+**Three things only flying it revealed** (PX4 v1.16.2 SITL + Gazebo):
+
+1. *Hand-over.* The study's episodes start on the path. Handed straight to the
+   Lissajous from the take-off hover point (a 1.6 m / 1.8 m/s step), the NMPC
+   commands zero collective with saturated rates, and the vehicle flips in
+   0.7 s. `reference.entry_reference` starts the reference at the measured
+   (p, v) when PX4 reports OFFBOARD. It follows a minimum-jerk quintic that
+   joins the path's (p, v, a), stretched until its peak acceleration fits
+   `entry_a_max`.
+2. *Latency.* The study applies each command at the step it was computed. On
+   the study plant, a single uncompensated 20 ms step of delay makes the N = 10
+   NMPC diverge (error 2.3 m, 77° tilt). `delay_steps` propagates the measured
+   state through the commands in flight with the controller's own `step_c`
+   and solves from there: 9 cm max error at 1 step, 14 cm at 2 steps.
+3. *CPU.* Under SITL load on 4 cores, the N = 10 / 10-iteration solve grows
+   from 13 ms to 23 ms, the 50 Hz loop slips to ~30 ms, and the vehicle flips.
+   The defaults N = 5, 5 iterations, `delay_steps` 2 solve in ~10 ms and fly.
 
 `QuaternionDifferentiator` is the `ω̇` source of last resort: it uses
 `timestamp_sample` and **not** the wall clock, keeps the quaternion hemisphere
@@ -358,23 +375,32 @@ disturbance-off instant, because without that bound a predictor stuck at zero
 
 **Verified in this repository, by running it:**
 
+- **flights in PX4 v1.16.2 SITL + Gazebo (gz-sim 8, x500, headless)**,
+  following the README §5.8 procedure:
+  - live `check_ctbr` checks 1, 2 and 4 pass, with `actuator_motors` at 98 Hz
+    after the `dds_topics.yaml` patch;
+  - the loop holds 50 Hz (20.1 ms period, 10.5 ms solve, 17.3 ms complete loop);
+  - on S0 / moderate Lissajous, the error is 6–19 cm mean (26 cm max) over 27 s;
+  - on S2, applied in Gazebo, the error is 13 cm → 25 cm mean / 46 cm max
+    during the step → 17 cm after;
+  - no failsafe;
 - every module imports and every algorithmic core runs;
 - `check_ctbr` checks 1 and 2, and `check_glue` in full (including the scenario
   rotor constants and the controller's hover `u_ref`);
 - the `B_d` bridge against the study's, to 1e-12;
-- `study/tests/test_ros_wiring.py` (15 tests): the controller's reference and
-  `u_ref` equal `ref_state`; its AC-MPC observation equals `Env.obs()` over 25
-  driven steps; the estimator frame built from `/acmpc/status` equals
-  `_frame26`; PX4 odometry (NED and body-FRD velocity) round-trips to ENU/FLU;
-  S1/S5 wrenches match the C-6 moment and the allocation column; the increment
-  scheme always sums to the target;
-- **all nodes in a real ROS 2 Jazzy graph** (RoboStack, `px4_msgs`
-  release/1.16, `colcon build --symlink-install`) against a PX4 stand-in that
-  speaks PX4's NED/FRD topics: 50 Hz held (median tick 20.1 ms; solve 15.5 ms
-  mean, complete loop 18.2 ms mean, RDP inference 7.6 ms -- 5 processes on 4
-  cores), the estimator ready after exactly 64 frames, the logger writing real
-  state/reference/command/PWM/ground-truth rows, the reference clock starting on
-  OFFBOARD, clean `Ctrl-C` shutdown of every node;
+- `study/tests/test_ros_wiring.py` (19 tests):
+  - the controller's reference and `u_ref` equal `ref_state`;
+  - its AC-MPC observation equals `Env.obs()` over 25 driven steps;
+  - its delay prediction equals `step_c`;
+  - the entry trajectory joins the path C² and fixes the hand-over;
+  - the estimator frame built from `/acmpc/status` equals `_frame26`;
+  - PX4 odometry (NED and body-FRD velocity) round-trips to ENU/FLU;
+  - S1/S5 wrenches match the C-6 moment and the allocation column;
+  - the increment scheme always sums to the target;
+- all nodes in a real ROS 2 Jazzy graph against a PX4 stand-in:
+  - the estimator is ready after exactly 64 frames;
+  - the logger writes real rows;
+  - every node shuts down cleanly on `Ctrl-C`;
 - **the disturbance path in gz-sim 8.10** through `ros_gz_bridge` and
   `ApplyLinkWrench`: step force exact to 0.00 %, sinusoid to −0.7 % (§3);
 - JAX ↔ NumPy parity for all four exported encoders;
@@ -382,9 +408,10 @@ disturbance-off instant, because without that bound a predictor stuck at zero
 
 **Not verified here:**
 
-- RDP *accuracy* in the loop: the committed `.npz` encoders come from a `smoke`
-  training run, and the PX4 stand-in has no motor mixer, so the wiring test says
-  nothing about estimation quality -- retrain at `full` scale and re-export;
+- RDP *accuracy* in the loop. The committed `.npz` encoders come from a `smoke`
+  training run on position hold. In the SITL S2 flight the estimate rose
+  during the step (~1.8 of 2.43 N) but was dominated by an oscillation at the
+  Lissajous period. Retrain at `full` scale and re-export;
 - §9.15's S0 zero-check (`|F_z| < 0.3 N`, `‖τ‖ < 0.05 N·m` in steady hover) and
   the analytic steady-state check within 10 %;
 - the E-A…E-D runs and therefore tables R-T1…R-T5;

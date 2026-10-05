@@ -47,7 +47,7 @@ the ROS 2 / PX4 / Gazebo stack described in [§5](#5-part-3-ros-2--px4--gazebo-s
 │   ├── export_estimator.py        trained RDP -> framework-free .npz (parity-checked)
 │   ├── rdp_infer.py               pure-NumPy RDP forward pass used by the ROS node
 │   ├── check_consistency.py       study <-> workspace constants check
-│   ├── tests/                     pytest suite (116 tests, incl. the ROS-node wiring)
+│   ├── tests/                     pytest suite (120 tests, incl. the ROS-node wiring)
 │   └── notebooks/                 nb1..nb8 as runnable .py (+ generated .ipynb)
 ├── lltc/                        Part 2
 │   ├── lltc_hover.py              LLTC-NMPC vs NMPC on hover, CTBR, CasADi/IPOPT
@@ -441,8 +441,9 @@ hover motor command in `pxh>` with `listener actuator_motors` (the steady
 
 ```bash
 # T5  controller.  Start it first: it JIT-compiles the solve (~10-30 s) and is
-#     ready when it logs "mode=... N=...".  It streams setpoints for t = 0 and
-#     starts the reference clock when PX4 reports OFFBOARD.
+#     ready when it logs "mode=... N=...".  Until OFFBOARD it streams setpoints
+#     that hold the current position; at OFFBOARD it flies a 4 s minimum-jerk
+#     entry from where the vehicle is to the start of the path, then the path.
 source ~/acmpc_env.sh && ros2 run acmpc_controller controller_node --ros-args --params-file config/acmpc.yaml
 
 # T6  residual predictor (pushes one frame per controller tick; ready after 64)
@@ -458,7 +459,9 @@ Controller options (`-p name:=value` or edit `config/acmpc.yaml`):
 |---|---|
 | `mode` | `nmpc1` (default: hand-tuned NMPC, no checkpoint needed), `pid`, `acmpc` (the learned cost map; needs `artifacts/acmpc_adaptive/variants/C.pkl` from Notebook 5 or `artifacts/acmpc/model.pkl` from Notebook 3) |
 | `level` | `gentle`, `moderate`, `aggressive` (Lissajous (9.5)), `hold` (fixed point `(0, 0, z0)`) |
-| `horizon`, `n_iter` | MPC horizon and iLQR iterations (10, 10: ~13 ms per solve) |
+| `horizon`, `n_iter` | MPC horizon and iLQR iterations. Default 5, 5 (~10 ms solve), flight-verified. Raise them only if the logged `loop_ms` stays well under 20 ms: 10/10 took ~23 ms under SITL load on 4 cores, and the vehicle flipped |
+| `delay_steps` | latency compensation in control periods (default 2). The NMPC is tuned with zero delay and **diverges with one uncompensated 20 ms step** |
+| `entry_s`, `entry_a_max` | hand-over transfer duration and acceleration cap (4 s, 3 m/s²) |
 | `use_d`, `dmod_mode` | feed the RDP estimate into the prediction model, and how (§4.4) |
 
 **Hand control to the controller** (in `pxh>`):
@@ -504,32 +507,49 @@ converted at the controller boundary):
 
 ### 5.9 Status of the deployment workspace: read before quoting results
 
-Verified in this repository by running it (details in
-[docs/ROS2_WORKSPACE.md §7](docs/ROS2_WORKSPACE.md)):
+**Flown in PX4 v1.16.2 SITL + Gazebo (gz-sim 8)** by following §5.8 step by
+step. The run was headless on a 4-core machine; PX4 was built against conda-forge
+Gazebo libraries because the OSRF apt repository was unreachable there, but the
+PX4 source, the §5.1 DDS patch, the parameters and the ROS side were exactly as
+written above:
 
-- **Wiring, against the study:** `study/tests/test_ros_wiring.py` (15 tests)
-  proves that the controller's reference, `u_ref` and AC-MPC observation equal
-  the study's `ref_state` and `Env.obs()`; that the estimator's input frame
-  equals the study's `_frame26`; that PX4 odometry converts correctly; and
-  that the S1/S5 wrenches are physically right.
-- **All nodes in a real ROS 2 Jazzy graph** against a PX4 stand-in:
-  - 50 Hz held, with the solve at ~13–16 ms and the full loop at ~18 ms;
-  - the estimator becomes ready after 64 frames;
-  - real data in `states.csv`;
-  - clean shutdown.
-- **Disturbances in Gazebo** (gz-sim 8.10, through `ros_gz_bridge`): a step
-  force is reproduced exactly (0.00 %), and a 0.5 Hz sinusoid to −0.7 %.
+| check | result |
+|---|---|
+| `check_ctbr --moment-scenario` (live) | checks 1, 2, 4 PASS; `actuator_motors` at 98 Hz |
+| control loop | 50 Hz held: tick period 20.1 ms, solve 10.5 ms, complete loop 17.3 ms |
+| hand-over | entry from the hover point, no transient, reference clock starts on OFFBOARD |
+| S0, moderate Lissajous, 27 s | position error mean 6–19 cm (max 26 cm), no failsafe |
+| S2 (2.43 N + 0.14 N·m step in Gazebo) | error 13 cm before, 25 cm mean / 46 cm max during, 17 cm after; no failsafe |
+
+Three problems were found and fixed only by flying it, and you should know them:
+- A direct hand-over to the path made the NMPC command zero thrust, and the
+  vehicle flipped. The fix is the entry trajectory.
+- One uncompensated control period of latency destabilises the NMPC. The fix is
+  `delay_steps` (on the study plant: diverged → 9 cm max error at 1 tick of delay).
+- A solve that overruns 20 ms under load also flips the vehicle. The fix is the
+  lighter defaults.
+
+Also verified ([docs/ROS2_WORKSPACE.md §7](docs/ROS2_WORKSPACE.md)):
+`study/tests/test_ros_wiring.py` (19 tests) pins the nodes to the study. The
+controller's reference, `u_ref`, AC-MPC observation and delay prediction equal
+the study's `ref_state`, `Env.obs()` and `step_c`. The estimator frame equals
+`_frame26`, PX4 odometry converts correctly, and the S1/S5 wrenches are
+physically right. The disturbance path in gz-sim reproduces a step force
+exactly (0.00 %) and a 0.5 Hz sinusoid to −0.7 %.
 
 Limitations you need to know:
 
 - **RDP accuracy depends on the exported model.** The committed `.npz` files come
-  from a `smoke` training run (§3.2), so retrain at `full` scale and re-export
-  (§3.3) before reading anything into the estimate. The estimate reaches the
-  controller one tick (20 ms) after the state it was built from.
+  from a `smoke` training run (§3.2), fitted on position hold. In the SITL S2
+  flight the estimate rose during the force step (to ~1.8 N of 2.43 N), but it
+  was dominated by an oscillation at the Lissajous period. Retrain at `full`
+  scale and re-export (§3.3) before reading anything into it.
 - **S1 is quasi-static.** The payload's gravity and CG moment are applied; its
   inertial force and `inertia_scale` are not realised in Gazebo.
 - `mode: acmpc` needs a trained checkpoint (§3.2, Notebooks 3/5). Without one,
   fly `nmpc1` (the default).
+- Tilt reaches 30–50° on the moderate Lissajous with these weights. Start with
+  `level:=gentle` or `level:=hold` on new hardware.
 
 ### 5.10 Without ROS
 

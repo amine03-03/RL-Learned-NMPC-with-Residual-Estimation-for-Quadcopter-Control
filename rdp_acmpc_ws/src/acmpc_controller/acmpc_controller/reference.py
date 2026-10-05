@@ -122,3 +122,64 @@ class ObsBuilder:
         if oracle is not None:
             o = np.concatenate([o, np.asarray(oracle, float)])
         return o
+
+
+def _quintic(p0, v0, a0, p1, v1, a1, T):
+    """Per-axis quintic with position/velocity/acceleration fixed at 0 and T."""
+    p0, v0, a0, p1, v1, a1 = (np.asarray(z, float) for z in (p0, v0, a0, p1, v1, a1))
+    c0, c1, c2 = p0, v0, a0 / 2.0
+    M = np.array([[T ** 3, T ** 4, T ** 5],
+                  [3 * T ** 2, 4 * T ** 3, 5 * T ** 4],
+                  [6 * T, 12 * T ** 2, 20 * T ** 3]])
+    rhs = np.stack([p1 - (c0 + c1 * T + c2 * T ** 2), v1 - (c1 + 2 * c2 * T), a1 - 2 * c2])
+    c3, c4, c5 = np.linalg.solve(M, rhs)
+    return c0, c1, c2, c3, c4, c5
+
+
+def entry_reference(base_pva, p0, v0, T=4.0, a_max=None, max_doublings=5):
+    """Join the vehicle's state at hand-over to the path, smoothly.
+
+    The study's episodes start on the path, and the NMPC tuned there answers a
+    metre-scale step (hover at the take-off point vs. the path start, which is
+    also moving at up to ~2 m/s) with zero collective and saturated rates --
+    measured in PX4 SITL, the vehicle drops and flips within 0.7 s.  This
+    reference starts at (p0, v0, 0) and follows a minimum-jerk quintic that
+    reaches the path's (p, v, a) at t = T, then flies the path from its start:
+    ``pva(t) = path(t - T)`` for t >= T.  T is doubled until the transfer's peak
+    acceleration fits ``a_max`` (the reference feasibility budget).
+
+    Returns ``(pva, T)``.
+    """
+    z = np.zeros(1)
+    p1, v1, a1 = (np.asarray(x, float)[0] for x in base_pva(z))
+    for _ in range(max_doublings + 1):
+        C = _quintic(p0, v0, np.zeros(3), p1, v1, a1, T)
+        ts = np.linspace(0.0, T, 201)[:, None]
+        acc = 2 * C[2] + 6 * C[3] * ts + 12 * C[4] * ts ** 2 + 20 * C[5] * ts ** 3
+        if a_max is None or np.linalg.norm(acc, axis=1).max() <= a_max:
+            break
+        T *= 2.0
+    c0, c1, c2, c3, c4, c5 = C
+
+    def pva(t):
+        t = np.atleast_1d(np.asarray(t, float))
+        tt = np.clip(t, 0.0, T)[:, None]
+        p = c0 + c1 * tt + c2 * tt ** 2 + c3 * tt ** 3 + c4 * tt ** 4 + c5 * tt ** 5
+        v = c1 + 2 * c2 * tt + 3 * c3 * tt ** 2 + 4 * c4 * tt ** 3 + 5 * c5 * tt ** 4
+        a = 2 * c2 + 6 * c3 * tt + 12 * c4 * tt ** 2 + 20 * c5 * tt ** 3
+        after = t >= T
+        if np.any(after):
+            pb, vb, ab = (np.asarray(x, float) for x in base_pva(t[after] - T))
+            p[after], v[after], a[after] = pb, vb, ab
+        return p, v, a
+    return pva, T
+
+
+def hold_at(p):
+    """Constant reference at p (used before the hand-over)."""
+    p = np.asarray(p, float)
+
+    def pva(t):
+        n = np.size(t)
+        return np.tile(p, (n, 1)), np.zeros((n, 3)), np.zeros((n, 3))
+    return pva

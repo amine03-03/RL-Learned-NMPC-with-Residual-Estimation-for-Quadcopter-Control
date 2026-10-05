@@ -13,10 +13,13 @@ Publishes   /fmu/in/offboard_control_mode  px4_msgs/OffboardControlMode
             /fmu/in/vehicle_rates_setpoint px4_msgs/VehicleRatesSetpoint
             /acmpc/status                  std_msgs/Float64MultiArray (status_msg)
 
-The reference clock starts when PX4 reports OFFBOARD (``start_on_offboard``):
-until then the setpoints PX4 needs before it accepts the switch are computed
-against the reference at t = 0, so the flight starts at the beginning of the
-path rather than wherever a free-running clock happens to be.  PX4 v1.16
+Hand-over.  Until PX4 reports OFFBOARD, the setpoints PX4 needs before it
+accepts the switch hold the vehicle's current position.  At OFFBOARD the
+reference clock starts with an *entry* trajectory (reference.entry_reference):
+a minimum-jerk transfer from the measured position and velocity to the path's
+start state, then the path itself.  Without it the hand-over is a metre-scale
+step that the NMPC (tuned on episodes starting on the path) answers with zero
+collective -- measured in PX4 SITL, the vehicle flipped.  PX4 v1.16
 publishes VehicleStatus (MESSAGE_VERSION 1) as ``vehicle_status_v1``.
 """
 from __future__ import annotations
@@ -30,6 +33,7 @@ import numpy as np
 from . import frames as F
 from . import status_msg
 from .controller import ACMPCController
+from .reference import entry_reference, hold_at
 
 
 def _lissajous():
@@ -81,6 +85,7 @@ def main(args=None):                                       # pragma: no cover
                          ("dmod_mode", "closed_loop"), ("level", "moderate"),
                          ("A", 1.2), ("B", 0.9), ("z0", 1.5),
                          ("odom_timeout_s", 0.5), ("start_on_offboard", True),
+                         ("entry_s", 4.0), ("entry_a_max", 3.0), ("delay_steps", 1),
                          ("status_topic", "/fmu/out/vehicle_status_v1")):
                 self.declare_parameter(k, v)
             g = lambda k: self.get_parameter(k).value
@@ -88,11 +93,13 @@ def main(args=None):                                       # pragma: no cover
                                                  float(g("B")), float(g("z0")))
             self.ctrl = ACMPCController(mode=g("mode"), horizon=int(g("horizon")),
                                         n_iter=int(g("n_iter")), use_d=g("use_d"),
-                                        dmod_mode=g("dmod_mode"))
+                                        dmod_mode=g("dmod_mode"),
+                                        delay_steps=int(g("delay_steps")))
             self._warm_up()
             self.get_logger().info(
                 f"mode={g('mode')} N={g('horizon')} reference={g('level')} "
-                f"(A={g('A')}, B={g('B')}, z0={g('z0')})  oracle_obs={self.ctrl.oracle}")
+                f"(A={g('A')}, B={g('B')}, z0={g('z0')})  oracle_obs={self.ctrl.oracle}  "
+                f"delay_steps={self.ctrl.delay_steps}")
 
             qos_px4 = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                                  durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -123,10 +130,10 @@ def main(args=None):                                       # pragma: no cover
             setpoints are not late enough to trip PX4's offboard-loss timeout."""
             p0 = np.asarray(self.pva(np.zeros(1))[0])[0]
             x10 = np.concatenate([p0, np.zeros(3), [1.0, 0, 0, 0]])
-            self.ctrl.set_reference(self.pva, self.hold)
+            self.ctrl.set_reference(self.pva, False)
             for _ in range(2):
                 self.ctrl.tick(x10, np.zeros(3), 0.0)
-            self.ctrl.set_reference(self.pva, self.hold)      # reset the running state
+            self.ctrl.set_reference(self.pva, False)          # reset the running state
             self.ctrl.last_u = np.array([self.ctrl.X.U_HOVER, 0.0, 0.0, 0.0])
 
         def on_odom(self, m):
@@ -161,15 +168,21 @@ def main(args=None):                                       # pragma: no cover
                 self.get_logger().error("odometry stale -- not publishing setpoints",
                                         throttle_duration_sec=1.0)
                 return
+            p, v, q, om = self.odom
+            g = lambda k: self.get_parameter(k).value
             if self.t0 is None and (self.offboard or not self.start_on_offboard):
+                pva, T = entry_reference(self.pva, p, v, float(g("entry_s")),
+                                         float(g("entry_a_max")))
+                self.ctrl.set_reference(pva, False)
                 self.t0 = now_us
-                self.get_logger().info("reference clock started")
+                self.get_logger().info(f"reference clock started: {T:.1f} s entry "
+                                       f"from ({p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f}) m, "
+                                       f"then the path")
             if self.t0 is None:
-                self.get_logger().info("streaming setpoints for t = 0; waiting for "
-                                       "PX4 OFFBOARD to start the reference",
+                self.ctrl.set_reference(hold_at(p), False)     # benign until OFFBOARD
+                self.get_logger().info("holding position; waiting for PX4 OFFBOARD",
                                        throttle_duration_sec=10.0)
             t = 0.0 if self.t0 is None else (now_us - self.t0) * 1e-6
-            p, v, q, om = self.odom
             x10 = np.concatenate([p, v, q])
             u, info = self.ctrl.tick(x10, om, t, d_hat=self.d_hat)
 

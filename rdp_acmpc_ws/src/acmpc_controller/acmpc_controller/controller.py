@@ -33,7 +33,7 @@ class ACMPCController:
     """
 
     def __init__(self, mode="acmpc", horizon=10, n_iter=10, ckpt=None,
-                 dmod_mode="first_order", use_d=True):
+                 dmod_mode="first_order", use_d=True, delay_steps=0):
         import jax.numpy as jnp
         import x500_core_jax as X
         self.X, self.jnp = X, jnp
@@ -61,6 +61,16 @@ class ACMPCController:
         elif mode != "nmpc1":
             raise ValueError(f"unknown mode {mode!r}")
         self.oracle = getattr(self, "oracle", False)
+        # Delay compensation.  The study applies each command at the step it was
+        # computed; a real loop (odometry transport, the solve, DDS, PX4) applies
+        # it about one control period later, and the NMPC tuned without delay
+        # diverges on the study plant with a single 20 ms step of it.  The state
+        # is therefore propagated through the in-flight commands with the
+        # controller's own model (step_c) and the problem solved from there.
+        self.delay_steps = int(delay_steps)
+        self._inflight = [np.array([X.U_HOVER, 0.0, 0.0, 0.0])] * self.delay_steps
+        import jax as _jax
+        self._step_c = _jax.jit(lambda x, u, d: X.step_c(x, u, d))
         # jit each solve ONCE (as make_nmpc_ctrl does in the study): traced
         # per call, one N=10 iLQR solve costs ~6 s instead of ~15 ms
         import jax
@@ -85,6 +95,20 @@ class ACMPCController:
         self.u_ref_prev = np.array([self.X.U_HOVER, 0.0, 0.0, 0.0])
         self.n_tick = 0
 
+    def predict(self, x10, d_hat=None):
+        """State after the ``delay_steps`` commands already in flight."""
+        if not self.delay_steps:
+            return np.asarray(x10, float)
+        X, jnp = self.X, self.jnp
+        d = None
+        if self.use_d:
+            d_hat = np.zeros(6) if d_hat is None else np.asarray(d_hat, float)
+            d = jnp.asarray(bd_bridge.wrench_to_dmod(d_hat, self.dmod_mode))[None]
+        x = jnp.asarray(x10)[None]
+        for u in self._inflight:
+            x = self._step_c(x, jnp.asarray(u)[None], d)
+        return np.asarray(x)[0]
+
     def tick(self, x10, om, t, d_hat=None):
         """One control period, everything built with the study's functions.
 
@@ -97,6 +121,8 @@ class ACMPCController:
         if self.ref is None:
             raise RuntimeError("call set_reference() before tick()")
         pva, hold = self.ref
+        x_meas = np.asarray(x10, float)
+        x10, t = self.predict(x_meas, d_hat), t + self.delay_steps * X.P.dt_c
         ts = t + np.arange(self.N + 1) * X.P.dt_c
         xr, ur = ref_sequence(pva, ts, hold)
         e = np.asarray(X.err(jnp.asarray(x10)[None], jnp.asarray(xr[0])[None]))[0]
@@ -113,6 +139,8 @@ class ACMPCController:
         u, info = self.step(x10, xr, ur[:self.N], obs=obs, d_hat=d_hat)
         u = np.clip(u, X.U_LO, X.U_HI)
         self.last_u = u
+        if self.delay_steps:
+            self._inflight = self._inflight[1:] + [u.copy()]
         self.u_ref_prev = ur[0]
         info.update(x_ref=xr[0], u_ref=ur[0], u_prev=u_prev, obs=obs)
         return u, info
